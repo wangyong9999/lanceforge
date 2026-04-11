@@ -1,0 +1,122 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+[workspace]
+exclude = ["dev/msrvcheck", "python"]
+members = [
+    "ballista-cli",
+    "ballista/client",
+    "ballista/core",
+    "ballista/executor",
+    "ballista/scheduler",
+    "benchmarks",
+    "examples",
+    "lance-integration",
+    "crates/proto",
+    "crates/common",
+    "crates/coordinator",
+    "crates/worker",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+# we should try to follow datafusion version 
+rust-version = "1.88.0"
+
+[workspace.dependencies]
+arrow = { version = "57", features = ["ipc_compression"] }
+arrow-flight = { version = "57", features = ["flight-sql-experimental"] }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+datafusion = "52"
+datafusion-cli = "52"
+datafusion-proto = "52"
+datafusion-proto-common = "52"
+datafusion-spark = "52"
+datafusion-substrait = "52"
+insta = "1.46"
+object_store = "0.12"
+prost = "0.14"
+prost-types = "0.14"
+rstest = { version = "0.26" }
+tonic = { version = "0.14" }
+tonic-build = { version = "0.14", default-features = false, features = [
+    "transport",
+] }
+tonic-prost = { version = "0.14" }
+tonic-prost-build = { version = "0.14" }
+tracing = "0.1"
+tracing-appender = "0.2.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ctor = { version = "0.6" }
+mimalloc = { version = "0.1" }
+
+tokio = { version = "1" }
+uuid = { version = "1.21", features = ["v4", "v7"] }
+rand = { version = "0.9" }
+env_logger = { version = "0.11" }
+futures = { version = "0.3" }
+log = { version = "0.4" }
+parking_lot = { version = "0.12" }
+tempfile = { version = "3.26" }
+dashmap = { version = "6.1" }
+async-trait = { version = "0.1" }
+serde = { version = "1.0" }
+tokio-stream = { version = "0.1" }
+url = { version = "2.5" }
+
+# Lance integration
+lance = { version = "0.37", default-features = false }
+lance-datafusion = { version = "0.37", default-features = false }
+lance-index = { version = "0.37", default-features = false }
+lance-io = { version = "0.37", default-features = false }
+lance-table = { version = "0.37", default-features = false }
+lancedb = { version = "0.37", default-features = false }
+
+# cargo build --profile release-lto
+[profile.release-lto]
+codegen-units = 1
+inherits = "release"
+lto = true
+
+# the release profile takes a long time to build so we can use this profile during development to save time
+# cargo build --profile release-nonlto
+[profile.release-nonlto]
+codegen-units = 16
+debug = false
+debug-assertions = false
+incremental = false
+inherits = "release"
+lto = false
+opt-level = 3
+overflow-checks = false
+panic = 'unwind'
+rpath = false
+
+[profile.ci]
+inherits = "dev"
+incremental = false
+debug = false
+debug-assertions = false
+strip = "debuginfo"
+
+# ci turns off debug info, etc. for dependencies to allow for smaller binaries making caching more effective
+[profile.ci.package."*"]
+debug = false
+debug-assertions = false
+strip = "debuginfo"
+incremental = false

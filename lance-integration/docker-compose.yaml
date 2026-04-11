@@ -1,0 +1,79 @@
+# Lance-Ballista local cluster: 1 Coordinator + 3 Workers
+version: "3.8"
+
+services:
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: lance-integration/Dockerfile
+    command: lance-coordinator /data/cluster_config.yaml 50050
+    ports:
+      - "50050:50050"
+      - "50051:50051"  # health probe
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      worker-0:
+        condition: service_healthy
+      worker-1:
+        condition: service_healthy
+      worker-2:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:50051/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  worker-0:
+    build:
+      context: ../..
+      dockerfile: lance-integration/Dockerfile
+    command: lance-worker /data/cluster_config.yaml worker_0 50100
+    ports:
+      - "50100:50100"
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:50101/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  worker-1:
+    build:
+      context: ../..
+      dockerfile: lance-integration/Dockerfile
+    command: lance-worker /data/cluster_config.yaml worker_1 50101
+    ports:
+      - "50101:50101"
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:50102/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+  worker-2:
+    build:
+      context: ../..
+      dockerfile: lance-integration/Dockerfile
+    command: lance-worker /data/cluster_config.yaml worker_2 50102
+    ports:
+      - "50102:50102"
+    volumes:
+      - ./data:/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:50103/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3

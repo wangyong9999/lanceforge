@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [lance-main]
+  pull_request:
+    branches: [lance-main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2  # Limit parallelism to avoid OOM
+
+jobs:
+  crate-unit-tests:
+    name: Crate Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check (zero warnings)
+        run: |
+          cargo check -p lance-distributed-proto \
+                       -p lance-distributed-common \
+                       -p lance-distributed-coordinator \
+                       -p lance-distributed-worker 2>&1 | tee /tmp/check.log
+          ! grep "^warning:" /tmp/check.log
+
+      - name: Unit tests — proto
+        run: cargo test -p lance-distributed-proto --lib
+
+      - name: Unit tests — common
+        run: cargo test -p lance-distributed-common --lib
+
+      - name: Unit tests — coordinator
+        run: cargo test -p lance-distributed-coordinator --lib
+
+      - name: Unit tests — worker
+        run: cargo test -p lance-distributed-worker --lib
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: crate-unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Integration tests (serial to avoid port conflicts)
+        run: |
+          for t in test_distributed_ann test_edge_cases test_data_freshness \
+                   test_text_query test_multi_table test_grpc_distributed \
+                   test_shard_routing test_benchmark test_durability test_ha; do
+            echo "=== $t ==="
+            cargo test -p lanceforge --test $t -- --test-threads=1
+          done
+
+  python-tests:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python deps
+        run: |
+          pip install pytest lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
+
+      - name: Generate proto stubs
+        run: |
+          cd lance-integration/tools
+          python -m grpc_tools.protoc -I../../crates/proto/proto \
+            --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
+
+      - name: Run tests
+        run: |
+          cd lance-integration/tools
+          python -m pytest test_client.py test_shard_splitter.py -v
+
+  minio-e2e:
+    name: MinIO Full-Stack E2E
+    runs-on: ubuntu-latest
+    needs: [crate-unit-tests, integration-tests]
+    if: github.event_name == 'push'  # Only on push, not PR
+    services:
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: lanceadmin
+          MINIO_ROOT_PASSWORD: lanceadmin123
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker
+
+      - name: Install Python deps
+        run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
+
+      - name: Generate proto stubs
+        run: |
+          cd lance-integration/tools
+          python -m grpc_tools.protoc -I../../crates/proto/proto \
+            --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
+
+      - name: Create MinIO bucket + mc
+        run: |
+          curl -sL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          /tmp/mc alias set local http://127.0.0.1:9000 lanceadmin lanceadmin123
+          /tmp/mc mb local/lance-fulltest
+
+      - name: Run full system E2E
+        run: |
+          cd lance-integration/tools
+          PYTHONPATH=. python e2e_full_system_test.py

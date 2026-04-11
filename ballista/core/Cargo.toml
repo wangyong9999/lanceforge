@@ -1,0 +1,80 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+[package]
+name = "ballista-core"
+description = "Ballista Distributed Compute"
+license = "Apache-2.0"
+version = "52.0.0"
+homepage = "https://datafusion.apache.org/ballista/"
+repository = "https://github.com/apache/datafusion-ballista"
+readme = "README.md"
+authors = ["Apache DataFusion <dev@datafusion.apache.org>"]
+edition = { workspace = true }
+rust-version = { workspace = true }
+build = "build.rs"
+
+# Exclude proto files so crates.io consumers don't need protoc
+exclude = ["*.proto"]
+
+[package.metadata.docs.rs]
+rustc-args = ["--cfg", "docsrs"]
+
+[features]
+arrow-ipc-optimizations = []
+build-binary = ["aws-config", "aws-credential-types", "clap", "object_store"]
+default = ["arrow-ipc-optimizations"]
+docsrs = []
+# Used for testing ONLY: causes all values to hash to the same value (test for collisions)
+force_hash_collisions = ["datafusion/force_hash_collisions"]
+spark-compat = ["dep:datafusion-spark"]
+
+[dependencies]
+arrow-flight = { workspace = true }
+async-trait = { workspace = true }
+aws-config = { version = "1.8.13", optional = true }
+aws-credential-types = { version = "1.2.0", optional = true }
+chrono = { version = "0.4", default-features = false }
+clap = { workspace = true, optional = true }
+datafusion = { workspace = true }
+datafusion-proto = { workspace = true }
+datafusion-proto-common = { workspace = true }
+datafusion-spark = { workspace = true, optional = true }
+futures = { workspace = true }
+itertools = "0.14"
+log = { workspace = true }
+md-5 = { version = "^0.10.0" }
+object_store = { workspace = true, features = ["aws", "http"], optional = true }
+parking_lot = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[build-dependencies]
+rustc_version = "0.4.1"
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }

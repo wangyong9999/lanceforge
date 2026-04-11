@@ -1,0 +1,121 @@
+// Licensed under the Apache License, Version 2.0.
+// Lance distributed retrieval gRPC service definition.
+
+syntax = "proto3";
+package lance.distributed;
+
+// Service running on the Scheduler for clients to submit Lance queries.
+service LanceSchedulerService {
+  rpc AnnSearch (AnnSearchRequest) returns (SearchResponse) {}
+  rpc FtsSearch (FtsSearchRequest) returns (SearchResponse) {}
+  rpc HybridSearch (HybridSearchRequest) returns (SearchResponse) {}
+  // Cluster status (for monitoring/debugging)
+  rpc GetClusterStatus (ClusterStatusRequest) returns (ClusterStatusResponse) {}
+}
+
+// Service running on each Executor for receiving queries from Scheduler.
+service LanceExecutorService {
+  rpc ExecuteLocalSearch (LocalSearchRequest) returns (LocalSearchResponse) {}
+  // Health check (Scheduler periodically pings Executors)
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
+}
+
+// ============ Health / Status ============
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  uint32 loaded_shards = 2;
+  uint64 total_rows = 3;
+}
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+  repeated ExecutorStatus executors = 1;
+  uint32 total_shards = 2;
+  uint64 total_rows = 3;
+}
+
+message ExecutorStatus {
+  string executor_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  bool healthy = 4;
+  uint32 loaded_shards = 5;
+  int64 last_health_check_ms = 6;  // unix timestamp ms
+}
+
+// ============ Client → Scheduler ============
+
+message AnnSearchRequest {
+  string table_name = 1;
+  string vector_column = 2;
+  bytes query_vector = 3;      // f32 little-endian bytes (required if query_text empty)
+  uint32 dimension = 4;
+  uint32 k = 5;
+  uint32 nprobes = 6;
+  optional string filter = 7;
+  repeated string columns = 8;
+  int32 metric_type = 9;       // 0=L2, 1=Cosine, 2=Dot
+  optional string query_text = 10;  // If set, auto-embed to vector (requires embedding model config)
+}
+
+message FtsSearchRequest {
+  string table_name = 1;
+  string text_column = 2;
+  string query_text = 3;
+  uint32 k = 4;
+  optional string filter = 5;
+  repeated string columns = 6;
+}
+
+message HybridSearchRequest {
+  string table_name = 1;
+  // Vector part
+  string vector_column = 2;
+  bytes query_vector = 3;
+  uint32 dimension = 4;
+  uint32 nprobes = 5;
+  // Text part
+  string text_column = 6;
+  string query_text = 7;
+  // Common
+  uint32 k = 8;
+  optional string filter = 9;
+  repeated string columns = 10;
+  int32 metric_type = 11;
+}
+
+message SearchResponse {
+  bytes arrow_ipc_data = 1;    // Arrow IPC StreamWriter bytes
+  uint32 num_rows = 2;
+  string error = 3;            // empty if success
+}
+
+// ============ Scheduler → Executor ============
+
+message LocalSearchRequest {
+  int32 query_type = 1;        // 0=ANN, 1=FTS, 2=Hybrid
+  string table_name = 2;
+  // Vector params
+  optional string vector_column = 3;
+  optional bytes query_vector = 4;
+  optional uint32 dimension = 5;
+  optional uint32 nprobes = 6;
+  optional int32 metric_type = 7;
+  // FTS params
+  optional string text_column = 8;
+  optional string query_text = 9;
+  // Common
+  uint32 k = 10;
+  optional string filter = 11;
+  repeated string columns = 12;
+}
+
+message LocalSearchResponse {
+  bytes arrow_ipc_data = 1;
+  uint32 num_rows = 2;
+  string error = 3;
+}

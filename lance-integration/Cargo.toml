@@ -1,0 +1,45 @@
+[package]
+name = "lanceforge"
+description = "LanceForge - distributed multimodal retrieval engine for Lance tables"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+# Binaries are in crates/coordinator and crates/worker
+[dependencies]
+# Lance Distributed crates
+lance-distributed-proto = { path = "../crates/proto" }
+lance-distributed-common = { path = "../crates/common" }
+lance-distributed-coordinator = { path = "../crates/coordinator" }
+lance-distributed-worker = { path = "../crates/worker" }
+
+# Ballista (for future SQL path)
+ballista-core = { path = "../ballista/core" }
+
+# DataFusion + Arrow (for legacy tests that use these directly)
+datafusion = { workspace = true }
+arrow = { workspace = true }
+
+# Lance (for legacy tests that create datasets directly)
+lance = { version = "4.0.0", default-features = false, features = ["aws"] }
+lance-index = { version = "4.0.0", default-features = false }
+lancedb = { version = "0.27", default-features = false, features = ["aws"] }
+
+# Needed by legacy scheduler.rs and integration tests
+tokio = { workspace = true, features = ["full"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+arrow = { workspace = true, features = ["test_utils"] }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
