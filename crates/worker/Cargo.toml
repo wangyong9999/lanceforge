@@ -1,0 +1,31 @@
+[package]
+name = "lance-distributed-worker"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "lance-worker"
+path = "src/bin/main.rs"
+
+[dependencies]
+lance-distributed-proto = { path = "../proto" }
+lance-distributed-common = { path = "../common" }
+
+# Lance + LanceDB
+lance = { version = "4.0.0", default-features = false, features = ["aws"] }
+lance-index = { version = "4.0.0", default-features = false }
+lancedb = { version = "0.27", default-features = false, features = ["aws"] }
+
+# DataFusion + Arrow
+datafusion = { workspace = true }
+arrow = { workspace = true }
+
+# Async + gRPC
+tokio = { workspace = true, features = ["full"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

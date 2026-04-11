@@ -1,0 +1,237 @@
+// Licensed under the Apache License, Version 2.0.
+// Coordinator gRPC service: receives client queries, delegates to scatter_gather.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use log::info;
+use tonic::{Request, Response, Status};
+
+use lance_distributed_common::config::ClusterConfig;
+use lance_distributed_proto::generated::lance_distributed as pb;
+use pb::{
+    lance_scheduler_service_server::LanceSchedulerService,
+    AnnSearchRequest, FtsSearchRequest, HybridSearchRequest, SearchResponse,
+};
+use lance_distributed_common::shard_state::{ShardState, StaticShardState, reconciliation_loop};
+use lance_distributed_common::shard_pruning::ShardPruner;
+use lance_distributed_proto::descriptor::LanceQueryType;
+
+use super::connection_pool::ConnectionPool;
+
+/// Coordinator gRPC service — query entry point.
+pub struct CoordinatorService {
+    pool: Arc<ConnectionPool>,
+    shard_state: Arc<dyn ShardState>,
+    pruner: Arc<ShardPruner>,
+    oversample_factor: u32,
+    query_timeout: Duration,
+    embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
+}
+
+impl CoordinatorService {
+    pub fn new(config: &ClusterConfig, query_timeout: Duration) -> Self {
+        Self::with_pruner(config, query_timeout, ShardPruner::empty())
+    }
+
+    pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
+        let shard_state: Arc<dyn ShardState> = Arc::new(StaticShardState::from_config(config));
+
+        let mut endpoints = std::collections::HashMap::new();
+        for e in &config.executors {
+            endpoints.insert(e.id.clone(), (e.host.clone(), e.port));
+        }
+
+        let pool = Arc::new(ConnectionPool::new(endpoints, query_timeout));
+
+        info!("CoordinatorService: {} executors", config.executors.len());
+
+        // Start connection pool with ShardState integration
+        pool.start_background(Some(shard_state.clone()));
+
+        // Start reconciliation loop
+        let recon_state = shard_state.clone();
+        tokio::spawn(async move {
+            reconciliation_loop(recon_state, Duration::from_secs(5)).await;
+        });
+
+        Self {
+            pool,
+            shard_state,
+            pruner: Arc::new(pruner),
+            oversample_factor: 2,
+            query_timeout,
+            embedding_config: config.embedding.clone(),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl LanceSchedulerService for CoordinatorService {
+    async fn ann_search(
+        &self,
+        request: Request<AnnSearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
+        let req = request.into_inner();
+        let k = req.k;
+        let oversample_k = k * self.oversample_factor;
+
+        // Resolve query vector: provided vector or embed text
+        let query_vector = if !req.query_vector.is_empty() {
+            req.query_vector
+        } else if let Some(ref text) = req.query_text {
+            let config = self.embedding_config.as_ref().ok_or_else(|| {
+                Status::failed_precondition("Text query requires embedding config".to_string())
+            })?;
+            let vec = crate::embedding::embed_query(text, config).await
+                .map_err(|e| Status::internal(format!("Embedding failed: {e}")))?;
+            vec.iter().flat_map(|f| f.to_le_bytes()).collect()
+        } else {
+            return Err(Status::invalid_argument("Either query_vector or query_text required".to_string()));
+        };
+
+        let dimension = if req.dimension > 0 { req.dimension } else { (query_vector.len() / 4) as u32 };
+
+        let local_req = pb::LocalSearchRequest {
+            query_type: LanceQueryType::Ann as i32,
+            table_name: req.table_name.clone(),
+            vector_column: Some(req.vector_column),
+            query_vector: Some(query_vector),
+            dimension: Some(dimension),
+            nprobes: Some(req.nprobes),
+            metric_type: Some(req.metric_type),
+            text_column: None, query_text: None,
+            k: oversample_k, filter: req.filter, columns: req.columns,
+        };
+
+        let response = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, k, true, self.query_timeout,
+        ).await?;
+        Ok(Response::new(response))
+    }
+
+    async fn fts_search(
+        &self,
+        request: Request<FtsSearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
+        let req = request.into_inner();
+        let k = req.k;
+        let oversample_k = k * self.oversample_factor;
+
+        let local_req = pb::LocalSearchRequest {
+            query_type: LanceQueryType::Fts as i32,
+            table_name: req.table_name.clone(),
+            vector_column: None, query_vector: None, dimension: None,
+            nprobes: None, metric_type: None,
+            text_column: Some(req.text_column), query_text: Some(req.query_text),
+            k: oversample_k, filter: req.filter, columns: req.columns,
+        };
+
+        let response = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, k, false, self.query_timeout,
+        ).await?;
+        Ok(Response::new(response))
+    }
+
+    async fn hybrid_search(
+        &self,
+        request: Request<HybridSearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
+        let req = request.into_inner();
+        let k = req.k;
+        let oversample_k = k * self.oversample_factor;
+
+        let local_req = pb::LocalSearchRequest {
+            query_type: LanceQueryType::Hybrid as i32,
+            table_name: req.table_name.clone(),
+            vector_column: Some(req.vector_column),
+            query_vector: Some(req.query_vector),
+            dimension: Some(req.dimension),
+            nprobes: Some(req.nprobes),
+            metric_type: Some(req.metric_type),
+            text_column: Some(req.text_column),
+            query_text: Some(req.query_text),
+            k: oversample_k, filter: req.filter, columns: req.columns,
+        };
+
+        let response = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, k, false, self.query_timeout,
+        ).await?;
+        Ok(Response::new(response))
+    }
+
+    async fn get_cluster_status(
+        &self,
+        _request: Request<pb::ClusterStatusRequest>,
+    ) -> Result<Response<pb::ClusterStatusResponse>, Status> {
+        let statuses = self.pool.worker_statuses().await;
+        let executors: Vec<pb::ExecutorStatus> = statuses.iter().map(|(id, healthy, last_check)| {
+            pb::ExecutorStatus {
+                executor_id: id.clone(),
+                host: String::new(), port: 0, // TODO: store in pool
+                healthy: *healthy,
+                loaded_shards: 0,
+                last_health_check_ms: last_check.elapsed().as_millis() as i64,
+            }
+        }).collect();
+
+        Ok(Response::new(pb::ClusterStatusResponse {
+            executors,
+            total_shards: 0,
+            total_rows: 0,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lance_distributed_common::config::{ClusterConfig, TableConfig, ShardConfig, ExecutorConfig, EmbeddingConfig};
+
+    fn make_config() -> ClusterConfig {
+        ClusterConfig {
+            tables: vec![TableConfig {
+                name: "products".to_string(),
+                shards: vec![ShardConfig {
+                    name: "shard_0".to_string(),
+                    uri: "/tmp/test.lance".to_string(),
+                    executors: vec!["w0".to_string()],
+                }],
+            }],
+            executors: vec![ExecutorConfig {
+                id: "w0".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 59999,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_service_creation() {
+        let config = make_config();
+        let _svc = CoordinatorService::new(&config, Duration::from_secs(5));
+        // Service creation should not panic even if workers are unreachable
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_with_embedding_config() {
+        let mut config = make_config();
+        config.embedding = Some(EmbeddingConfig {
+            provider: "mock".to_string(),
+            model: "test".to_string(),
+            api_key: None,
+            dimension: Some(64),
+        });
+        let _svc = CoordinatorService::new(&config, Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_empty_executors() {
+        let config = ClusterConfig::default();
+        let _svc = CoordinatorService::new(&config, Duration::from_secs(5));
+    }
+}

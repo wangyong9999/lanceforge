@@ -1,0 +1,14 @@
+[package]
+name = "lance-distributed-common"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+lance-distributed-proto = { path = "../proto" }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = "0.9"
+log = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait = { workspace = true }
+arrow = { workspace = true }

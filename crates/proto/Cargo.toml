@@ -1,0 +1,14 @@
+[package]
+name = "lance-distributed-proto"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Proto definitions for Lance distributed retrieval"
+
+[dependencies]
+prost = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

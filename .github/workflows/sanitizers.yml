@@ -1,0 +1,86 @@
+name: Sanitizers
+
+on:
+  push:
+    branches: [lance-main]
+  pull_request:
+    branches: [lance-main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly (required for sanitizers)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-asan-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-asan-
+
+      - name: Unit tests with ASan
+        env:
+          RUSTFLAGS: "-Z sanitizer=address"
+          RUSTDOCFLAGS: "-Z sanitizer=address"
+        run: |
+          cargo +nightly test -p lance-distributed-common --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
+          cargo +nightly test -p lance-distributed-coordinator --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
+          cargo +nightly test -p lance-distributed-worker --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tsan-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-tsan-
+
+      - name: Unit tests with TSan (concurrent code paths)
+        env:
+          RUSTFLAGS: "-Z sanitizer=thread"
+          RUSTDOCFLAGS: "-Z sanitizer=thread"
+          # TSan requires single-threaded test runner
+          RUST_TEST_THREADS: "1"
+        run: |
+          cargo +nightly test -p lance-distributed-common --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
+          cargo +nightly test -p lance-distributed-coordinator --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
+          cargo +nightly test -p lance-distributed-worker --lib \
+            --target x86_64-unknown-linux-gnu \
+            -Z build-std
