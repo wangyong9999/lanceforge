@@ -328,12 +328,56 @@ async fn execute_on_dataset(
             apply_fts_query(&mut scanner, fts)?;
         }
         LanceQueryType::Hybrid => {
+            // Lance Scanner does not support simultaneous ANN + FTS.
+            // Execute as two separate queries, concat results for coordinator-side RRF.
             let vq = descriptor.vector_query.as_ref().ok_or_else(||
                 DataFusionError::Plan("Hybrid query missing vector_query params".to_string()))?;
-            apply_vector_query(&mut scanner, vq, descriptor.k)?;
             let fts = descriptor.fts_query.as_ref().ok_or_else(||
                 DataFusionError::Plan("Hybrid query missing fts_query params".to_string()))?;
-            apply_fts_query(&mut scanner, fts)?;
+
+            // ANN leg
+            let mut ann_scanner = dataset.scan();
+            if let Some(filter) = &descriptor.filter {
+                ann_scanner.filter(filter)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            }
+            apply_vector_query(&mut ann_scanner, vq, descriptor.k)?;
+            ann_scanner.limit(Some(descriptor.k as i64), None)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+            // FTS leg
+            let mut fts_scanner = dataset.scan();
+            if let Some(filter) = &descriptor.filter {
+                fts_scanner.filter(filter)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            }
+            apply_fts_query(&mut fts_scanner, fts)?;
+            fts_scanner.limit(Some(descriptor.k as i64), None)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+            let session = datafusion::prelude::SessionContext::default();
+            let task_ctx = session.task_ctx();
+
+            let ann_plan = ann_scanner.create_plan().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let ann_batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(
+                datafusion::physical_plan::execute_stream(ann_plan, task_ctx.clone())?).await?;
+
+            let fts_plan = fts_scanner.create_plan().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let fts_batches: Vec<RecordBatch> = datafusion::physical_plan::common::collect(
+                datafusion::physical_plan::execute_stream(fts_plan, task_ctx)?).await?;
+
+            // Concat ANN + FTS results (coordinator does RRF fusion)
+            let mut all_batches = Vec::new();
+            all_batches.extend(ann_batches);
+            all_batches.extend(fts_batches);
+
+            if all_batches.is_empty() {
+                return Ok(RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())));
+            }
+            return arrow::compute::concat_batches(&all_batches[0].schema(), &all_batches)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
         }
     }
 
