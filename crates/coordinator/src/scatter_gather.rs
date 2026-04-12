@@ -68,6 +68,27 @@ pub async fn scatter_gather(
     merge_by_distance: bool,
     query_timeout: Duration,
 ) -> Result<pb::SearchResponse, tonic::Status> {
+    // Enforce global timeout on entire scatter-gather (routing + dispatch + merge)
+    match tokio::time::timeout(query_timeout, scatter_gather_inner(
+        pool, shard_state, pruner, table_name, local_req, k, merge_by_distance, query_timeout,
+    )).await {
+        Ok(result) => result,
+        Err(_) => Err(tonic::Status::deadline_exceeded(
+            format!("scatter_gather timed out after {}s", query_timeout.as_secs())
+        )),
+    }
+}
+
+async fn scatter_gather_inner(
+    pool: &Arc<ConnectionPool>,
+    shard_state: &Arc<dyn ShardState>,
+    pruner: &Arc<ShardPruner>,
+    table_name: &str,
+    local_req: pb::LocalSearchRequest,
+    k: u32,
+    merge_by_distance: bool,
+    query_timeout: Duration,
+) -> Result<pb::SearchResponse, tonic::Status> {
     let filter = local_req.filter.as_deref();
 
     // Get shard routing with pruning

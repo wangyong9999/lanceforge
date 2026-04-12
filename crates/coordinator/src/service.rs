@@ -73,8 +73,12 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<AnnSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
-        let k = req.k;
+        let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
+
+        if req.table_name.is_empty() || req.table_name.len() > 256 {
+            return Err(Status::invalid_argument("table_name must be 1-256 characters"));
+        }
 
         // Resolve query vector: provided vector or embed text
         let query_vector = if !req.query_vector.is_empty() {
@@ -116,7 +120,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<FtsSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
-        let k = req.k;
+        let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
 
         let local_req = pb::LocalSearchRequest {
@@ -140,7 +144,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<HybridSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
-        let k = req.k;
+        let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
 
         let local_req = pb::LocalSearchRequest {
@@ -185,6 +189,21 @@ impl LanceSchedulerService for CoordinatorService {
             total_rows: 0,
         }))
     }
+}
+
+const MAX_K: u32 = 100_000;
+
+fn validate_k(k: u32, oversample_factor: u32) -> std::result::Result<u32, Status> {
+    if k == 0 {
+        return Err(Status::invalid_argument("k must be > 0"));
+    }
+    if k > MAX_K {
+        return Err(Status::invalid_argument(format!("k={k} exceeds maximum {MAX_K}")));
+    }
+    k.checked_mul(oversample_factor).ok_or_else(|| {
+        Status::invalid_argument(format!("k={k} * oversample={oversample_factor} overflows u32"))
+    })?;
+    Ok(k)
 }
 
 #[cfg(test)]

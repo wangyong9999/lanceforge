@@ -313,6 +313,12 @@ fn validate_descriptor(descriptor: &LanceQueryDescriptor) -> Result<()> {
 }
 
 fn decode_vector(vq: &VectorQueryParams) -> Result<Vec<f32>> {
+    if vq.vector_data.len() % 4 != 0 {
+        return Err(DataFusionError::Plan(format!(
+            "Invalid vector_data length {}: must be divisible by 4 (f32 alignment)",
+            vq.vector_data.len()
+        )));
+    }
     let vector: Vec<f32> = vq.vector_data
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
@@ -434,6 +440,20 @@ mod tests {
         desc.vector_query = Some(make_vector_query());
         desc.fts_query = Some(make_fts_query());
         assert!(validate_descriptor(&desc).is_ok());
+    }
+
+    #[test]
+    fn test_decode_vector_misaligned() {
+        let vq = VectorQueryParams {
+            column: "v".to_string(),
+            vector_data: vec![0u8; 5], // not divisible by 4
+            dimension: 0,
+            nprobes: 0,
+            metric_type: 0,
+            oversample_factor: 0,
+        };
+        let err = decode_vector(&vq).unwrap_err();
+        assert!(err.to_string().contains("divisible by 4"));
     }
 
     #[test]
