@@ -4204,6 +4204,7 @@ dependencies = [
  "arrow",
  "datafusion",
  "env_logger",
+ "futures",
  "lance",
  "lance-distributed-common",
  "lance-distributed-proto",
