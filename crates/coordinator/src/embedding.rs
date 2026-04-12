@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array};
+use arrow::array::{Array, Float32Array, StringArray};
 use datafusion::error::{DataFusionError, Result};
 use log::debug;
 

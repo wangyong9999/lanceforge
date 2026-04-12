@@ -59,8 +59,6 @@ impl ConnectionPool {
         shard_state: Option<Arc<dyn ShardState>>,
     ) {
         let pool = self.clone();
-        let endpoints = self.endpoints.clone();
-        let timeout = self.query_timeout;
 
         tokio::spawn(async move {
             // Eager initial connect
