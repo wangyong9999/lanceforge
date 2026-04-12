@@ -7,7 +7,7 @@ use log::{debug, warn};
 use tonic::{Request, Response, Status};
 
 use lance_distributed_common::ipc::record_batch_to_ipc;
-use lance_distributed_proto::descriptor::{FtsQueryParams, LanceQueryDescriptor, LanceQueryType, VectorQueryParams};
+use lance_distributed_proto::descriptor::{FtsQueryParams, LanceQueryDescriptor, VectorQueryParams};
 use crate::executor::LanceTableRegistry;
 use lance_distributed_proto::generated::lance_distributed as pb;
 use pb::{

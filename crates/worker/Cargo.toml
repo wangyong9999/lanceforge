@@ -25,6 +25,7 @@ arrow = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
+futures = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 tracing = { workspace = true }
