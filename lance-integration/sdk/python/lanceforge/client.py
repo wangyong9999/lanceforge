@@ -88,7 +88,7 @@ class LanceForgeClient:
         resp = self._stub.AnnSearch(req, metadata=self._metadata(), timeout=30)
         return self._decode_response(resp)
 
-    def text_search(self, table, query_text, k=10, filter=None, columns=None):
+    def text_search(self, table, query_text, k=10, filter=None, columns=None, text_column="text"):
         """Full-text BM25 search.
 
         Args:
@@ -115,7 +115,7 @@ class LanceForgeClient:
         resp = self._stub.FtsSearch(req, metadata=self._metadata(), timeout=30)
         return self._decode_response(resp)
 
-    def hybrid_search(self, table, query_vector, query_text, k=10,
+    def hybrid_search(self, table, query_vector, query_text, k=10, vector_column="vector", text_column="text",
                       nprobes=20, filter=None, metric="l2"):
         """Hybrid ANN + FTS search with RRF fusion.
 

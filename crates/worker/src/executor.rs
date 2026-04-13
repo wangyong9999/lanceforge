@@ -30,7 +30,7 @@ use lance_distributed_common::config::ShardConfig;
 /// which provides DatasetConsistencyWrapper (auto version refresh) and the full
 /// lancedb query API (vector_search, full_text_search, execute_hybrid).
 pub struct LanceTableRegistry {
-    tables: Vec<(String, lancedb::Table)>,
+    tables: tokio::sync::RwLock<Vec<(String, lancedb::Table)>>,
     cache: Arc<crate::cache::QueryCache>,
 }
 
@@ -84,7 +84,7 @@ impl LanceTableRegistry {
         }
 
         Ok(Self {
-            tables,
+            tables: tokio::sync::RwLock::new(tables),
             cache: Arc::new(crate::cache::QueryCache::new(
                 Duration::from_secs(5),
                 1000,
@@ -106,14 +106,14 @@ impl LanceTableRegistry {
         }
         validate_descriptor(descriptor)?;
 
+        let tables = self.tables.read().await;
+
         // Get table version for cache key
         let dataset_version = {
-            let targets = self.resolve_tables(&descriptor.table_name)?;
+            let targets = resolve_tables_inner(&tables, &descriptor.table_name)?;
             let mut max_v = 0u64;
             for (_, t) in &targets {
-                max_v = max_v.max(
-                    t.version().await.unwrap_or(0)
-                );
+                max_v = max_v.max(t.version().await.unwrap_or(0));
             }
             max_v
         };
@@ -125,7 +125,7 @@ impl LanceTableRegistry {
             return Ok(cached);
         }
 
-        let target_tables = self.resolve_tables(&descriptor.table_name)?;
+        let target_tables = resolve_tables_inner(&tables, &descriptor.table_name)?;
         let mut all_batches: Vec<RecordBatch> = Vec::new();
 
         for (name, table) in &target_tables {
@@ -135,6 +135,7 @@ impl LanceTableRegistry {
                 all_batches.push(batch);
             }
         }
+        drop(tables); // Release read lock before cache write
 
         if all_batches.is_empty() {
             return Ok(RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())));
@@ -147,12 +148,38 @@ impl LanceTableRegistry {
         Ok(result)
     }
 
-    /// Execute a write operation (add/delete) on matching tables.
+    /// Dynamically load a new shard at runtime (called by coordinator after CreateTable).
+    pub async fn load_shard(
+        &self,
+        shard_name: &str,
+        uri: &str,
+        storage_options: &std::collections::HashMap<String, String>,
+    ) -> Result<u64> {
+        let (parent_dir, table_name) = split_shard_uri(uri);
+        let db = lancedb::connect(&parent_dir)
+            .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .read_consistency_interval(Duration::from_secs(3))
+            .execute()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let table = db.open_table(&table_name)
+            .execute()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let row_count = table.count_rows(None).await
+            .map_err(|e| DataFusionError::External(Box::new(e)))? as u64;
+        self.tables.write().await.push((shard_name.to_string(), table));
+        info!("Dynamically loaded shard: {} ({} rows)", shard_name, row_count);
+        Ok(row_count)
+    }
+
+    /// Execute a write operation (add/delete/upsert) on matching tables.
     pub async fn execute_write(
         &self,
         req: &lance_distributed_proto::generated::lance_distributed::LocalWriteRequest,
     ) -> Result<(u64, u64)> {
-        let targets = self.resolve_tables(&req.table_name)?;
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, &req.table_name)?;
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
 
@@ -220,24 +247,27 @@ impl LanceTableRegistry {
 
         Ok((total_affected, max_version))
     }
+}
 
-    fn resolve_tables(&self, table_name: &str) -> Result<Vec<(&str, &lancedb::Table)>> {
-        let matches: Vec<_> = self.tables.iter()
-            .filter(|(name, _)| {
-                name == table_name
-                    || (name.starts_with(table_name)
-                        && name.as_bytes().get(table_name.len()) == Some(&b'_'))
-            })
-            .map(|(name, t)| (name.as_str(), t))
-            .collect();
+fn resolve_tables_inner<'a>(
+    tables: &'a [(String, lancedb::Table)],
+    table_name: &str,
+) -> Result<Vec<(&'a str, &'a lancedb::Table)>> {
+    let matches: Vec<_> = tables.iter()
+        .filter(|(name, _)| {
+            name == table_name
+                || (name.starts_with(table_name)
+                    && name.as_bytes().get(table_name.len()) == Some(&b'_'))
+        })
+        .map(|(name, t)| (name.as_str(), t))
+        .collect();
 
-        if matches.is_empty() {
-            return Err(DataFusionError::Plan(format!(
-                "No Lance shard found matching table: {}", table_name
-            )));
-        }
-        Ok(matches)
+    if matches.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "No Lance shard found matching table: {}", table_name
+        )));
     }
+    Ok(matches)
 }
 
 /// Split a shard URI into (parent_directory, table_name).

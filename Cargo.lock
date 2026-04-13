@@ -4160,6 +4160,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "async-trait",
+ "lance",
  "lance-distributed-proto",
  "log",
  "serde",

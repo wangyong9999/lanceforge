@@ -84,6 +84,26 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn load_shard(
+        &self,
+        request: Request<pb::LoadShardRequest>,
+    ) -> Result<Response<pb::LoadShardResponse>, Status> {
+        let req = request.into_inner();
+        debug!("Worker: loading shard {} from {}", req.shard_name, req.uri);
+
+        let storage_opts: std::collections::HashMap<String, String> = req.storage_options;
+        match self.registry.load_shard(&req.shard_name, &req.uri, &storage_opts).await {
+            Ok(num_rows) => Ok(Response::new(pb::LoadShardResponse {
+                num_rows,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::LoadShardResponse {
+                num_rows: 0,
+                error: e.to_string(),
+            })),
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,

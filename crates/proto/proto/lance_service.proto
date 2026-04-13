@@ -20,12 +20,15 @@ service LanceSchedulerService {
   rpc ListTables (ListTablesRequest) returns (ListTablesResponse) {}
   rpc DropTable (DropTableRequest) returns (DropTableResponse) {}
   rpc CreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
+  rpc GetSchema (GetSchemaRequest) returns (GetSchemaResponse) {}
+  rpc CountRows (CountRowsRequest) returns (CountRowsResponse) {}
 }
 
 // Service running on each Executor for receiving queries from Scheduler.
 service LanceExecutorService {
   rpc ExecuteLocalSearch (LocalSearchRequest) returns (LocalSearchResponse) {}
   rpc ExecuteLocalWrite (LocalWriteRequest) returns (LocalWriteResponse) {}
+  rpc LoadShard (LoadShardRequest) returns (LoadShardResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
 }
@@ -170,6 +173,19 @@ message LocalWriteResponse {
   string error = 3;
 }
 
+// ============ Executor Shard Management ============
+
+message LoadShardRequest {
+  string shard_name = 1;
+  string uri = 2;                 // Lance table URI
+  map<string, string> storage_options = 3;
+}
+
+message LoadShardResponse {
+  uint64 num_rows = 1;
+  string error = 2;
+}
+
 // ============ DDL Operations ============
 
 message CreateTableRequest {
@@ -210,4 +226,28 @@ message CreateIndexRequest {
 
 message CreateIndexResponse {
   string error = 1;
+}
+
+message GetSchemaRequest {
+  string table_name = 1;
+}
+
+message GetSchemaResponse {
+  repeated ColumnInfo columns = 1;
+  string error = 2;
+}
+
+message ColumnInfo {
+  string name = 1;
+  string data_type = 2;
+}
+
+message CountRowsRequest {
+  string table_name = 1;
+  optional string filter = 2;    // Optional SQL WHERE filter
+}
+
+message CountRowsResponse {
+  uint64 count = 1;
+  string error = 2;
 }

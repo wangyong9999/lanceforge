@@ -32,8 +32,9 @@ pub struct CoordinatorService {
     embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
     metrics: Arc<lance_distributed_common::metrics::Metrics>,
     query_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Storage options for DDL operations (create table, create index).
     storage_options: std::collections::HashMap<String, String>,
+    /// Round-robin counter for write distribution.
+    write_counter: std::sync::atomic::AtomicUsize,
 }
 
 impl CoordinatorService {
@@ -80,6 +81,7 @@ impl CoordinatorService {
             metrics,
             query_semaphore,
             storage_options: config.storage_options.clone(),
+            write_counter: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -238,13 +240,14 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("arrow_ipc_data is empty"));
         }
 
-        // Route Add to first healthy worker for this table (MVP: round-robin later)
+        // Route Add via round-robin across workers for balanced distribution
         let executors = self.shard_state.executors_for_table(&req.table_name).await;
         if executors.is_empty() {
             return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
         }
 
-        let worker_id = &executors[0];
+        let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % executors.len();
+        let worker_id = &executors[idx];
         let mut client = self.pool.get_healthy_client(worker_id).await?;
 
         let local_req = pb::LocalWriteRequest {
@@ -438,10 +441,31 @@ impl LanceSchedulerService for CoordinatorService {
                 .map_err(|e| Status::internal(format!("Create index failed: {e}")))?;
         }
 
-        info!("Created table '{}' at {} ({} rows)", req.table_name, uri, num_rows);
+        // Register table in shard state + tell first worker to load it
+        let shard_name = format!("{}_shard_00", req.table_name);
+        let executors = self.shard_state.all_executors().await;
+        if let Some((executor_id, host, port)) = executors.first() {
+            // Register in shard state
+            let mut mapping = std::collections::HashMap::new();
+            mapping.insert(shard_name.clone(), vec![executor_id.clone()]);
+            let _ = self.shard_state.set_next_target(&req.table_name, mapping).await;
+            let _ = self.shard_state.promote_target(&req.table_name).await;
+
+            // Tell worker to load the new shard
+            if let Ok(mut client) = self.pool.get_healthy_client(executor_id).await {
+                let load_req = pb::LoadShardRequest {
+                    shard_name: shard_name.clone(),
+                    uri: uri.clone(),
+                    storage_options: self.storage_options.clone(),
+                };
+                let _ = client.load_shard(Request::new(load_req)).await;
+            }
+        }
+
+        info!("Created table '{}' at {} ({} rows, shard={})", req.table_name, uri, num_rows, shard_name);
 
         Ok(Response::new(pb::CreateTableResponse {
-            table_name: req.table_name,
+            table_name: req.table_name.clone(),
             num_rows,
             error: String::new(),
         }))
@@ -495,6 +519,42 @@ impl LanceSchedulerService for CoordinatorService {
 
         Ok(Response::new(pb::CreateIndexResponse {
             error: String::new(),
+        }))
+    }
+
+    async fn get_schema(
+        &self,
+        request: Request<pb::GetSchemaRequest>,
+    ) -> Result<Response<pb::GetSchemaResponse>, Status> {
+        let req = request.into_inner();
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
+        }
+        // Get schema from first worker's shard
+        if let Ok(routing) = self.shard_state.get_shard_routing(&req.table_name).await.first().ok_or(()) {
+            // For now return empty — full impl needs worker RPC to get schema
+        }
+        Ok(Response::new(pb::GetSchemaResponse {
+            columns: vec![],
+            error: "Schema introspection requires worker RPC (not yet implemented)".to_string(),
+        }))
+    }
+
+    async fn count_rows(
+        &self,
+        request: Request<pb::CountRowsRequest>,
+    ) -> Result<Response<pb::CountRowsResponse>, Status> {
+        let req = request.into_inner();
+        // Fan out to workers and sum row counts
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
+        }
+        // For now return 0 — full impl fans out count_rows to workers
+        Ok(Response::new(pb::CountRowsResponse {
+            count: 0,
+            error: "Distributed count requires worker RPC (not yet implemented)".to_string(),
         }))
     }
 }

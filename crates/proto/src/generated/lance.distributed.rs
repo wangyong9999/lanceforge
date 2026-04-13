@@ -220,6 +220,26 @@ pub struct LocalWriteResponse {
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LoadShardRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    /// Lance table URI
+    #[prost(string, tag = "2")]
+    pub uri: ::prost::alloc::string::String,
+    #[prost(map = "string, string", tag = "3")]
+    pub storage_options: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LoadShardResponse {
+    #[prost(uint64, tag = "1")]
+    pub num_rows: u64,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateTableRequest {
     #[prost(string, tag = "1")]
@@ -282,6 +302,40 @@ pub struct CreateIndexRequest {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateIndexResponse {
     #[prost(string, tag = "1")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSchemaRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetSchemaResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub columns: ::prost::alloc::vec::Vec<ColumnInfo>,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ColumnInfo {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub data_type: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CountRowsRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    /// Optional SQL WHERE filter
+    #[prost(string, optional, tag = "2")]
+    pub filter: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CountRowsResponse {
+    #[prost(uint64, tag = "1")]
+    pub count: u64,
+    #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
@@ -677,6 +731,64 @@ pub mod lance_scheduler_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_schema(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSchemaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/GetSchema",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "GetSchema",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn count_rows(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CountRowsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CountRowsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/CountRows",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "CountRows",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -752,6 +864,20 @@ pub mod lance_scheduler_service_server {
             request: tonic::Request<super::CreateIndexRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CreateIndexResponse>,
+            tonic::Status,
+        >;
+        async fn get_schema(
+            &self,
+            request: tonic::Request<super::GetSchemaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSchemaResponse>,
+            tonic::Status,
+        >;
+        async fn count_rows(
+            &self,
+            request: tonic::Request<super::CountRowsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CountRowsResponse>,
             tonic::Status,
         >;
     }
@@ -1342,6 +1468,98 @@ pub mod lance_scheduler_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/lance.distributed.LanceSchedulerService/GetSchema" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSchemaSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::GetSchemaRequest>
+                    for GetSchemaSvc<T> {
+                        type Response = super::GetSchemaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetSchemaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::get_schema(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSchemaSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/CountRows" => {
+                    #[allow(non_camel_case_types)]
+                    struct CountRowsSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::CountRowsRequest>
+                    for CountRowsSvc<T> {
+                        type Response = super::CountRowsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CountRowsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::count_rows(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CountRowsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -1532,6 +1750,35 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn load_shard(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LoadShardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LoadShardResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/LoadShard",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "LoadShard",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Health check (Scheduler periodically pings Executors)
         pub async fn health_check(
             &mut self,
@@ -1589,6 +1836,13 @@ pub mod lance_executor_service_server {
             request: tonic::Request<super::LocalWriteRequest>,
         ) -> std::result::Result<
             tonic::Response<super::LocalWriteResponse>,
+            tonic::Status,
+        >;
+        async fn load_shard(
+            &self,
+            request: tonic::Request<super::LoadShardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LoadShardResponse>,
             tonic::Status,
         >;
         /// Health check (Scheduler periodically pings Executors)
@@ -1761,6 +2015,52 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ExecuteLocalWriteSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/LoadShard" => {
+                    #[allow(non_camel_case_types)]
+                    struct LoadShardSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LoadShardRequest>
+                    for LoadShardSvc<T> {
+                        type Response = super::LoadShardResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LoadShardRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::load_shard(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LoadShardSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

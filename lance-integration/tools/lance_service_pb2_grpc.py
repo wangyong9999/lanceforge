@@ -90,6 +90,16 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.CreateIndexRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.CreateIndexResponse.FromString,
                 _registered_method=True)
+        self.GetSchema = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/GetSchema',
+                request_serializer=lance__service__pb2.GetSchemaRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.GetSchemaResponse.FromString,
+                _registered_method=True)
+        self.CountRows = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/CountRows',
+                request_serializer=lance__service__pb2.CountRowsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CountRowsResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -165,6 +175,18 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetSchema(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CountRows(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -222,6 +244,16 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.CreateIndex,
                     request_deserializer=lance__service__pb2.CreateIndexRequest.FromString,
                     response_serializer=lance__service__pb2.CreateIndexResponse.SerializeToString,
+            ),
+            'GetSchema': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSchema,
+                    request_deserializer=lance__service__pb2.GetSchemaRequest.FromString,
+                    response_serializer=lance__service__pb2.GetSchemaResponse.SerializeToString,
+            ),
+            'CountRows': grpc.unary_unary_rpc_method_handler(
+                    servicer.CountRows,
+                    request_deserializer=lance__service__pb2.CountRowsRequest.FromString,
+                    response_serializer=lance__service__pb2.CountRowsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -532,6 +564,60 @@ class LanceSchedulerService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def GetSchema(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/GetSchema',
+            lance__service__pb2.GetSchemaRequest.SerializeToString,
+            lance__service__pb2.GetSchemaResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CountRows(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/CountRows',
+            lance__service__pb2.CountRowsRequest.SerializeToString,
+            lance__service__pb2.CountRowsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class LanceExecutorServiceStub(object):
     """Service running on each Executor for receiving queries from Scheduler.
@@ -552,6 +638,11 @@ class LanceExecutorServiceStub(object):
                 '/lance.distributed.LanceExecutorService/ExecuteLocalWrite',
                 request_serializer=lance__service__pb2.LocalWriteRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.LocalWriteResponse.FromString,
+                _registered_method=True)
+        self.LoadShard = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/LoadShard',
+                request_serializer=lance__service__pb2.LoadShardRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.LoadShardResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
@@ -576,6 +667,12 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def LoadShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -595,6 +692,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.ExecuteLocalWrite,
                     request_deserializer=lance__service__pb2.LocalWriteRequest.FromString,
                     response_serializer=lance__service__pb2.LocalWriteResponse.SerializeToString,
+            ),
+            'LoadShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.LoadShard,
+                    request_deserializer=lance__service__pb2.LoadShardRequest.FromString,
+                    response_serializer=lance__service__pb2.LoadShardResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -657,6 +759,33 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/ExecuteLocalWrite',
             lance__service__pb2.LocalWriteRequest.SerializeToString,
             lance__service__pb2.LocalWriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LoadShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/LoadShard',
+            lance__service__pb2.LoadShardRequest.SerializeToString,
+            lance__service__pb2.LoadShardResponse.FromString,
             options,
             channel_credentials,
             insecure,
