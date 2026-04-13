@@ -21,10 +21,11 @@ arrow = { workspace = true }
 
 # Async + gRPC
 tokio = { workspace = true, features = ["full"] }
-tonic = { workspace = true }
+tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 tonic-prost = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+serde_yaml = "0.9"
 log = { workspace = true }
 env_logger = { workspace = true }
 tracing = { workspace = true }

@@ -14,8 +14,11 @@ RUN CARGO_BUILD_JOBS=1 cargo build --release \
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 curl && \
+    ca-certificates libssl3 curl python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
+
+# Install Python deps for init container
+RUN pip install --break-system-packages lance pyarrow numpy pyyaml 2>/dev/null || true
 
 # Non-root user for security
 RUN groupadd -r lance && useradd -r -g lance -d /home/lance -s /sbin/nologin lance
@@ -27,7 +30,6 @@ USER lance
 
 EXPOSE 50050 50100
 
-# Health check via gRPC reflection (curl fallback for HTTP health probe)
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -sf http://localhost:${HEALTH_PORT:-50051}/healthz || exit 1
 

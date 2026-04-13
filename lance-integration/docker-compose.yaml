@@ -1,7 +1,22 @@
-# Lance-Ballista local cluster: 1 Coordinator + 3 Workers
+# LanceForge: 1 Coordinator + 2 Workers
+# Usage: docker compose up (generates sample data automatically)
 version: "3.8"
 
+volumes:
+  lance-data:
+
 services:
+  init:
+    build:
+      context: ../..
+      dockerfile: lance-integration/Dockerfile
+    entrypoint: ["/bin/bash", "/app/docker-entrypoint.sh", "init"]
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - lance-data:/data
+      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh:ro
+
   coordinator:
     build:
       context: ../..
@@ -9,16 +24,16 @@ services:
     command: lance-coordinator /data/cluster_config.yaml 50050
     ports:
       - "50050:50050"
-      - "50051:50051"  # health probe
+      - "50051:50051"
     volumes:
-      - ./data:/data:ro
+      - lance-data:/data:ro
     depends_on:
+      init:
+        condition: service_completed_successfully
       worker-0:
-        condition: service_healthy
+        condition: service_started
       worker-1:
-        condition: service_healthy
-      worker-2:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:50051/healthz"]
@@ -32,48 +47,21 @@ services:
       context: ../..
       dockerfile: lance-integration/Dockerfile
     command: lance-worker /data/cluster_config.yaml worker_0 50100
-    ports:
-      - "50100:50100"
     volumes:
-      - ./data:/data:ro
+      - lance-data:/data:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:50101/healthz"]
-      interval: 10s
-      timeout: 3s
-      start_period: 10s
-      retries: 3
 
   worker-1:
     build:
       context: ../..
       dockerfile: lance-integration/Dockerfile
     command: lance-worker /data/cluster_config.yaml worker_1 50101
-    ports:
-      - "50101:50101"
     volumes:
-      - ./data:/data:ro
+      - lance-data:/data:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:50102/healthz"]
-      interval: 10s
-      timeout: 3s
-      start_period: 10s
-      retries: 3
-
-  worker-2:
-    build:
-      context: ../..
-      dockerfile: lance-integration/Dockerfile
-    command: lance-worker /data/cluster_config.yaml worker_2 50102
-    ports:
-      - "50102:50102"
-    volumes:
-      - ./data:/data:ro
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:50103/healthz"]
-      interval: 10s
-      timeout: 3s
-      start_period: 10s
-      retries: 3

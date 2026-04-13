@@ -42,8 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shards = config.shards_for_executor(worker_id);
     if shards.is_empty() {
-        eprintln!("No shards for worker: {}", worker_id);
-        std::process::exit(1);
+        info!("No initial shards for worker '{}' — waiting for LoadShard RPCs", worker_id);
     }
 
     let server_cfg = &config.server;
@@ -57,10 +56,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = WorkerService::new(Arc::new(registry));
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
-    tonic::transport::Server::builder()
+    let mut server = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(keepalive_interval))
         .http2_keepalive_timeout(Some(keepalive_timeout))
-        .concurrency_limit_per_connection(server_cfg.concurrency_limit)
+        .concurrency_limit_per_connection(server_cfg.concurrency_limit);
+
+    if config.security.tls_enabled() {
+        let cert = tokio::fs::read(config.security.tls_cert.as_ref().unwrap()).await?;
+        let key = tokio::fs::read(config.security.tls_key.as_ref().unwrap()).await?;
+        let identity = tonic::transport::Identity::from_pem(cert, key);
+        let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+        info!("TLS enabled");
+        server = server.tls_config(tls_config)?;
+    }
+
+    server
         .add_service(LanceExecutorServiceServer::new(service))
         .serve_with_shutdown(addr, async { signal::ctrl_c().await.ok(); })
         .await?;

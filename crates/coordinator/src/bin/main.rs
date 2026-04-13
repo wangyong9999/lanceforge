@@ -47,12 +47,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let executor_config = ClusterConfig::from_file(&args[4])?;
 
         info!("Auto-shard mode: discovering fragments in {}", table_uri);
-        lance_distributed_common::auto_shard::generate_auto_config(
+        let auto_config = lance_distributed_common::auto_shard::generate_auto_config(
             table_name,
             table_uri,
             &executor_config.executors,
             &executor_config.storage_options,
-        ).await.map_err(|e| -> Box<dyn std::error::Error> { e })?
+        ).await.map_err(|e| -> Box<dyn std::error::Error> { e })?;
+
+        // Write generated config for workers to use
+        let auto_config_path = format!("/tmp/lanceforge_autoshard_{}.yaml", std::process::id());
+        let yaml = serde_yaml::to_string(&auto_config)?;
+        tokio::fs::write(&auto_config_path, &yaml).await?;
+        info!("Auto-shard config written to {} — start workers with this config", auto_config_path);
+
+        auto_config
     } else {
         // Standard mode: load config from YAML
         ClusterConfig::from_file(&args[1])?
@@ -94,10 +102,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = ApiKeyInterceptor::new(config.security.api_keys.clone());
     let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth.check(req));
 
-    tonic::transport::Server::builder()
+    let mut server = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(keepalive_interval))
         .http2_keepalive_timeout(Some(keepalive_timeout))
-        .concurrency_limit_per_connection(server_cfg.concurrency_limit)
+        .concurrency_limit_per_connection(server_cfg.concurrency_limit);
+
+    // TLS: load server certificate and key if configured
+    if config.security.tls_enabled() {
+        let cert = tokio::fs::read(config.security.tls_cert.as_ref().unwrap()).await?;
+        let key = tokio::fs::read(config.security.tls_key.as_ref().unwrap()).await?;
+        let identity = tonic::transport::Identity::from_pem(cert, key);
+        let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+        info!("TLS enabled");
+        server = server.tls_config(tls_config)?;
+    }
+
+    server
         .add_service(svc)
         .serve_with_shutdown(addr, async { signal::ctrl_c().await.ok(); })
         .await?;

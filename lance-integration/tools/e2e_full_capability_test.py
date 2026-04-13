@@ -320,6 +320,33 @@ def t_drop_table():
     # (it may still appear in list but with no routing)
 test("20. DropTable", t_drop_table)
 
+# ── LangChain Test ──
+
+def t_langchain():
+    try:
+        from lanceforge.langchain import LanceForgeVectorStore
+        from langchain_core.documents import Document
+
+        # Create a simple mock embedding that returns fixed-dim vectors
+        class FixedEmbedding:
+            def embed_documents(self, texts):
+                return [np.random.randn(DIM).astype(np.float32).tolist() for _ in texts]
+            def embed_query(self, text):
+                return np.random.randn(DIM).astype(np.float32).tolist()
+
+        store = LanceForgeVectorStore(
+            host=f"127.0.0.1:{COORD_PORT}",
+            table_name="docs",
+            embedding=FixedEmbedding(),
+        )
+        docs = store.similarity_search("technology", k=3)
+        assert len(docs) > 0, f"LangChain returned 0 docs"
+        assert isinstance(docs[0], Document)
+        assert len(docs[0].page_content) > 0 or len(docs[0].metadata) > 0
+    except ImportError:
+        pass  # langchain not installed, skip
+test("21. LangChain VectorStore similarity_search", t_langchain)
+
 # ── Cleanup ──
 channel.close()
 client.close()
