@@ -52,7 +52,8 @@ class LanceForgeClient:
     # ── Search ──
 
     def search(self, table, query_vector, k=10, nprobes=20,
-               filter=None, columns=None, metric="l2"):
+               filter=None, columns=None, metric="l2",
+               vector_column="vector"):
         """ANN vector similarity search.
 
         Args:
@@ -72,7 +73,7 @@ class LanceForgeClient:
 
         req = pb.AnnSearchRequest(
             table_name=table,
-            vector_column="vector",
+            vector_column=vector_column or "vector",
             query_vector=vec_bytes,
             dimension=len(query_vector),
             k=k,
@@ -135,7 +136,7 @@ class LanceForgeClient:
 
         req = pb.HybridSearchRequest(
             table_name=table,
-            vector_column="vector",
+            vector_column=vector_column or "vector",
             query_vector=vec_bytes,
             dimension=len(query_vector),
             nprobes=nprobes,
@@ -243,6 +244,80 @@ class LanceForgeClient:
         """
         return self.text_search(table, query_text, k=k, filter=filter,
                                 columns=columns)
+
+    # ── DDL ──
+
+    def create_table(self, table, data, uri=None, index_column=None, num_partitions=32):
+        """Create a new table with initial data.
+
+        Args:
+            table: Table name
+            data: pyarrow.Table or RecordBatch (defines schema + initial data)
+            uri: Storage URI (default: /tmp/lanceforge_tables/<table>.lance)
+            index_column: Column to auto-index (optional)
+            num_partitions: IVF partitions (default 32)
+
+        Returns:
+            dict with 'table_name' and 'num_rows'
+        """
+        if isinstance(data, pa.Table):
+            data = data.to_batches()[0] if data.num_rows > 0 else None
+        if data is None:
+            raise ValueError("No data provided")
+
+        ipc_data = self._encode_batch(data)
+        resp = self._stub.CreateTable(
+            pb.CreateTableRequest(
+                table_name=table,
+                arrow_ipc_data=ipc_data,
+                uri=uri or "",
+                index_column=index_column or "",
+                index_num_partitions=num_partitions),
+            metadata=self._metadata(), timeout=60)
+
+        if resp.error:
+            raise RuntimeError(f"CreateTable failed: {resp.error}")
+        return {"table_name": resp.table_name, "num_rows": resp.num_rows}
+
+    def list_tables(self):
+        """List all tables in the cluster.
+
+        Returns:
+            list of table names
+        """
+        resp = self._stub.ListTables(pb.ListTablesRequest(),
+                                     metadata=self._metadata(), timeout=10)
+        if resp.error:
+            raise RuntimeError(f"ListTables failed: {resp.error}")
+        return list(resp.table_names)
+
+    def drop_table(self, table):
+        """Drop a table.
+
+        Args:
+            table: Table name
+        """
+        resp = self._stub.DropTable(pb.DropTableRequest(table_name=table),
+                                    metadata=self._metadata(), timeout=30)
+        if resp.error:
+            raise RuntimeError(f"DropTable failed: {resp.error}")
+
+    def create_index(self, table, column, index_type="IVF_FLAT", num_partitions=32):
+        """Create an index on a table column.
+
+        Args:
+            table: Table name
+            column: Column name to index
+            index_type: "IVF_FLAT", "IVF_HNSW_SQ", "BTREE", "INVERTED"
+            num_partitions: For IVF indexes (default 32)
+        """
+        resp = self._stub.CreateIndex(
+            pb.CreateIndexRequest(
+                table_name=table, column=column,
+                index_type=index_type, num_partitions=num_partitions),
+            metadata=self._metadata(), timeout=60)
+        if resp.error:
+            raise RuntimeError(f"CreateIndex failed: {resp.error}")
 
     # ── Status ──
 

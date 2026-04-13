@@ -70,6 +70,26 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.UpsertRowsRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.WriteResponse.FromString,
                 _registered_method=True)
+        self.CreateTable = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/CreateTable',
+                request_serializer=lance__service__pb2.CreateTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateTableResponse.FromString,
+                _registered_method=True)
+        self.ListTables = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/ListTables',
+                request_serializer=lance__service__pb2.ListTablesRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.ListTablesResponse.FromString,
+                _registered_method=True)
+        self.DropTable = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/DropTable',
+                request_serializer=lance__service__pb2.DropTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.DropTableResponse.FromString,
+                _registered_method=True)
+        self.CreateIndex = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/CreateIndex',
+                request_serializer=lance__service__pb2.CreateIndexRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateIndexResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -120,6 +140,31 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateTable(self, request, context):
+        """DDL operations
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListTables(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DropTable(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateIndex(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -157,6 +202,26 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.UpsertRows,
                     request_deserializer=lance__service__pb2.UpsertRowsRequest.FromString,
                     response_serializer=lance__service__pb2.WriteResponse.SerializeToString,
+            ),
+            'CreateTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateTable,
+                    request_deserializer=lance__service__pb2.CreateTableRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateTableResponse.SerializeToString,
+            ),
+            'ListTables': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListTables,
+                    request_deserializer=lance__service__pb2.ListTablesRequest.FromString,
+                    response_serializer=lance__service__pb2.ListTablesResponse.SerializeToString,
+            ),
+            'DropTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.DropTable,
+                    request_deserializer=lance__service__pb2.DropTableRequest.FromString,
+                    response_serializer=lance__service__pb2.DropTableResponse.SerializeToString,
+            ),
+            'CreateIndex': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateIndex,
+                    request_deserializer=lance__service__pb2.CreateIndexRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateIndexResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -349,6 +414,114 @@ class LanceSchedulerService(object):
             '/lance.distributed.LanceSchedulerService/UpsertRows',
             lance__service__pb2.UpsertRowsRequest.SerializeToString,
             lance__service__pb2.WriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/CreateTable',
+            lance__service__pb2.CreateTableRequest.SerializeToString,
+            lance__service__pb2.CreateTableResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListTables(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/ListTables',
+            lance__service__pb2.ListTablesRequest.SerializeToString,
+            lance__service__pb2.ListTablesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DropTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/DropTable',
+            lance__service__pb2.DropTableRequest.SerializeToString,
+            lance__service__pb2.DropTableResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateIndex(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/CreateIndex',
+            lance__service__pb2.CreateIndexRequest.SerializeToString,
+            lance__service__pb2.CreateIndexResponse.FromString,
             options,
             channel_credentials,
             insecure,

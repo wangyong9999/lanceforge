@@ -9,6 +9,21 @@ use std::collections::HashMap;
 
 use log::info;
 
+/// Split a URI into (parent_directory, name).
+/// e.g. "s3://bucket/path/table.lance" → ("s3://bucket/path/", "table")
+pub fn split_parent_uri(uri: &str) -> (String, String) {
+    let clean = uri.trim_end_matches('/');
+    if let Some(last_slash) = clean.rfind('/') {
+        let parent = &clean[..=last_slash];
+        let filename = &clean[last_slash + 1..];
+        let name = filename.strip_suffix(".lance").unwrap_or(filename);
+        (parent.to_string(), name.to_string())
+    } else {
+        let name = clean.strip_suffix(".lance").unwrap_or(clean);
+        ("./".to_string(), name.to_string())
+    }
+}
+
 use crate::config::{ClusterConfig, ExecutorConfig, ShardConfig, TableConfig};
 
 /// Metadata about a single Lance fragment.

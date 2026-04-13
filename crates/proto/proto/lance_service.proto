@@ -15,6 +15,11 @@ service LanceSchedulerService {
   rpc AddRows (AddRowsRequest) returns (WriteResponse) {}
   rpc DeleteRows (DeleteRowsRequest) returns (WriteResponse) {}
   rpc UpsertRows (UpsertRowsRequest) returns (WriteResponse) {}
+  // DDL operations
+  rpc CreateTable (CreateTableRequest) returns (CreateTableResponse) {}
+  rpc ListTables (ListTablesRequest) returns (ListTablesResponse) {}
+  rpc DropTable (DropTableRequest) returns (DropTableResponse) {}
+  rpc CreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
 }
 
 // Service running on each Executor for receiving queries from Scheduler.
@@ -163,4 +168,46 @@ message LocalWriteResponse {
   uint64 affected_rows = 1;
   uint64 new_version = 2;
   string error = 3;
+}
+
+// ============ DDL Operations ============
+
+message CreateTableRequest {
+  string table_name = 1;
+  bytes arrow_ipc_data = 2;       // Initial data as Arrow IPC (defines schema)
+  string uri = 3;                 // Storage URI (e.g., "s3://bucket/table.lance")
+  string index_column = 4;        // Column to index (optional, auto-creates IVF_FLAT)
+  uint32 index_num_partitions = 5; // IVF partitions (default 32)
+}
+
+message CreateTableResponse {
+  string table_name = 1;
+  uint64 num_rows = 2;
+  string error = 3;
+}
+
+message ListTablesRequest {}
+
+message ListTablesResponse {
+  repeated string table_names = 1;
+  string error = 2;
+}
+
+message DropTableRequest {
+  string table_name = 1;
+}
+
+message DropTableResponse {
+  string error = 1;
+}
+
+message CreateIndexRequest {
+  string table_name = 1;
+  string column = 2;             // Column to index
+  string index_type = 3;         // "IVF_FLAT", "IVF_HNSW_SQ", "BTREE", "INVERTED"
+  uint32 num_partitions = 4;     // For IVF indexes (default 32)
+}
+
+message CreateIndexResponse {
+  string error = 1;
 }

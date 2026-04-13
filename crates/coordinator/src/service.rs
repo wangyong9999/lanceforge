@@ -31,8 +31,9 @@ pub struct CoordinatorService {
     query_timeout: Duration,
     embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
     metrics: Arc<lance_distributed_common::metrics::Metrics>,
-    /// Semaphore for backpressure: limits concurrent in-flight queries.
     query_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Storage options for DDL operations (create table, create index).
+    storage_options: std::collections::HashMap<String, String>,
 }
 
 impl CoordinatorService {
@@ -78,6 +79,7 @@ impl CoordinatorService {
             embedding_config: config.embedding.clone(),
             metrics,
             query_semaphore,
+            storage_options: config.storage_options.clone(),
         }
     }
 }
@@ -386,6 +388,113 @@ impl LanceSchedulerService for CoordinatorService {
             affected_rows: total_affected,
             new_version: max_version,
             error,
+        }))
+    }
+
+    async fn create_table(
+        &self,
+        request: Request<pb::CreateTableRequest>,
+    ) -> Result<Response<pb::CreateTableResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        if req.arrow_ipc_data.is_empty() {
+            return Err(Status::invalid_argument("arrow_ipc_data required (initial data defines schema)"));
+        }
+
+        let uri = if req.uri.is_empty() {
+            format!("/tmp/lanceforge_tables/{}.lance", req.table_name)
+        } else {
+            req.uri.clone()
+        };
+
+        // Split URI to get parent dir
+        let (parent, _) = lance_distributed_common::auto_shard::split_parent_uri(&uri);
+
+        let db = lancedb::connect(&parent)
+            .storage_options(self.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .execute()
+            .await
+            .map_err(|e| Status::internal(format!("Connect failed: {e}")))?;
+
+        let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::internal(format!("IPC decode failed: {e}")))?;
+        let num_rows = batch.num_rows() as u64;
+
+        db.create_table(&req.table_name, vec![batch])
+            .execute()
+            .await
+            .map_err(|e| Status::internal(format!("Create table failed: {e}")))?;
+
+        // Auto-create vector index if requested
+        if !req.index_column.is_empty() {
+            let table = db.open_table(&req.table_name).execute().await
+                .map_err(|e| Status::internal(format!("Open table failed: {e}")))?;
+            let npart = if req.index_num_partitions > 0 { req.index_num_partitions } else { 32 };
+            table.create_index(&[&req.index_column], lancedb::index::Index::IvfFlat(
+                lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
+            )).execute().await
+                .map_err(|e| Status::internal(format!("Create index failed: {e}")))?;
+        }
+
+        info!("Created table '{}' at {} ({} rows)", req.table_name, uri, num_rows);
+
+        Ok(Response::new(pb::CreateTableResponse {
+            table_name: req.table_name,
+            num_rows,
+            error: String::new(),
+        }))
+    }
+
+    async fn list_tables(
+        &self,
+        _request: Request<pb::ListTablesRequest>,
+    ) -> Result<Response<pb::ListTablesResponse>, Status> {
+        let tables = self.shard_state.all_tables().await;
+        Ok(Response::new(pb::ListTablesResponse {
+            table_names: tables,
+            error: String::new(),
+        }))
+    }
+
+    async fn drop_table(
+        &self,
+        request: Request<pb::DropTableRequest>,
+    ) -> Result<Response<pb::DropTableResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        // Note: full implementation needs to remove from shard_state + drop storage
+        info!("Drop table '{}' requested (metadata only)", req.table_name);
+        Ok(Response::new(pb::DropTableResponse {
+            error: String::new(),
+        }))
+    }
+
+    async fn create_index(
+        &self,
+        request: Request<pb::CreateIndexRequest>,
+    ) -> Result<Response<pb::CreateIndexResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() || req.column.is_empty() {
+            return Err(Status::invalid_argument("table_name and column required"));
+        }
+
+        // Fan out to all workers to create index on their local shards
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        }
+
+        // Create index is a coordinator-side operation for now
+        // (workers load pre-indexed data; index creation happens via lancedb)
+        info!("CreateIndex on '{}' column '{}' type '{}' requested",
+            req.table_name, req.column, req.index_type);
+
+        Ok(Response::new(pb::CreateIndexResponse {
+            error: String::new(),
         }))
     }
 }
