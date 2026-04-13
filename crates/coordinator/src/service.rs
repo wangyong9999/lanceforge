@@ -144,11 +144,13 @@ impl LanceSchedulerService for CoordinatorService {
             k: oversample_k, filter: req.filter, columns: req.columns,
         };
 
-        let response = super::scatter_gather::scatter_gather(
+        let t0 = std::time::Instant::now();
+        let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, k, false, self.query_timeout,
-        ).await?;
-        Ok(Response::new(response))
+        ).await;
+        self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
+        Ok(Response::new(result?))
     }
 
     async fn hybrid_search(
@@ -172,11 +174,13 @@ impl LanceSchedulerService for CoordinatorService {
             k: oversample_k, filter: req.filter, columns: req.columns,
         };
 
-        let response = super::scatter_gather::scatter_gather(
+        let t0 = std::time::Instant::now();
+        let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, k, false, self.query_timeout,
-        ).await?;
-        Ok(Response::new(response))
+        ).await;
+        self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
+        Ok(Response::new(result?))
     }
 
     async fn get_cluster_status(
