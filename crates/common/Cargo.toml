@@ -12,3 +12,6 @@ log = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 async-trait = { workspace = true }
 arrow = { workspace = true }
+
+# For auto-shard fragment discovery
+lance = { version = "4.0.0", default-features = false, features = ["aws"] }
