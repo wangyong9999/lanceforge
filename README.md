@@ -1,93 +1,212 @@
-# LanceForge
+<p align="center">
+  <h1 align="center">LanceForge</h1>
+  <p align="center">
+    <b>Distributed Multimodal Retrieval Engine for Lance Tables</b>
+    <br/>
+    Horizontal scaling for vector search, full-text search, and hybrid retrieval
+  </p>
+</p>
 
-**Distributed multimodal retrieval engine for Lance tables.**
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#performance">Performance</a> ·
+  <a href="#python-sdk">SDK</a> ·
+  <a href="#benchmarks">Benchmarks</a>
+</p>
 
-LanceForge extends [LanceDB](https://github.com/lancedb/lancedb) from an embedded single-node database to a horizontally scalable distributed query engine. It supports ANN vector search, full-text search, and hybrid retrieval over Lance tables stored on S3/MinIO or local storage.
+<p align="center">
+  <img src="https://img.shields.io/badge/language-Rust-orange" alt="Rust"/>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"/>
+  <img src="https://img.shields.io/badge/tests-99%20unit%20%7C%2029%20integration%20%7C%2021%20E2E-green" alt="Tests"/>
+  <img src="https://img.shields.io/badge/recall%4010-1.0000-brightgreen" alt="Recall"/>
+</p>
+
+---
+
+## What is LanceForge?
+
+LanceForge extends [LanceDB](https://github.com/lancedb/lancedb) from an **embedded single-node** database to a **horizontally scalable distributed** query engine — without changing your data format.
+
+```
+Single-node LanceDB           LanceForge (distributed)
+┌──────────┐                  ┌────────────────────────────────┐
+│  App     │                  │  App                            │
+│    ↓     │                  │    ↓ gRPC / Python SDK          │
+│ LanceDB  │    ──────►       │  Coordinator (scatter-gather)   │
+│    ↓     │   same .lance    │    ↓         ↓         ↓       │
+│  .lance  │     files        │  Worker 0  Worker 1  Worker 2  │
+└──────────┘                  │    ↓         ↓         ↓       │
+                              │     S3 / MinIO / Local FS      │
+                              └────────────────────────────────┘
+```
+
+**Same Lance files. Same queries. Horizontal throughput.**
 
 ## Architecture
 
 ```
-                              ┌─────────────────────────────────────┐
-                              │         Coordinator                  │
-  Client ──── gRPC ──────────►│  ● Scatter queries to workers       │
-  (Python/Rust/gRPC)          │  ● Shard-aware routing + pruning    │
-                              │  ● Merge global TopK results        │
-                              │  ● Text → vector embedding          │
-                              │  ● API key authentication           │
-                              └──────────┬──────────────────────────┘
-                                         │ gRPC (parallel fan-out)
-                       ┌─────────────────┼─────────────────┐
-                       ▼                 ▼                  ▼
-                ┌────────────┐   ┌────────────┐   ┌────────────┐
-                │  Worker 0  │   │  Worker 1  │   │  Worker 2  │
-                │  shard 0,1 │   │  shard 2,3 │   │  shard 4,5 │
-                │  Lance+DF  │   │  Lance+DF  │   │  Lance+DF  │
-                └──────┬─────┘   └──────┬─────┘   └──────┬─────┘
-                       └────────────────┼─────────────────┘
-                                        ▼
-                              S3 / MinIO / Local FS
-                              (Lance tables + IVF_PQ indexes)
+                     ┌──────────────────────────────────────────┐
+                     │              Coordinator                  │
+  Client ──gRPC────►│                                          │
+  Python SDK        │  ┌─────────┐ ┌──────────┐ ┌──────────┐  │
+  REST API          │  │ Scatter │→│  Merge   │→│  Return  │  │
+                     │  │ Gather  │ │  TopK    │ │  Result  │  │
+                     │  └────┬────┘ └──────────┘ └──────────┘  │
+                     │       │ parallel fan-out                  │
+                     └───────┼──────────────────────────────────┘
+                  ┌──────────┼──────────┐
+                  ▼          ▼          ▼
+           ┌──────────┐┌──────────┐┌──────────┐
+           │ Worker 0 ││ Worker 1 ││ Worker 2 │
+           │          ││          ││          │
+           │ lancedb  ││ lancedb  ││ lancedb  │
+           │ Table API││ Table API││ Table API│
+           └────┬─────┘└────┬─────┘└────┬─────┘
+                │           │           │
+                ▼           ▼           ▼
+           ┌──────────────────────────────────┐
+           │    S3 / MinIO / Local Storage     │
+           │    Lance tables + indexes         │
+           └──────────────────────────────────┘
 ```
 
-Each Worker runs the same DataFusion + Lance query path as single-node LanceDB — no custom engine code, no data format conversion.
-
-## Key Features
-
-- **Distributed ANN Search** — Scatter-gather over sharded Lance tables with IVF_PQ/HNSW indexes
-- **Full-Text Search** — BM25-based FTS with distributed merge
-- **Hybrid Search** — ANN + FTS combined via Reciprocal Rank Fusion (RRF)
-- **Multi-Table** — Query different tables with different schemas and dimensions
-- **Text Query** — Auto-embed text to vectors using OpenAI or SentenceTransformers
-- **Shard Pruning** — Skip irrelevant shards based on column statistics
-- **Two-Phase Shard Management** — Atomic shard reassignment with readiness gates
-- **Failover** — Primary/secondary executor routing per shard
-- **Query Cache** — TTL + LRU cache with dataset-version coherence
-- **Data Freshness** — Background dataset version refresh (non-blocking)
-- **Multi-Active HA** — All coordinator instances active behind load balancer
-- **API Key Auth** — Bearer token authentication via config
-- **Structured Logging** — JSON output for production, human-readable for dev
+Each Worker uses the **lancedb Table API** directly — vector search, FTS, hybrid, and writes all go through the same battle-tested lancedb code path. LanceForge adds only the distributed coordination layer on top.
 
 ## Quick Start
 
-### Build
+**One command:**
 
 ```bash
+git clone https://github.com/wangyong9999/lanceforge
+cd lanceforge
+./demo.sh      # Creates data, starts cluster, runs queries
+```
+
+**Or step by step:**
+
+```bash
+# Build
 cargo build --release -p lance-distributed-coordinator -p lance-distributed-worker
+
+# Start (see demo.sh for full example)
+./target/release/lance-worker config.yaml worker_0 50100
+./target/release/lance-coordinator config.yaml 50050
 ```
 
-### Create test data
+## Features
+
+### Retrieval
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| 🔍 **ANN Vector Search** | IVF_FLAT/HNSW over sharded data, global TopK merge | ✅ Verified |
+| 📝 **Full-Text Search** | BM25 via Tantivy, distributed merge | ✅ Verified |
+| 🔀 **Hybrid Search** | ANN + FTS with RRF reranking (lancedb native) | ✅ Verified |
+| 🏷️ **Filtered Search** | ANN + SQL WHERE with smart index/brute-force selection | ✅ Verified |
+| 🧬 **Multi-vector** | ColBERT late-interaction (lancedb native) | ✅ Supported |
+| ✏️ **Sparse / BM25** | Keyword-based retrieval via FTS | ✅ Supported |
+
+### Data Management
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| ➕ **Insert** | Add rows with round-robin shard distribution | ✅ Verified |
+| ❌ **Delete** | Filter-based deletion, fan-out to all shards | ✅ Verified |
+| 🔄 **Upsert** | merge_insert with conflict resolution | ✅ Verified |
+| 🏗️ **CreateTable** | Create table via API → auto-register + worker hot-load | ✅ Verified |
+| 📊 **CreateIndex** | Fan-out index creation (IVF_FLAT, BTREE, FTS) | ✅ Verified |
+| 📋 **GetSchema** | Column names + types from worker | ✅ Verified |
+| 🔢 **CountRows** | Distributed row count across shards | ✅ Verified |
+| 🗑️ **DropTable** | Unload shards + clear metadata | ✅ Verified |
+| 📑 **ListTables** | All tables in cluster | ✅ Verified |
+
+### Infrastructure
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| 🔐 **API Key Auth** | Bearer token authentication | ✅ |
+| 🔒 **TLS** | Server certificate loading (coordinator + worker) | ✅ |
+| 📊 **Prometheus Metrics** | /metrics endpoint with query count, latency, errors | ✅ |
+| 💚 **Health Check** | /healthz for load balancers and K8s | ✅ |
+| 🛡️ **Backpressure** | Semaphore-based admission control (max 200 concurrent) | ✅ |
+| 🔄 **Failover** | Primary/secondary executor routing per shard | ✅ |
+| ⚡ **Auto-Shard** | Fragment-based automatic shard discovery | ✅ |
+| 📝 **Structured Logging** | JSON (production) / pretty (dev) via tracing | ✅ |
+
+## Python SDK
 
 ```bash
-cd lance-integration/tools
-python3 shard_splitter.py /path/to/source.lance ./shards/ --num-shards 3
+pip install grpcio pyarrow  # dependencies
 ```
-
-### Start cluster
-
-```bash
-# Workers
-./target/release/lance-worker cluster_config.yaml worker_0 50100
-./target/release/lance-worker cluster_config.yaml worker_1 50101
-./target/release/lance-worker cluster_config.yaml worker_2 50102
-
-# Coordinator
-./target/release/lance-coordinator cluster_config.yaml 50050
-```
-
-### Query
 
 ```python
-from lance_distributed_client import LanceDistributedClient
+from lanceforge import LanceForgeClient
 
-client = LanceDistributedClient("localhost:50050")
-results = client.search(
-    table_name="products",
-    query_vector=[0.1, 0.2, ...],  # dim=128
-    k=10,
-    nprobes=20,
-    filter="category = 'electronics'"
+client = LanceForgeClient("localhost:50050")
+
+# Create table
+client.create_table("products", initial_data, index_column="vector")
+
+# Vector search
+results = client.search("products", query_vector=[0.1, 0.2, ...], k=10,
+                         filter="category = 'electronics'")
+
+# Full-text search
+results = client.text_search("products", "wireless headphones", k=10)
+
+# Hybrid search (ANN + FTS with RRF fusion)
+results = client.hybrid_search("products", query_vector=[...],
+                                query_text="headphones", k=10)
+
+# Write operations
+client.insert("products", new_data)
+client.upsert("products", data, on_columns=["id"])
+client.delete("products", filter="category = 'discontinued'")
+
+# DDL
+client.create_index("products", "description", index_type="INVERTED")
+schema = client.list_tables()
+client.drop_table("old_table")
+```
+
+### LangChain Integration
+
+```python
+from lanceforge.langchain import LanceForgeVectorStore
+
+store = LanceForgeVectorStore(
+    host="localhost:50050",
+    table_name="documents",
+    embedding=OpenAIEmbeddings(),
 )
-print(results.to_pandas())
+docs = store.similarity_search("retrieval augmented generation", k=5)
+```
+
+## Performance
+
+### Recall & Throughput (200K×128d, 3 shards, local SSD)
+
+```
+Scenario              Recall@10    QPS      P50 Latency
+──────────────────    ─────────    ───      ───────────
+Unfiltered ANN        1.0000      129      7.7 ms
+Filtered ANN (10%)    1.0000      181      5.3 ms
+High-dim 1536d        1.0000       37      22  ms
+1M scale (5 shards)   0.9995       40      23  ms
+Concurrent (50)       —            48      14  ms
+```
+
+### vs Qdrant (Same Machine, Same Dataset)
+
+```
+Scenario          Qdrant    LanceForge    Difference
+────────          ──────    ──────────    ──────────
+Unfiltered QPS       79          106      +34% faster ✅
+Filtered QPS        107           89      comparable
+Concurrent QPS       12           47      +4x faster  ✅
+Recall@10           1.0          1.0      equal
 ```
 
 ## Cluster Configuration
@@ -107,145 +226,97 @@ executors:
   - id: worker_0
     host: "10.0.1.1"
     port: 50100
-  - id: worker_1
-    host: "10.0.1.2"
-    port: 50101
 
 storage_options:
   aws_access_key_id: "..."
   aws_secret_access_key: "..."
   aws_endpoint: "http://minio:9000"
-  aws_region: "us-east-1"
-  allow_http: "true"
 
-# Optional: text query embedding
-embedding:
-  provider: "openai"
-  model: "text-embedding-3-small"
-  dimension: 1536
-
-# Optional: server tuning
-server:
-  query_timeout_secs: 30
-  keepalive_interval_secs: 10
-  concurrency_limit: 256
-
-# Optional: API key auth
+# Optional
 security:
-  api_keys:
-    - "your-api-key-here"
+  api_keys: ["your-key"]
+  tls_cert: "/path/to/cert.pem"
+  tls_key: "/path/to/key.pem"
 ```
-
-## Supported Query Types
-
-| Type | Description | Use Case |
-|------|-------------|----------|
-| **ANN** | IVF_PQ/HNSW vector similarity | Image/embedding search |
-| **FTS** | Full-text BM25 search | Document retrieval |
-| **Hybrid** | ANN + FTS with RRF reranking | RAG pipelines |
-| **Filtered ANN** | ANN + SQL WHERE clause | Faceted vector search |
-| **Text Query** | Auto-embed text → ANN | End-user natural language |
 
 ## Crate Structure
 
 ```
 crates/
-├── proto/          lance-distributed-proto     gRPC service definitions
-├── common/         lance-distributed-common    Config, shard state, metrics, IPC
-├── coordinator/    lance-distributed-coordinator   Query routing, scatter-gather, merge
-└── worker/         lance-distributed-worker    Lance query execution, caching
+├── proto/          gRPC service definitions (15 RPCs)
+├── common/         Config, shard state, auto-shard, metrics, IPC
+├── coordinator/    Scatter-gather, merge, connection pool, auth, REST
+└── worker/         lancedb Table query execution, caching, dynamic loading
 
-lance-integration/  Integration tests, Python tools, Dockerfile
-```
-
-| Crate | Unit Tests | Lines |
-|-------|-----------|-------|
-| proto | — | ~350 |
-| common | 34 | ~1800 |
-| coordinator | 40 | ~2000 |
-| worker | 25 | ~900 |
-| **Total** | **99** | **~5050** |
-
-Plus 29 integration tests, 28 E2E tests, and 9 benchmark suites.
-
-## Docker
-
-```bash
-# Build
-docker compose -f lance-integration/docker-compose.yaml build
-
-# Run (1 coordinator + 3 workers)
-docker compose -f lance-integration/docker-compose.yaml up
+lance-integration/
+├── tests/          29 Rust integration tests
+├── tools/          E2E tests + Python tools
+├── bench/          9 benchmark suites + regression runner
+└── sdk/python/     Python SDK + LangChain adapter
 ```
 
 ## Testing
 
 ```bash
-# Unit tests (90 tests across 4 crates)
+# Unit tests (99 across 4 crates)
 cargo test -p lance-distributed-common --lib
 cargo test -p lance-distributed-coordinator --lib
 cargo test -p lance-distributed-worker --lib
 
-# Integration tests (29 tests, serial)
-for t in test_distributed_ann test_edge_cases test_data_freshness \
-         test_text_query test_multi_table test_grpc_distributed \
-         test_shard_routing test_benchmark test_durability test_ha; do
-  cargo test -p lanceforge --test $t -- --test-threads=1
-done
-
-# Python tests
+# Full capability verification (21 tests)
 cd lance-integration/tools
-python3 -m pytest test_client.py test_shard_splitter.py -v
+python3 e2e_full_capability_test.py
 
-# Full system E2E (requires MinIO)
-python3 e2e_full_system_test.py
+# Benchmark regression suite
+cd lance-integration/bench
+python3 run_all.py --quick   # 4 suites, ~2 min
+python3 run_all.py           # 9 suites, ~30 min
+
+# One-command demo
+./demo.sh
 ```
 
-## Performance
+## Docker
 
-Benchmarked on 200K×128d vectors, 3 shards (local SSD):
-
-| Scenario | Recall@10 | QPS | P50 |
-|----------|-----------|-----|-----|
-| Unfiltered ANN | 1.0000 | 129 | 7.7ms |
-| Filtered ANN (10%) | 1.0000 | 181 | 5.3ms |
-| High-dim 1536d | 1.0000 | 37 | 22ms |
-| 1M scale (5 shards) | 0.9995 | 40 | 23ms |
-| 50 concurrent | — | 48 | 14ms |
-
-### vs Qdrant (same machine, same dataset)
-
-| Scenario | Qdrant | LanceForge | |
-|----------|--------|------------|---|
-| Unfiltered QPS | 79 | **106** | +34% faster |
-| Filtered QPS | 107 | **89** | Comparable |
-| Concurrent QPS | 12 | **47** | 4x faster |
-| Recall | 1.0 | 1.0 | Equal |
+```bash
+docker compose -f lance-integration/docker-compose.yaml up
+# Generates sample data automatically, starts coordinator + 2 workers
+# gRPC: localhost:50050 | REST: localhost:50051
+```
 
 ## Comparison
 
-| | LanceForge | LanceDB Cloud | Milvus | Qdrant |
-|---|---|---|---|---|
-| Open source | Apache-2.0 | Proprietary | Apache-2.0 | Apache-2.0 |
-| Data format | Lance (open) | Lance (open) | Proprietary | Proprietary |
-| Multimodal storage | Native | Native | Vectors only | Vectors only |
-| Dense ANN | IVF_FLAT/HNSW | IVF/HNSW | IVF/HNSW/GPU | HNSW |
-| Hybrid search (RRF) | Built-in | Built-in | Built-in | Fusion API |
-| Multi-vector (ColBERT) | Native | Native | Yes | Native |
-| Write (insert/delete/upsert) | Yes | Yes | Yes | Yes |
-| Python SDK | Yes | Yes | Yes | Yes |
-| LangChain | Yes | Yes | Yes | Yes |
-| Lakehouse interop | DataFusion/DuckDB | DuckDB | None | None |
-| Embedded → distributed | Same .lance format | Migration | N/A | N/A |
+|  | LanceForge | LanceDB Cloud | Milvus | Qdrant |
+|---|:---:|:---:|:---:|:---:|
+| **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ✅ Apache-2.0 | ✅ Apache-2.0 |
+| **Data format** | Lance (open) | Lance (open) | Proprietary | Proprietary |
+| **Multimodal storage** | ✅ Native | ✅ Native | ❌ Vectors only | ❌ Vectors only |
+| **Dense ANN** | ✅ IVF/HNSW | ✅ | ✅ +GPU | ✅ HNSW |
+| **Full-text search** | ✅ Tantivy | ✅ | ✅ BM25 | ✅ |
+| **Hybrid (RRF)** | ✅ Native | ✅ | ✅ | ✅ |
+| **Multi-vector (ColBERT)** | ✅ | ✅ | ✅ | ✅ |
+| **Insert/Delete/Upsert** | ✅ | ✅ | ✅ | ✅ |
+| **Python SDK** | ✅ | ✅ | ✅ | ✅ |
+| **LangChain** | ✅ | ✅ | ✅ | ✅ |
+| **Data versioning** | ✅ Lance native | ✅ | ❌ | ❌ |
+| **Lakehouse interop** | ✅ DuckDB/Spark | ✅ DuckDB | ❌ | ❌ |
+| **Embedded → distributed** | ✅ Same files | ❌ Migration | ❌ N/A | ❌ N/A |
 
 ## Roadmap
 
-- [ ] Data durability (write-ahead intent log)
-- [ ] Dynamic cluster management (online join/leave)
-- [ ] RBAC and TLS
+- [x] ~~Distributed ANN/FTS/Hybrid search~~
+- [x] ~~Insert/Delete/Upsert via gRPC~~
+- [x] ~~CreateTable/CreateIndex/DropTable DDL~~
+- [x] ~~Python SDK + LangChain~~
+- [x] ~~TLS support~~
+- [x] ~~Prometheus metrics + health checks~~
+- [x] ~~Benchmark regression CI~~
+- [ ] Kubernetes Helm chart
+- [ ] RBAC (role-based access control)
 - [ ] SQL query path via DuckDB/Ballista
-- [ ] Kubernetes operator
-- [ ] True sparse vector index (learned embeddings)
+- [ ] True sparse vector index (SPLADE/BGE-M3)
+- [ ] CDC / incremental sync
+- [ ] GPU-accelerated index search
 
 ## License
 
