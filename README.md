@@ -30,16 +30,17 @@
 LanceForge extends [LanceDB](https://github.com/lancedb/lancedb) from an **embedded single-node** database to a **horizontally scalable distributed** query engine — without changing your data format.
 
 ```
-Single-node LanceDB           LanceForge (distributed)
-┌──────────┐                  ┌────────────────────────────────┐
-│  App     │                  │  App                            │
-│    ↓     │                  │    ↓ gRPC / Python SDK          │
-│ LanceDB  │    ──────►       │  Coordinator (scatter-gather)   │
-│    ↓     │   same .lance    │    ↓         ↓         ↓       │
-│  .lance  │     files        │  Worker 0  Worker 1  Worker 2  │
-└──────────┘                  │    ↓         ↓         ↓       │
-                              │     S3 / MinIO / Local FS      │
-                              └────────────────────────────────┘
+Single-node LanceDB            LanceForge (distributed)
+
++----------+                   +--------------------------------+
+|  App     |                   |  App                           |
+|    |     |                   |    | gRPC / Python SDK         |
+| LanceDB  |   --------->     |  Coordinator (scatter-gather)  |
+|    |     |   same .lance     |    |         |         |       |
+|  .lance  |     files         |  Worker 0  Worker 1  Worker 2 |
++----------+                   |    |         |         |       |
+                               |    S3 / MinIO / Local FS      |
+                               +--------------------------------+
 ```
 
 **Same Lance files. Same queries. Horizontal throughput.**
@@ -47,29 +48,28 @@ Single-node LanceDB           LanceForge (distributed)
 ## Architecture
 
 ```
-                     ┌──────────────────────────────────────────┐
-                     │              Coordinator                  │
-  Client ──gRPC────►│                                          │
-  Python SDK        │  ┌─────────┐ ┌──────────┐ ┌──────────┐  │
-  REST API          │  │ Scatter │→│  Merge   │→│  Return  │  │
-                     │  │ Gather  │ │  TopK    │ │  Result  │  │
-                     │  └────┬────┘ └──────────┘ └──────────┘  │
-                     │       │ parallel fan-out                  │
-                     └───────┼──────────────────────────────────┘
-                  ┌──────────┼──────────┐
-                  ▼          ▼          ▼
-           ┌──────────┐┌──────────┐┌──────────┐
-           │ Worker 0 ││ Worker 1 ││ Worker 2 │
-           │          ││          ││          │
-           │ lancedb  ││ lancedb  ││ lancedb  │
-           │ Table API││ Table API││ Table API│
-           └────┬─────┘└────┬─────┘└────┬─────┘
-                │           │           │
-                ▼           ▼           ▼
-           ┌──────────────────────────────────┐
-           │    S3 / MinIO / Local Storage     │
-           │    Lance tables + indexes         │
-           └──────────────────────────────────┘
+                  +------------------------------------------+
+                  |             Coordinator                   |
+ Client --gRPC-->|                                          |
+ Python SDK      |  [Scatter] --> [Merge TopK] --> [Return] |
+ REST API        |      |     parallel fan-out              |
+                  +------+----------------------------------+
+                         |
+              +----------+----------+
+              |          |          |
+              v          v          v
+         +--------+ +--------+ +--------+
+         |Worker 0| |Worker 1| |Worker 2|
+         |        | |        | |        |
+         |lancedb | |lancedb | |lancedb |
+         |Table   | |Table   | |Table   |
+         +---+----+ +---+----+ +---+----+
+             |           |           |
+             v           v           v
+         +------------------------------------+
+         |   S3 / MinIO / Local Storage       |
+         |   Lance tables + indexes           |
+         +------------------------------------+
 ```
 
 Each Worker uses the **lancedb Table API** directly — vector search, FTS, hybrid, and writes all go through the same battle-tested lancedb code path. LanceForge adds only the distributed coordination layer on top.
