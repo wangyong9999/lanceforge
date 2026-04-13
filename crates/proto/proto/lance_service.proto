@@ -14,6 +14,7 @@ service LanceSchedulerService {
   // Write operations
   rpc AddRows (AddRowsRequest) returns (WriteResponse) {}
   rpc DeleteRows (DeleteRowsRequest) returns (WriteResponse) {}
+  rpc UpsertRows (UpsertRowsRequest) returns (WriteResponse) {}
 }
 
 // Service running on each Executor for receiving queries from Scheduler.
@@ -136,6 +137,12 @@ message DeleteRowsRequest {
   string filter = 2;              // SQL WHERE predicate (e.g., "id > 100")
 }
 
+message UpsertRowsRequest {
+  string table_name = 1;
+  bytes arrow_ipc_data = 2;       // Rows to upsert (Arrow IPC)
+  repeated string on_columns = 3; // Join key columns for dedup (e.g., ["id"])
+}
+
 message WriteResponse {
   uint64 affected_rows = 1;
   uint64 new_version = 2;
@@ -145,10 +152,11 @@ message WriteResponse {
 // ============ Scheduler → Executor (Writes) ============
 
 message LocalWriteRequest {
-  int32 write_type = 1;           // 0=Add, 1=Delete
+  int32 write_type = 1;           // 0=Add, 1=Delete, 2=Upsert
   string table_name = 2;
-  bytes arrow_ipc_data = 3;       // For Add: rows as Arrow IPC
+  bytes arrow_ipc_data = 3;       // For Add/Upsert: rows as Arrow IPC
   string filter = 4;              // For Delete: SQL WHERE predicate
+  repeated string on_columns = 5; // For Upsert: join key columns
 }
 
 message LocalWriteResponse {

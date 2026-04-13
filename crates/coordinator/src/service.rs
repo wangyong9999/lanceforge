@@ -232,6 +232,7 @@ impl LanceSchedulerService for CoordinatorService {
             table_name: req.table_name,
             arrow_ipc_data: req.arrow_ipc_data,
             filter: String::new(),
+                    on_columns: vec![],
         };
 
         let result = tokio::time::timeout(
@@ -278,6 +279,69 @@ impl LanceSchedulerService for CoordinatorService {
                     table_name: req.table_name.clone(),
                     arrow_ipc_data: vec![],
                     filter: req.filter.clone(),
+                    on_columns: vec![],
+                };
+
+                match tokio::time::timeout(
+                    self.query_timeout,
+                    client.execute_local_write(Request::new(local_req)),
+                ).await {
+                    Ok(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.error.is_empty() {
+                            total_affected += r.affected_rows;
+                            max_version = max_version.max(r.new_version);
+                        } else {
+                            errors.push(format!("{}: {}", worker_id, r.error));
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("{}: {}", worker_id, e)),
+                    Err(_) => errors.push(format!("{}: timeout", worker_id)),
+                }
+            }
+        }
+
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        Ok(Response::new(pb::WriteResponse {
+            affected_rows: total_affected,
+            new_version: max_version,
+            error,
+        }))
+    }
+
+    async fn upsert_rows(
+        &self,
+        request: Request<pb::UpsertRowsRequest>,
+    ) -> Result<Response<pb::WriteResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() || req.table_name.len() > 256 {
+            return Err(Status::invalid_argument("table_name must be 1-256 characters"));
+        }
+        if req.arrow_ipc_data.is_empty() {
+            return Err(Status::invalid_argument("arrow_ipc_data is empty"));
+        }
+        if req.on_columns.is_empty() {
+            return Err(Status::invalid_argument("on_columns required for upsert"));
+        }
+
+        // Upsert fans out to ALL workers (each applies merge_insert on local shard)
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        }
+
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+        let mut errors = Vec::new();
+
+        for worker_id in &executors {
+            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                let local_req = pb::LocalWriteRequest {
+                    write_type: 2, // Upsert
+                    table_name: req.table_name.clone(),
+                    arrow_ipc_data: req.arrow_ipc_data.clone(),
+                    filter: String::new(),
+                    on_columns: req.on_columns.clone(),
                 };
 
                 match tokio::time::timeout(

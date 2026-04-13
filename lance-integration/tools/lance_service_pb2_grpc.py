@@ -65,6 +65,11 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.DeleteRowsRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.WriteResponse.FromString,
                 _registered_method=True)
+        self.UpsertRows = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/UpsertRows',
+                request_serializer=lance__service__pb2.UpsertRowsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.WriteResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -109,6 +114,12 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpsertRows(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -140,6 +151,11 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
             'DeleteRows': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteRows,
                     request_deserializer=lance__service__pb2.DeleteRowsRequest.FromString,
+                    response_serializer=lance__service__pb2.WriteResponse.SerializeToString,
+            ),
+            'UpsertRows': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpsertRows,
+                    request_deserializer=lance__service__pb2.UpsertRowsRequest.FromString,
                     response_serializer=lance__service__pb2.WriteResponse.SerializeToString,
             ),
     }
@@ -305,6 +321,33 @@ class LanceSchedulerService(object):
             target,
             '/lance.distributed.LanceSchedulerService/DeleteRows',
             lance__service__pb2.DeleteRowsRequest.SerializeToString,
+            lance__service__pb2.WriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpsertRows(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/UpsertRows',
+            lance__service__pb2.UpsertRowsRequest.SerializeToString,
             lance__service__pb2.WriteResponse.FromString,
             options,
             channel_credentials,

@@ -184,6 +184,30 @@ impl LanceTableRegistry {
                     // Lance delete doesn't return count; estimate from pre-count
                     total_affected += 1; // placeholder
                 }
+                2 => {
+                    // Upsert via merge_insert
+                    if req.arrow_ipc_data.is_empty() {
+                        return Err(DataFusionError::Plan("Empty data for upsert".to_string()));
+                    }
+                    if req.on_columns.is_empty() {
+                        return Err(DataFusionError::Plan("on_columns required for upsert".to_string()));
+                    }
+                    let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    let rows = batch.num_rows() as u64;
+                    let on_cols: Vec<&str> = req.on_columns.iter().map(|s| s.as_str()).collect();
+                    let schema = table.schema().await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    let mut builder = table.merge_insert(&on_cols);
+                    builder.when_matched_update_all(None)
+                        .when_not_matched_insert_all();
+                    builder.execute(Box::new(arrow::record_batch::RecordBatchIterator::new(
+                            vec![Ok(batch)], schema,
+                        )))
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    total_affected += rows;
+                }
                 _ => {
                     return Err(DataFusionError::Plan(format!("Unknown write_type: {}", req.write_type)));
                 }

@@ -174,6 +174,17 @@ pub struct DeleteRowsRequest {
     pub filter: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpsertRowsRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    /// Rows to upsert (Arrow IPC)
+    #[prost(bytes = "vec", tag = "2")]
+    pub arrow_ipc_data: ::prost::alloc::vec::Vec<u8>,
+    /// Join key columns for dedup (e.g., \["id"\])
+    #[prost(string, repeated, tag = "3")]
+    pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WriteResponse {
     #[prost(uint64, tag = "1")]
     pub affected_rows: u64,
@@ -185,17 +196,20 @@ pub struct WriteResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalWriteRequest {
-    /// 0=Add, 1=Delete
+    /// 0=Add, 1=Delete, 2=Upsert
     #[prost(int32, tag = "1")]
     pub write_type: i32,
     #[prost(string, tag = "2")]
     pub table_name: ::prost::alloc::string::String,
-    /// For Add: rows as Arrow IPC
+    /// For Add/Upsert: rows as Arrow IPC
     #[prost(bytes = "vec", tag = "3")]
     pub arrow_ipc_data: ::prost::alloc::vec::Vec<u8>,
     /// For Delete: SQL WHERE predicate
     #[prost(string, tag = "4")]
     pub filter: ::prost::alloc::string::String,
+    /// For Upsert: join key columns
+    #[prost(string, repeated, tag = "5")]
+    pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalWriteResponse {
@@ -456,6 +470,32 @@ pub mod lance_scheduler_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn upsert_rows(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpsertRowsRequest>,
+        ) -> std::result::Result<tonic::Response<super::WriteResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/UpsertRows",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "UpsertRows",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -499,6 +539,10 @@ pub mod lance_scheduler_service_server {
         async fn delete_rows(
             &self,
             request: tonic::Request<super::DeleteRowsRequest>,
+        ) -> std::result::Result<tonic::Response<super::WriteResponse>, tonic::Status>;
+        async fn upsert_rows(
+            &self,
+            request: tonic::Request<super::UpsertRowsRequest>,
         ) -> std::result::Result<tonic::Response<super::WriteResponse>, tonic::Status>;
     }
     /// Service running on the Scheduler for clients to submit Lance queries.
@@ -843,6 +887,52 @@ pub mod lance_scheduler_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = DeleteRowsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/UpsertRows" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpsertRowsSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::UpsertRowsRequest>
+                    for UpsertRowsSvc<T> {
+                        type Response = super::WriteResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpsertRowsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::upsert_rows(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpsertRowsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -194,6 +194,34 @@ class LanceForgeClient:
             raise RuntimeError(f"Delete failed: {resp.error}")
         return {"affected_rows": resp.affected_rows, "new_version": resp.new_version}
 
+    def upsert(self, table, data, on_columns):
+        """Upsert rows (insert or update if exists).
+
+        Args:
+            table: Table name
+            data: pyarrow.Table or pyarrow.RecordBatch
+            on_columns: List of column names to match on (e.g., ["id"])
+
+        Returns:
+            dict with 'affected_rows' and 'new_version'
+        """
+        if isinstance(data, pa.Table):
+            data = data.to_batches()[0] if data.num_rows > 0 else None
+        if data is None:
+            raise ValueError("No data to upsert")
+
+        ipc_data = self._encode_batch(data)
+        resp = self._stub.UpsertRows(
+            pb.UpsertRowsRequest(
+                table_name=table,
+                arrow_ipc_data=ipc_data,
+                on_columns=on_columns),
+            metadata=self._metadata(), timeout=30)
+
+        if resp.error:
+            raise RuntimeError(f"Upsert failed: {resp.error}")
+        return {"affected_rows": resp.affected_rows, "new_version": resp.new_version}
+
     # ── Status ──
 
     def status(self):
