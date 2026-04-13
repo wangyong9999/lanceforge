@@ -258,11 +258,12 @@ async fn execute_on_table(
 
             if let Some(ref filter) = descriptor.filter {
                 builder = builder.only_if(filter.clone());
-                // Bypass vector index for filtered queries: IVF partitions
-                // scatter filtered vectors across partitions, causing recall loss.
-                // Brute-force on the filtered subset gives perfect recall and is
-                // fast enough when filter selectivity is moderate (<50%).
-                builder = builder.bypass_vector_index();
+                // lancedb defaults to prefilter=true: scalar index narrows candidates
+                // before vector search. This gives good recall + high QPS when a
+                // BTREE/BITMAP index exists on the filter column.
+                // Increase nprobes for filtered queries to compensate for reduced
+                // candidates per partition.
+                builder = builder.nprobes(vq.nprobes.max(20) as usize);
             }
 
             let stream = builder.execute().await
