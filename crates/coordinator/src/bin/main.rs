@@ -82,7 +82,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let service = CoordinatorService::new(&config, query_timeout);
+    let metrics = service.metrics();
     let addr = format!("0.0.0.0:{}", port).parse()?;
+
+    // Start Prometheus metrics HTTP server on port+1
+    let metrics_port = port + 1;
+    tokio::spawn(async move {
+        lance_distributed_common::metrics::start_metrics_server(metrics, metrics_port).await;
+    });
 
     let auth = ApiKeyInterceptor::new(config.security.api_keys.clone());
     let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth.check(req));

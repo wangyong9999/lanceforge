@@ -55,6 +55,16 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.ClusterStatusRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.ClusterStatusResponse.FromString,
                 _registered_method=True)
+        self.AddRows = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/AddRows',
+                request_serializer=lance__service__pb2.AddRowsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.WriteResponse.FromString,
+                _registered_method=True)
+        self.DeleteRows = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/DeleteRows',
+                request_serializer=lance__service__pb2.DeleteRowsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.WriteResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -86,6 +96,19 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AddRows(self, request, context):
+        """Write operations
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteRows(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -108,6 +131,16 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.GetClusterStatus,
                     request_deserializer=lance__service__pb2.ClusterStatusRequest.FromString,
                     response_serializer=lance__service__pb2.ClusterStatusResponse.SerializeToString,
+            ),
+            'AddRows': grpc.unary_unary_rpc_method_handler(
+                    servicer.AddRows,
+                    request_deserializer=lance__service__pb2.AddRowsRequest.FromString,
+                    response_serializer=lance__service__pb2.WriteResponse.SerializeToString,
+            ),
+            'DeleteRows': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteRows,
+                    request_deserializer=lance__service__pb2.DeleteRowsRequest.FromString,
+                    response_serializer=lance__service__pb2.WriteResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -229,6 +262,60 @@ class LanceSchedulerService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def AddRows(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/AddRows',
+            lance__service__pb2.AddRowsRequest.SerializeToString,
+            lance__service__pb2.WriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteRows(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/DeleteRows',
+            lance__service__pb2.DeleteRowsRequest.SerializeToString,
+            lance__service__pb2.WriteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class LanceExecutorServiceStub(object):
     """Service running on each Executor for receiving queries from Scheduler.
@@ -245,6 +332,11 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.LocalSearchRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.LocalSearchResponse.FromString,
                 _registered_method=True)
+        self.ExecuteLocalWrite = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteLocalWrite',
+                request_serializer=lance__service__pb2.LocalWriteRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.LocalWriteResponse.FromString,
+                _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
                 request_serializer=lance__service__pb2.HealthCheckRequest.SerializeToString,
@@ -257,6 +349,12 @@ class LanceExecutorServiceServicer(object):
     """
 
     def ExecuteLocalSearch(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteLocalWrite(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -276,6 +374,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.ExecuteLocalSearch,
                     request_deserializer=lance__service__pb2.LocalSearchRequest.FromString,
                     response_serializer=lance__service__pb2.LocalSearchResponse.SerializeToString,
+            ),
+            'ExecuteLocalWrite': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteLocalWrite,
+                    request_deserializer=lance__service__pb2.LocalWriteRequest.FromString,
+                    response_serializer=lance__service__pb2.LocalWriteResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -311,6 +414,33 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/ExecuteLocalSearch',
             lance__service__pb2.LocalSearchRequest.SerializeToString,
             lance__service__pb2.LocalSearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteLocalWrite(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteLocalWrite',
+            lance__service__pb2.LocalWriteRequest.SerializeToString,
+            lance__service__pb2.LocalWriteResponse.FromString,
             options,
             channel_credentials,
             insecure,

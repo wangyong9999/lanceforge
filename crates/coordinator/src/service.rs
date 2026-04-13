@@ -27,11 +27,17 @@ pub struct CoordinatorService {
     oversample_factor: u32,
     query_timeout: Duration,
     embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
+    metrics: Arc<lance_distributed_common::metrics::Metrics>,
 }
 
 impl CoordinatorService {
     pub fn new(config: &ClusterConfig, query_timeout: Duration) -> Self {
         Self::with_pruner(config, query_timeout, ShardPruner::empty())
+    }
+
+    /// Get metrics handle for the metrics HTTP server.
+    pub fn metrics(&self) -> Arc<lance_distributed_common::metrics::Metrics> {
+        self.metrics.clone()
     }
 
     pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
@@ -55,6 +61,8 @@ impl CoordinatorService {
             reconciliation_loop(recon_state, Duration::from_secs(5)).await;
         });
 
+        let metrics = lance_distributed_common::metrics::Metrics::new();
+
         Self {
             pool,
             shard_state,
@@ -62,6 +70,7 @@ impl CoordinatorService {
             oversample_factor: 2,
             query_timeout,
             embedding_config: config.embedding.clone(),
+            metrics,
         }
     }
 }
@@ -108,11 +117,14 @@ impl LanceSchedulerService for CoordinatorService {
             k: oversample_k, filter: req.filter, columns: req.columns,
         };
 
-        let response = super::scatter_gather::scatter_gather(
+        let t0 = std::time::Instant::now();
+        let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, k, true, self.query_timeout,
-        ).await?;
-        Ok(Response::new(response))
+        ).await;
+        let latency_us = t0.elapsed().as_micros() as u64;
+        self.metrics.record_query(latency_us, result.is_ok());
+        Ok(Response::new(result?))
     }
 
     async fn fts_search(
