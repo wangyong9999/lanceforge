@@ -444,18 +444,19 @@ impl LanceSchedulerService for CoordinatorService {
         // Register table in shard state + tell first worker to load it
         let shard_name = format!("{}_shard_00", req.table_name);
         let executors = self.shard_state.all_executors().await;
-        if let Some((executor_id, host, port)) = executors.first() {
-            // Register in shard state
+        if let Some((executor_id, _host, _port)) = executors.first() {
+            // Register directly in shard state (bypasses readiness gate)
             let mut mapping = std::collections::HashMap::new();
             mapping.insert(shard_name.clone(), vec![executor_id.clone()]);
-            let _ = self.shard_state.set_next_target(&req.table_name, mapping).await;
-            let _ = self.shard_state.promote_target(&req.table_name).await;
+            self.shard_state.register_table(&req.table_name, mapping).await;
 
             // Tell worker to load the new shard
+            // lancedb create_table stores at parent_dir/table_name.lance
+            let actual_uri = format!("{}{}.lance", parent, req.table_name);
             if let Ok(mut client) = self.pool.get_healthy_client(executor_id).await {
                 let load_req = pb::LoadShardRequest {
                     shard_name: shard_name.clone(),
-                    uri: uri.clone(),
+                    uri: actual_uri.clone(),
                     storage_options: self.storage_options.clone(),
                 };
                 let _ = client.load_shard(Request::new(load_req)).await;

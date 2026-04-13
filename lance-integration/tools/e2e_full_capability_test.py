@@ -266,6 +266,33 @@ def t_concurrent():
     assert len(errors) == 0, f"{len(errors)} errors: {errors[:3]}"
 test("14. 10 concurrent searches, zero errors", t_concurrent)
 
+# ── DDL Tests ──
+
+def t_create_table():
+    """Create a new table via SDK, insert data, search it."""
+    new_table = pa.table({
+        'id': pa.array([1, 2, 3], type=pa.int64()),
+        'content': pa.array(['hello world', 'foo bar', 'test doc'], type=pa.string()),
+        'vec': pa.FixedSizeListArray.from_arrays(
+            pa.array(np.random.randn(3 * DIM).astype(np.float32)), list_size=DIM),
+    })
+    uri = os.path.join(BASE, "new_table.lance")
+    result = client.create_table("newtbl", new_table, uri=uri)
+    assert not result.get("error"), f"CreateTable error: {result}"
+    assert result["num_rows"] == 3
+    # Give worker time to load shard
+    time.sleep(2)
+    # Search the new table
+    r = client.search("newtbl", query_vector=np.zeros(DIM).tolist(), k=3,
+                       vector_column="vec")
+    assert r.num_rows > 0, f"Search on new table returned 0 rows"
+test("15. CreateTable → insert → search end-to-end", t_create_table)
+
+def t_list_tables_after_create():
+    tables = client.list_tables()
+    assert "newtbl" in tables, f"New table not in list: {tables}"
+test("16. ListTables includes newly created table", t_list_tables_after_create)
+
 # ── Cleanup ──
 channel.close()
 client.close()

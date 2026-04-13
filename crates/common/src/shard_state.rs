@@ -68,6 +68,10 @@ pub trait ShardState: Send + Sync + 'static {
     /// Get all known executors.
     async fn all_executors(&self) -> Vec<(String, String, u16)>; // (id, host, port)
 
+    /// Register a new table with its shard mapping (bypasses readiness gate).
+    /// Used by CreateTable to make a new table immediately queryable.
+    async fn register_table(&self, table_name: &str, mapping: ShardMapping);
+
     /// List all table names managed by this state.
     async fn all_tables(&self) -> Vec<String>;
 }
@@ -375,6 +379,16 @@ impl ShardState for StaticShardState {
     async fn all_tables(&self) -> Vec<String> {
         self.targets.read().await.keys().cloned().collect()
     }
+
+    async fn register_table(&self, table_name: &str, mapping: ShardMapping) {
+        let mut targets = self.targets.write().await;
+        targets.insert(table_name.to_string(), TargetState {
+            current: mapping,
+            next: None,
+            version: 1,
+        });
+        info!("Registered new table '{}' in shard state", table_name);
+    }
 }
 
 // ============================================================
@@ -601,6 +615,13 @@ pub mod etcd_state {
 
         async fn all_tables(&self) -> Vec<String> {
             self.cache.read().await.keys().cloned().collect()
+        }
+
+        async fn register_table(&self, table_name: &str, mapping: ShardMapping) {
+            let mut cache = self.cache.write().await;
+            cache.insert(table_name.to_string(), TargetState {
+                current: mapping, next: None, version: 1,
+            });
         }
 
         async fn report_loaded(&self, executor_id: &str, shard_names: Vec<String>) {
