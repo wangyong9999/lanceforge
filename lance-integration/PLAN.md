@@ -1,73 +1,62 @@
 # LanceForge Development Plan
 
-## Completed (Archived)
+## Completed
 
-### Phase 1-2: MVP + Crate Architecture
-### Phase 3: Commercial Quality Hardening
-### Phase 3.5: lancedb Table API Migration
-### Phase 4: Critical Capability Gaps (filtered recall, write path, auto-shard)
+### Phase 1-4: MVP → Architecture → Hardening → Critical Gaps
+### Phase 5: Developer Experience
+  - Python SDK (search/insert/delete/upsert/status)
+  - LangChain VectorStore adapter
+  - REST API (/metrics, /healthz, /v1/status)
+  - Metrics instrumented on all query paths
+  - HNSW/Reranker extensibility via lancedb
+### Phase 5.5: Core Retrieval Parity
+  - Filtered ANN QPS: 12.5 → 181 (surpasses Qdrant on same hardware)
+  - Upsert (merge_insert) via lancedb
+  - Multi-vector (ColBERT) via lancedb native
+  - Sparse Vector API (via FTS/BM25)
+  - Backpressure: semaphore-based query admission control (max 200)
+  - Delete row count fix (pre/post count instead of placeholder)
+  - Benchmark regression suite (run_all.py) + CI integration
+  - Competitor baseline: LanceForge vs Qdrant verified on same hardware
 
-### Phase 5 P0 (Partial)
-- [x] Write E2E test: insert → search → delete → verify (6/6 PASS)
-- [x] Metrics: ann_search latency/count instrumented
-- [x] /metrics HTTP endpoint on coordinator port+1
-- [ ] ~~Write throughput benchmark~~ (deferred — correctness verified, throughput not priority)
-- [ ] Metrics: fts_search/hybrid_search/write paths not yet instrumented
+### Benchmarks (Verified)
+  - SIFT-128 L2: recall=1.0, QPS=175 @ nprobes=5
+  - GloVe-100 Cosine: recall=1.0, QPS=211 @ nprobes=5
+  - High-dim 768d/1536d: recall=1.0
+  - 1M scale: recall=0.9995, QPS=40
+  - Filtered 10%: recall=1.0, QPS=181
+  - vs Qdrant: unfiltered +34%, concurrent +4.1x
 
-## Current: Phase 5 — Developer Experience + Completion
+## Next: Phase 6 — Production Reliability
 
-### Step 1: Complete metrics instrumentation (30 min)
-Metrics record_query only wired in ann_search. Add to fts_search, hybrid_search.
-- File: `crates/coordinator/src/service.rs`
-- Verify: unit tests pass, /metrics shows counts after FTS/hybrid queries
+### P0: Data Durability
+- [ ] Write-ahead intent log (crash recovery for in-flight writes)
+- [ ] Periodic checkpoint of shard state
+- [ ] Recovery test: kill worker mid-write, verify data consistency
 
-### Step 2: Python SDK — lanceforge-client (1 day)
-pip-installable client wrapping gRPC. NOT reimplementing lancedb Python — this is
-a thin distributed client that talks to LanceForge coordinator.
-- File: `lance-integration/sdk/python/lanceforge/__init__.py`
-- API: `LanceForgeClient(host).search(table, vector, k)`, `.insert(table, data)`, `.delete(table, filter)`
-- Reuse: generated proto stubs (lance_service_pb2)
-- Verify: pytest against running cluster
+### P0: Dynamic Cluster Management
+- [ ] Worker online registration (join without restart)
+- [ ] Automatic shard rebalance on node join/leave
+- [ ] Health-triggered failover with state transfer
 
-### Step 3: LangChain VectorStore adapter (2 hours)
-LangChain VectorStore subclass that delegates to lanceforge-client.
-- File: `lance-integration/sdk/python/lanceforge/langchain.py`
-- Class: `LanceForgeVectorStore(VectorStore)` with `similarity_search()`, `add_texts()`
-- Reuse: lanceforge-client from Step 2
-- Verify: LangChain retriever test
+### P1: Real-World Validation
+- [ ] RAG pipeline E2E: LangChain + OpenAI embeddings + real documents
+- [ ] Production-like load test: sustained 100+ QPS for 1 hour
+- [ ] Memory leak detection (long-running stability)
 
-### Step 4: REST API via Axum (1 day)
-Lightweight HTTP server alongside gRPC, same coordinator process.
-- File: `crates/coordinator/src/rest.rs` (new module)
-- Routes: `POST /v1/search`, `POST /v1/insert`, `POST /v1/delete`, `GET /v1/status`
-- Reuse: CoordinatorService internals (same scatter_gather, same pool)
-- NOT a separate binary — runs in coordinator alongside gRPC
-- Verify: curl tests
-
-### Step 5: HNSW index support (2 hours)
-lancedb already supports IVF_HNSW_SQ. Just need to:
-- Update shard_splitter.py default index type
-- Add index_type config option to ClusterConfig
-- Benchmark: IVF_FLAT vs IVF_HNSW_SQ recall-QPS tradeoff
-- Note: for unfiltered queries IVF_FLAT recall=1.0 already; HNSW helps large datasets
-
-### Step 6: Reranker extension (Cohere/CrossEncoder) (2 hours)
-lancedb already has Cohere and CrossEncoder rerankers. Expose via config.
-- Add reranker config to ClusterConfig (type: rrf|cohere|cross_encoder)
-- Wire into coordinator scatter_gather merge phase
-- Reuse: lancedb::rerankers module
-
-## Phase 6: Production Operations
-- [ ] K8s Helm chart
+## Phase 7: Enterprise Features
+- [ ] RBAC (collection-level roles)
 - [ ] TLS actual loading
-- [ ] RBAC (collection-level)
-- [ ] Graceful shutdown (CancellationToken)
+- [ ] Multi-tenancy (namespace isolation)
+- [ ] Audit logging
 
-## Phase 7: Differentiation
+## Phase 8: Differentiation
 - [ ] SQL via DuckDB Lance extension
-- [ ] Sparse Vector support
-- [ ] Multi-vector / ColBERT
-- [ ] CDC, hot/cold storage
+- [ ] True sparse vector index (learned embeddings)
+- [ ] Kubernetes Operator
+- [ ] CDC / incremental sync
 
 ## Stats
-- Unit tests: 98 | Integration: 29 | E2E: 10+6 | Benchmarks: 8 suites
+- Code: 5,063 lines Rust + 2,561 integration tests + 3,000 bench/tools
+- Tests: 99 unit | 29 integration | 28 E2E | 9 benchmark suites
+- CI: unit + integration + benchmark regression + ASan/TSan

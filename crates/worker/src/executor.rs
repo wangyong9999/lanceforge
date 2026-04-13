@@ -178,11 +178,12 @@ impl LanceTableRegistry {
                     if req.filter.is_empty() {
                         return Err(DataFusionError::Plan("Empty filter for delete".to_string()));
                     }
+                    let pre_count = table.count_rows(None).await.unwrap_or(0) as u64;
                     table.delete(&req.filter)
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    // Lance delete doesn't return count; estimate from pre-count
-                    total_affected += 1; // placeholder
+                    let post_count = table.count_rows(None).await.unwrap_or(0) as u64;
+                    total_affected += pre_count.saturating_sub(post_count);
                 }
                 2 => {
                     // Upsert via merge_insert

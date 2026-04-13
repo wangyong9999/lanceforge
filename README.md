@@ -161,12 +161,12 @@ lance-integration/  Integration tests, Python tools, Dockerfile
 | Crate | Unit Tests | Lines |
 |-------|-----------|-------|
 | proto | — | ~350 |
-| common | 29 | ~1200 |
-| coordinator | 39 | ~1800 |
-| worker | 22 | ~1100 |
-| **Total** | **90** | **~4450** |
+| common | 34 | ~1800 |
+| coordinator | 40 | ~2000 |
+| worker | 25 | ~900 |
+| **Total** | **99** | **~5050** |
 
-Plus 29 integration tests and 10 E2E system tests.
+Plus 29 integration tests, 28 E2E tests, and 9 benchmark suites.
 
 ## Docker
 
@@ -203,16 +203,24 @@ python3 e2e_full_system_test.py
 
 ## Performance
 
-Tested with 150K vectors (3 shards × 50K, dim=64, IVF_PQ indexes):
+Benchmarked on 200K×128d vectors, 3 shards (local SSD):
 
-| Metric | Local SSD | MinIO S3 |
-|--------|-----------|----------|
-| QPS | 139.7 | 0.6 |
-| P50 latency | 5.5 ms | 782 ms |
-| P99 latency | 15.5 ms | 6.3 s |
-| Concurrent (50 queries) | 0 errors | 0 errors |
+| Scenario | Recall@10 | QPS | P50 |
+|----------|-----------|-----|-----|
+| Unfiltered ANN | 1.0000 | 129 | 7.7ms |
+| Filtered ANN (10%) | 1.0000 | 181 | 5.3ms |
+| High-dim 1536d | 1.0000 | 37 | 22ms |
+| 1M scale (5 shards) | 0.9995 | 40 | 23ms |
+| 50 concurrent | — | 48 | 14ms |
 
-S3 latency is dominated by network round-trips per shard query. Production deployments with direct-attached NVMe or cached object storage will approach local SSD numbers.
+### vs Qdrant (same machine, same dataset)
+
+| Scenario | Qdrant | LanceForge | |
+|----------|--------|------------|---|
+| Unfiltered QPS | 79 | **106** | +34% faster |
+| Filtered QPS | 107 | **89** | Comparable |
+| Concurrent QPS | 12 | **47** | 4x faster |
+| Recall | 1.0 | 1.0 | Equal |
 
 ## Comparison
 
@@ -221,19 +229,23 @@ S3 latency is dominated by network round-trips per shard query. Production deplo
 | Open source | Apache-2.0 | Proprietary | Apache-2.0 | Apache-2.0 |
 | Data format | Lance (open) | Lance (open) | Proprietary | Proprietary |
 | Multimodal storage | Native | Native | Vectors only | Vectors only |
-| Distributed ANN | Scatter-gather | Managed | Segment-based | Raft-based |
-| Hybrid search (RRF) | Built-in | Built-in | Manual | Manual |
-| Lakehouse interop | DataFusion/Spark | DataFusion | None | None |
-| Embedded → distributed | Same Lance format | Migration needed | N/A | N/A |
+| Dense ANN | IVF_FLAT/HNSW | IVF/HNSW | IVF/HNSW/GPU | HNSW |
+| Hybrid search (RRF) | Built-in | Built-in | Built-in | Fusion API |
+| Multi-vector (ColBERT) | Native | Native | Yes | Native |
+| Write (insert/delete/upsert) | Yes | Yes | Yes | Yes |
+| Python SDK | Yes | Yes | Yes | Yes |
+| LangChain | Yes | Yes | Yes | Yes |
+| Lakehouse interop | DataFusion/DuckDB | DuckDB | None | None |
+| Embedded → distributed | Same .lance format | Migration | N/A | N/A |
 
 ## Roadmap
 
-- [ ] etcd-backed shard state (replace static YAML)
-- [ ] TLS encryption for gRPC channels
-- [ ] Dynamic shard splitting and rebalancing
-- [ ] SQL query path via Ballista/DataFusion
-- [ ] Kubernetes operator for auto-scaling
-- [ ] GPU-accelerated index search on workers
+- [ ] Data durability (write-ahead intent log)
+- [ ] Dynamic cluster management (online join/leave)
+- [ ] RBAC and TLS
+- [ ] SQL query path via DuckDB/Ballista
+- [ ] Kubernetes operator
+- [ ] True sparse vector index (learned embeddings)
 
 ## License
 

@@ -19,6 +19,9 @@ use lance_distributed_proto::descriptor::LanceQueryType;
 
 use super::connection_pool::ConnectionPool;
 
+/// Maximum concurrent queries before backpressure (RESOURCE_EXHAUSTED).
+const MAX_CONCURRENT_QUERIES: usize = 200;
+
 /// Coordinator gRPC service — query entry point.
 pub struct CoordinatorService {
     pool: Arc<ConnectionPool>,
@@ -28,6 +31,8 @@ pub struct CoordinatorService {
     query_timeout: Duration,
     embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
     metrics: Arc<lance_distributed_common::metrics::Metrics>,
+    /// Semaphore for backpressure: limits concurrent in-flight queries.
+    query_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl CoordinatorService {
@@ -62,6 +67,7 @@ impl CoordinatorService {
         });
 
         let metrics = lance_distributed_common::metrics::Metrics::new();
+        let query_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_QUERIES));
 
         Self {
             pool,
@@ -71,6 +77,7 @@ impl CoordinatorService {
             query_timeout,
             embedding_config: config.embedding.clone(),
             metrics,
+            query_semaphore,
         }
     }
 }
@@ -81,6 +88,11 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<AnnSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!(
+                "Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES
+            ))
+        })?;
         let req = request.into_inner();
         let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
@@ -131,6 +143,9 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<FtsSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES))
+        })?;
         let req = request.into_inner();
         let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
@@ -157,6 +172,9 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<HybridSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES))
+        })?;
         let req = request.into_inner();
         let k = validate_k(req.k, self.oversample_factor)?;
         let oversample_k = k * self.oversample_factor;
