@@ -14,8 +14,6 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Structured logging: JSON in production (LOG_FORMAT=json), pretty otherwise.
-    // The tracing-log bridge captures all log:: macros automatically.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -34,12 +32,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: lance-coordinator <config.yaml> [port] [instance-id]");
+        eprintln!("       lance-coordinator --auto-shard <table_name> <table_uri> <executor_config.yaml> [port]");
         std::process::exit(1);
     }
 
-    let config = ClusterConfig::from_file(&args[1])?;
-    let port: u16 = args.get(2).and_then(|p| p.parse().ok()).unwrap_or(50050);
-    let instance_id = args.get(3).cloned()
+    let config = if args[1] == "--auto-shard" {
+        // Auto-shard mode: discover fragments and generate config automatically
+        if args.len() < 5 {
+            eprintln!("Usage: lance-coordinator --auto-shard <table_name> <table_uri> <executor_config.yaml> [port]");
+            std::process::exit(1);
+        }
+        let table_name = &args[2];
+        let table_uri = &args[3];
+        let executor_config = ClusterConfig::from_file(&args[4])?;
+
+        info!("Auto-shard mode: discovering fragments in {}", table_uri);
+        lance_distributed_common::auto_shard::generate_auto_config(
+            table_name,
+            table_uri,
+            &executor_config.executors,
+            &executor_config.storage_options,
+        ).await.map_err(|e| -> Box<dyn std::error::Error> { e })?
+    } else {
+        // Standard mode: load config from YAML
+        ClusterConfig::from_file(&args[1])?
+    };
+
+    let port: u16 = args.iter()
+        .skip(2)
+        .find_map(|a| a.parse::<u16>().ok())
+        .unwrap_or(50050);
+    let instance_id = args.iter()
+        .skip(2)
+        .find(|a| a.parse::<u16>().is_err() && !a.starts_with("--") && !a.ends_with(".yaml") && !a.ends_with(".lance"))
+        .cloned()
         .unwrap_or_else(|| format!("coordinator-{}", std::process::id()));
 
     HaConfig { instance_id: instance_id.clone(), total_instances: 1 }.log_status();
@@ -49,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keepalive_interval = Duration::from_secs(server_cfg.keepalive_interval_secs);
     let keepalive_timeout = Duration::from_secs(server_cfg.keepalive_timeout_secs);
 
-    info!("Starting Lance Coordinator '{}' on port {}", instance_id, port);
+    info!("Starting Lance Coordinator '{}' on port {} ({} tables, {} executors)",
+        instance_id, port, config.tables.len(), config.executors.len());
     if config.security.auth_enabled() {
         info!("API key authentication enabled ({} keys configured)", config.security.api_keys.len());
     }
@@ -57,7 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = CoordinatorService::new(&config, query_timeout);
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
-    // Wrap service with API key interceptor if configured
     let auth = ApiKeyInterceptor::new(config.security.api_keys.clone());
     let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth.check(req));
 
