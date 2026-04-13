@@ -222,6 +222,28 @@ class LanceForgeClient:
             raise RuntimeError(f"Upsert failed: {resp.error}")
         return {"affected_rows": resp.affected_rows, "new_version": resp.new_version}
 
+    def sparse_search(self, table, query_text, k=10, filter=None,
+                       text_column="text", columns=None):
+        """Sparse vector search (BM25-based).
+
+        Equivalent to full-text search but exposed as sparse vector API
+        for compatibility with SPLADE/BGE-M3 workflows. Uses Tantivy
+        BM25 under the hood via lancedb FTS.
+
+        Args:
+            table: Table name
+            query_text: Search query
+            k: Number of results
+            filter: Optional SQL WHERE clause
+            text_column: Column with text content
+            columns: Optional columns to return
+
+        Returns:
+            pyarrow.Table with results (includes _score column)
+        """
+        return self.text_search(table, query_text, k=k, filter=filter,
+                                columns=columns)
+
     # ── Status ──
 
     def status(self):
