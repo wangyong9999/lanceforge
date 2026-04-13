@@ -170,6 +170,7 @@ def run_standard_bench():
             'metric': 'euclidean', 'metric_type': 0,
             'num_shards': 3, 'k': 10,
             'nprobes_range': [1, 5, 10, 20, 50],
+            'index_type': os.environ.get('BENCH_INDEX_TYPE', 'IVF_FLAT'),
         },
         {
             'name': 'glove-100-angular',
@@ -177,6 +178,7 @@ def run_standard_bench():
             'metric': 'angular', 'metric_type': 1,
             'num_shards': 3, 'k': 10,
             'nprobes_range': [1, 5, 10, 20, 50],
+            'index_type': os.environ.get('BENCH_INDEX_TYPE', 'IVF_FLAT'),
         },
     ]
 
