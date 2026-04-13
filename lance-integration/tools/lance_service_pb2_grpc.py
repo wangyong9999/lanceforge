@@ -644,6 +644,21 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.LoadShardRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.LoadShardResponse.FromString,
                 _registered_method=True)
+        self.UnloadShard = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/UnloadShard',
+                request_serializer=lance__service__pb2.UnloadShardRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.UnloadShardResponse.FromString,
+                _registered_method=True)
+        self.ExecuteCreateIndex = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteCreateIndex',
+                request_serializer=lance__service__pb2.CreateIndexRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateIndexResponse.FromString,
+                _registered_method=True)
+        self.GetTableInfo = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/GetTableInfo',
+                request_serializer=lance__service__pb2.GetTableInfoRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.GetTableInfoResponse.FromString,
+                _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
                 request_serializer=lance__service__pb2.HealthCheckRequest.SerializeToString,
@@ -673,6 +688,24 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UnloadShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteCreateIndex(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTableInfo(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -697,6 +730,21 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.LoadShard,
                     request_deserializer=lance__service__pb2.LoadShardRequest.FromString,
                     response_serializer=lance__service__pb2.LoadShardResponse.SerializeToString,
+            ),
+            'UnloadShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.UnloadShard,
+                    request_deserializer=lance__service__pb2.UnloadShardRequest.FromString,
+                    response_serializer=lance__service__pb2.UnloadShardResponse.SerializeToString,
+            ),
+            'ExecuteCreateIndex': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteCreateIndex,
+                    request_deserializer=lance__service__pb2.CreateIndexRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateIndexResponse.SerializeToString,
+            ),
+            'GetTableInfo': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTableInfo,
+                    request_deserializer=lance__service__pb2.GetTableInfoRequest.FromString,
+                    response_serializer=lance__service__pb2.GetTableInfoResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -786,6 +834,87 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/LoadShard',
             lance__service__pb2.LoadShardRequest.SerializeToString,
             lance__service__pb2.LoadShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UnloadShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/UnloadShard',
+            lance__service__pb2.UnloadShardRequest.SerializeToString,
+            lance__service__pb2.UnloadShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteCreateIndex(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteCreateIndex',
+            lance__service__pb2.CreateIndexRequest.SerializeToString,
+            lance__service__pb2.CreateIndexResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTableInfo(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/GetTableInfo',
+            lance__service__pb2.GetTableInfoRequest.SerializeToString,
+            lance__service__pb2.GetTableInfoResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -173,6 +173,69 @@ impl LanceTableRegistry {
         Ok(row_count)
     }
 
+    /// Unload a shard at runtime (for DropTable).
+    pub async fn unload_shard(&self, shard_name: &str) {
+        let mut tables = self.tables.write().await;
+        tables.retain(|(name, _)| name != shard_name);
+        info!("Unloaded shard: {}", shard_name);
+    }
+
+    /// Create an index on a table's column.
+    pub async fn create_index_on_table(
+        &self,
+        table_name: &str,
+        column: &str,
+        index_type: &str,
+        num_partitions: u32,
+    ) -> Result<()> {
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, table_name)?;
+
+        for (name, table) in &targets {
+            let npart = if num_partitions > 0 { num_partitions } else { 32 };
+            let index = match index_type {
+                "BTREE" => lancedb::index::Index::BTree(Default::default()),
+                "INVERTED" => lancedb::index::Index::FTS(Default::default()),
+                _ => lancedb::index::Index::IvfFlat(
+                    lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
+                ),
+            };
+            table.create_index(&[column], index)
+                .execute()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            info!("Created {} index on {}.{}", index_type, name, column);
+        }
+        Ok(())
+    }
+
+    /// Get table info (row count + schema).
+    pub async fn get_table_info(
+        &self,
+        table_name: &str,
+    ) -> Result<(u64, Vec<lance_distributed_proto::generated::lance_distributed::ColumnInfo>)> {
+        use lance_distributed_proto::generated::lance_distributed::ColumnInfo;
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, table_name)?;
+
+        let mut total_rows = 0u64;
+        let mut columns = Vec::new();
+
+        for (_, table) in &targets {
+            total_rows += table.count_rows(None).await
+                .map_err(|e| DataFusionError::External(Box::new(e)))? as u64;
+            if columns.is_empty() {
+                let schema = table.schema().await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                columns = schema.fields().iter().map(|f| ColumnInfo {
+                    name: f.name().clone(),
+                    data_type: format!("{:?}", f.data_type()),
+                }).collect();
+            }
+        }
+        Ok((total_rows, columns))
+    }
+
     /// Execute a write operation (add/delete/upsert) on matching tables.
     pub async fn execute_write(
         &self,

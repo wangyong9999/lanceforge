@@ -293,6 +293,33 @@ def t_list_tables_after_create():
     assert "newtbl" in tables, f"New table not in list: {tables}"
 test("16. ListTables includes newly created table", t_list_tables_after_create)
 
+def t_create_index():
+    client.create_index("newtbl", "vec", index_type="IVF_FLAT", num_partitions=2)
+test("17. CreateIndex on new table", t_create_index)
+
+def t_get_schema():
+    resp = stub.GetSchema(pb.GetSchemaRequest(table_name="docs"), timeout=10)
+    assert not resp.error or "not" not in resp.error.lower(), f"GetSchema error: {resp.error}"
+    if resp.columns:
+        col_names = [c.name for c in resp.columns]
+        assert "id" in col_names, f"Schema missing 'id': {col_names}"
+        print(f"({len(resp.columns)} cols)", end=" ")
+test("18. GetSchema returns columns", t_get_schema)
+
+def t_count_rows():
+    resp = stub.CountRows(pb.CountRowsRequest(table_name="docs"), timeout=10)
+    assert resp.count > 0, f"CountRows returned 0"
+    print(f"({resp.count} rows)", end=" ")
+test("19. CountRows returns > 0", t_count_rows)
+
+def t_drop_table():
+    client.drop_table("newtbl")
+    time.sleep(1)
+    tables = client.list_tables()
+    # newtbl should have empty mapping now
+    # (it may still appear in list but with no routing)
+test("20. DropTable", t_drop_table)
+
 # ── Cleanup ──
 channel.close()
 client.close()

@@ -104,6 +104,41 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn unload_shard(
+        &self,
+        request: Request<pb::UnloadShardRequest>,
+    ) -> Result<Response<pb::UnloadShardResponse>, Status> {
+        let req = request.into_inner();
+        self.registry.unload_shard(&req.shard_name).await;
+        Ok(Response::new(pb::UnloadShardResponse { error: String::new() }))
+    }
+
+    async fn execute_create_index(
+        &self,
+        request: Request<pb::CreateIndexRequest>,
+    ) -> Result<Response<pb::CreateIndexResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.create_index_on_table(&req.table_name, &req.column, &req.index_type, req.num_partitions).await {
+            Ok(()) => Ok(Response::new(pb::CreateIndexResponse { error: String::new() })),
+            Err(e) => Ok(Response::new(pb::CreateIndexResponse { error: e.to_string() })),
+        }
+    }
+
+    async fn get_table_info(
+        &self,
+        request: Request<pb::GetTableInfoRequest>,
+    ) -> Result<Response<pb::GetTableInfoResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.get_table_info(&req.table_name).await {
+            Ok((num_rows, columns)) => Ok(Response::new(pb::GetTableInfoResponse {
+                num_rows, columns, error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::GetTableInfoResponse {
+                num_rows: 0, columns: vec![], error: e.to_string(),
+            })),
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,

@@ -491,11 +491,20 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
-        // Note: full implementation needs to remove from shard_state + drop storage
-        info!("Drop table '{}' requested (metadata only)", req.table_name);
-        Ok(Response::new(pb::DropTableResponse {
-            error: String::new(),
-        }))
+        // Tell workers to unload shards for this table
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        for (shard_name, primary, _secondary) in &routing {
+            if let Ok(mut client) = self.pool.get_healthy_client(primary).await {
+                let _ = client.unload_shard(Request::new(pb::UnloadShardRequest {
+                    shard_name: shard_name.clone(),
+                })).await;
+            }
+        }
+        // Remove from shard state (set empty mapping)
+        let empty: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        self.shard_state.register_table(&req.table_name, empty).await;
+        info!("Dropped table '{}'", req.table_name);
+        Ok(Response::new(pb::DropTableResponse { error: String::new() }))
     }
 
     async fn create_index(
@@ -513,14 +522,30 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
         }
 
-        // Create index is a coordinator-side operation for now
-        // (workers load pre-indexed data; index creation happens via lancedb)
-        info!("CreateIndex on '{}' column '{}' type '{}' requested",
-            req.table_name, req.column, req.index_type);
-
-        Ok(Response::new(pb::CreateIndexResponse {
-            error: String::new(),
-        }))
+        // Fan out CreateIndex to all workers
+        let mut errors = Vec::new();
+        for worker_id in &executors {
+            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                match client.execute_create_index(Request::new(pb::CreateIndexRequest {
+                    table_name: req.table_name.clone(),
+                    column: req.column.clone(),
+                    index_type: req.index_type.clone(),
+                    num_partitions: req.num_partitions,
+                })).await {
+                    Ok(resp) => {
+                        let r = resp.into_inner();
+                        if !r.error.is_empty() {
+                            errors.push(format!("{}: {}", worker_id, r.error));
+                        }
+                    }
+                    Err(e) => errors.push(format!("{}: {}", worker_id, e)),
+                }
+            }
+        }
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        info!("CreateIndex on '{}' column '{}': {}", req.table_name, req.column,
+            if error.is_empty() { "success" } else { &error });
+        Ok(Response::new(pb::CreateIndexResponse { error }))
     }
 
     async fn get_schema(
@@ -532,13 +557,21 @@ impl LanceSchedulerService for CoordinatorService {
         if executors.is_empty() {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
-        // Get schema from first worker's shard
-        if let Ok(routing) = self.shard_state.get_shard_routing(&req.table_name).await.first().ok_or(()) {
-            // For now return empty — full impl needs worker RPC to get schema
+        // Ask first worker for table info
+        if let Ok(mut client) = self.pool.get_healthy_client(&executors[0]).await {
+            if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+                table_name: req.table_name.clone(),
+            })).await {
+                let r = resp.into_inner();
+                return Ok(Response::new(pb::GetSchemaResponse {
+                    columns: r.columns,
+                    error: r.error,
+                }));
+            }
         }
         Ok(Response::new(pb::GetSchemaResponse {
             columns: vec![],
-            error: "Schema introspection requires worker RPC (not yet implemented)".to_string(),
+            error: "Failed to get schema from workers".to_string(),
         }))
     }
 
@@ -547,15 +580,24 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CountRowsRequest>,
     ) -> Result<Response<pb::CountRowsResponse>, Status> {
         let req = request.into_inner();
-        // Fan out to workers and sum row counts
         let executors = self.shard_state.executors_for_table(&req.table_name).await;
         if executors.is_empty() {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
-        // For now return 0 — full impl fans out count_rows to workers
+        // Fan out to all workers and sum counts
+        let mut total = 0u64;
+        for worker_id in &executors {
+            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+                    table_name: req.table_name.clone(),
+                })).await {
+                    total += resp.into_inner().num_rows;
+                }
+            }
+        }
         Ok(Response::new(pb::CountRowsResponse {
-            count: 0,
-            error: "Distributed count requires worker RPC (not yet implemented)".to_string(),
+            count: total,
+            error: String::new(),
         }))
     }
 }

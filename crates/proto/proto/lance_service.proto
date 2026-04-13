@@ -29,6 +29,9 @@ service LanceExecutorService {
   rpc ExecuteLocalSearch (LocalSearchRequest) returns (LocalSearchResponse) {}
   rpc ExecuteLocalWrite (LocalWriteRequest) returns (LocalWriteResponse) {}
   rpc LoadShard (LoadShardRequest) returns (LoadShardResponse) {}
+  rpc UnloadShard (UnloadShardRequest) returns (UnloadShardResponse) {}
+  rpc ExecuteCreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
+  rpc GetTableInfo (GetTableInfoRequest) returns (GetTableInfoResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
 }
@@ -184,6 +187,24 @@ message LoadShardRequest {
 message LoadShardResponse {
   uint64 num_rows = 1;
   string error = 2;
+}
+
+message UnloadShardRequest {
+  string shard_name = 1;
+}
+
+message UnloadShardResponse {
+  string error = 1;
+}
+
+message GetTableInfoRequest {
+  string table_name = 1;
+}
+
+message GetTableInfoResponse {
+  uint64 num_rows = 1;
+  repeated ColumnInfo columns = 2;
+  string error = 3;
 }
 
 // ============ DDL Operations ============
