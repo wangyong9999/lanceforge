@@ -209,6 +209,11 @@ async fn execute_on_table(
 
             if let Some(ref filter) = descriptor.filter {
                 builder = builder.only_if(filter.clone());
+                // Bypass vector index for filtered queries: IVF partitions
+                // scatter filtered vectors across partitions, causing recall loss.
+                // Brute-force on the filtered subset gives perfect recall and is
+                // fast enough when filter selectivity is moderate (<50%).
+                builder = builder.bypass_vector_index();
             }
 
             let stream = builder.execute().await

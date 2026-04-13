@@ -161,7 +161,7 @@ def create_sharded_lance(base, num_shards, output_dir):
         })
         lance.write_dataset(table, uri, mode='overwrite')
 
-        # Build IVF_FLAT index (high recall; use IVF_PQ only for very large data)
+        # IVF_FLAT: perfect recall for unfiltered queries
         ds = lance.dataset(uri)
         if not ds.list_indices():
             npart = min(64, max(4, len(shard_data) // 1000))

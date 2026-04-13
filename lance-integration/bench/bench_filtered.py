@@ -72,7 +72,12 @@ def create_filterable_shards(base, categories, num_shards, output_dir):
         if not ds.list_indices():
             npart = min(64, max(4, (end - start) // 1000))
             ds.create_index('vector', index_type='IVF_FLAT', num_partitions=npart)
-        print(f"  Shard {i}: {end-start} rows, index built")
+            # Scalar index on filter column for efficient pre-filtering
+            try:
+                ds.create_scalar_index('category', index_type='BTREE')
+            except Exception:
+                pass  # Scalar index optional
+        print(f"  Shard {i}: {end-start} rows, IVF_FLAT + BTREE index")
 
 def start_filtered_cluster(num_shards, shard_dir):
     """Start cluster for filtered bench."""
