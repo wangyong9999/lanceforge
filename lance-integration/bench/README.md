@@ -1,68 +1,57 @@
 # LanceForge Benchmarks
 
-## Recall Benchmark (SIFT1M)
-
-Measures distributed ANN recall@k against brute-force ground truth using the standard SIFT1M dataset (1M vectors, 128d, L2 distance).
-
-### Quick Run
+## Quick Start
 
 ```bash
-cd lance-integration/bench
-pip install numpy lance pyarrow grpcio pyyaml
+# Run all core benchmarks (quick mode for CI)
+python run_all.py --quick
 
-# Full benchmark: download SIFT1M, create shards, start cluster, measure recall
-python recall_benchmark.py
+# Full benchmark suite (takes ~30 min)
+python run_all.py
 
-# Custom: 5 shards, 1000 queries
-python recall_benchmark.py --num-shards 5 --num-queries 1000
-
-# Reuse existing shards
-python recall_benchmark.py --skip-prep
+# CI mode (quick + strict thresholds + exit code)
+python run_all.py --ci
 ```
 
-### What It Measures
+## Benchmark Suite
 
-| Metric | Description |
-|--------|-------------|
-| recall@1 | Fraction of queries where the true nearest neighbor is returned |
-| recall@10 | Fraction of true top-10 found in returned top-10 |
-| recall@100 | Fraction of true top-100 found in returned top-100 |
-| QPS | Queries per second (end-to-end through coordinator) |
-| P50/P99 | Latency percentiles |
+| Benchmark | Dataset | What it measures | Threshold |
+|-----------|---------|-----------------|-----------|
+| `recall_benchmark.py` | 200K×128d, 3 shards | recall@{1,10,100} vs nprobes | recall >= 0.95 |
+| `bench_filtered.py` | 200K×128d, 10% filter | Filtered ANN recall + QPS | recall >= 0.95 |
+| `bench_cosine.py` | 100K×128d | L2 + Cosine distance | recall >= 0.95 |
+| `bench_highdim.py` | 100K×768d, 50K×1536d | High-dimension recall | recall >= 0.95 |
+| `bench_scale.py` | 1M×128d, 5 shards | Scale: QPS, memory, build time | recall >= 0.95 |
+| `bench_standard.py` | 500K (SIFT/GloVe) | Recall-QPS tradeoff curve | recall >= 0.95 |
+| `bench_shard_scaling.py` | 500K, 1→10 shards | Scaling linearity | recall stable |
+| `bench_competitor_baseline.py` | 200K×128d | LanceForge vs Qdrant | comparative |
+| `bench_hybrid_ndcg.py` | 50K+text | Hybrid NDCG/MRR | RRF working |
 
-Tests are run with nprobes = {10, 20, 50} to show the recall vs speed tradeoff.
+## E2E Tests (run via `run_all.py`)
 
-### Pass Criteria
+| Test | What it validates |
+|------|------------------|
+| `e2e_enterprise_test.py` | SDK, REST, write, concurrent, metrics (12 tests) |
+| `e2e_write_test.py` | Insert → search → delete → verify (6 tests) |
+| `e2e_full_system_test.py` | MinIO full-stack (10 tests, needs MinIO) |
 
-- **recall@10 >= 0.95** at nprobes=20 (industry standard threshold)
-- Results are compared against SIFT1M ground truth (pre-computed brute-force 100-NN)
-
-### Output
-
-Results are saved to `results/recall_sift1m.json` and printed as a table:
+## Latest Results (Competitor Baseline)
 
 ```
-  Config                     recall@k      QPS   P50(ms)   P99(ms)
-  -------------------------  ---------- --------  --------- ---------
-  ✓ k=10, nprobes=20           0.9612     85.3       11.2      28.4
-  ✗ k=10, nprobes=10           0.9134     120.5       7.8      19.1
+200K×128d, same machine, same dataset
+
+System          Unfiltered       Filtered 10%     Concurrent 20
+                recall  QPS      recall  QPS      QPS
+Qdrant (HNSW)   1.00   79       1.00    107      11
+LanceForge       1.00   106      1.00    89       47
 ```
 
-## ann-benchmarks Integration
+## CI Integration
 
-For standardized comparison against faiss, hnswlib, and other ANN libraries:
+The `benchmark-regression` job in `.github/workflows/ci.yml` runs `run_all.py --ci`
+on every push to lance-main. Results are uploaded as artifacts.
 
-```bash
-# Install ann-benchmarks
-git clone https://github.com/erikbern/ann-benchmarks.git
-cd ann-benchmarks
-pip install -r requirements.txt
+## Output
 
-# Copy LanceForge wrapper
-cp /path/to/lance-integration/bench/ann_bench_wrapper.py \
-   ann_benchmarks/algorithms/lanceforge/module.py
-
-# Run SIFT1M benchmark
-python run.py --algorithm lanceforge --dataset sift-128-euclidean
-python plot.py --dataset sift-128-euclidean
-```
+All benchmarks save JSON results to `results/`. The regression runner produces
+`results/regression_report.json` with pass/fail status and timing.
