@@ -189,6 +189,107 @@ impl LanceSchedulerService for CoordinatorService {
             total_rows: 0,
         }))
     }
+
+    async fn add_rows(
+        &self,
+        request: Request<pb::AddRowsRequest>,
+    ) -> Result<Response<pb::WriteResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() || req.table_name.len() > 256 {
+            return Err(Status::invalid_argument("table_name must be 1-256 characters"));
+        }
+        if req.arrow_ipc_data.is_empty() {
+            return Err(Status::invalid_argument("arrow_ipc_data is empty"));
+        }
+
+        // Route Add to first healthy worker for this table (MVP: round-robin later)
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        }
+
+        let worker_id = &executors[0];
+        let mut client = self.pool.get_healthy_client(worker_id).await?;
+
+        let local_req = pb::LocalWriteRequest {
+            write_type: 0, // Add
+            table_name: req.table_name,
+            arrow_ipc_data: req.arrow_ipc_data,
+            filter: String::new(),
+        };
+
+        let result = tokio::time::timeout(
+            self.query_timeout,
+            client.execute_local_write(Request::new(local_req)),
+        ).await
+            .map_err(|_| Status::deadline_exceeded("Write timed out"))?
+            .map_err(|e| Status::internal(format!("Worker error: {}", e)))?;
+
+        let resp = result.into_inner();
+        Ok(Response::new(pb::WriteResponse {
+            affected_rows: resp.affected_rows,
+            new_version: resp.new_version,
+            error: resp.error,
+        }))
+    }
+
+    async fn delete_rows(
+        &self,
+        request: Request<pb::DeleteRowsRequest>,
+    ) -> Result<Response<pb::WriteResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_name.is_empty() || req.table_name.len() > 256 {
+            return Err(Status::invalid_argument("table_name must be 1-256 characters"));
+        }
+        if req.filter.is_empty() {
+            return Err(Status::invalid_argument("filter is required for delete"));
+        }
+
+        // Delete fans out to ALL workers (don't know which shard has matching rows)
+        let executors = self.shard_state.executors_for_table(&req.table_name).await;
+        if executors.is_empty() {
+            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        }
+
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+        let mut errors = Vec::new();
+
+        for worker_id in &executors {
+            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                let local_req = pb::LocalWriteRequest {
+                    write_type: 1, // Delete
+                    table_name: req.table_name.clone(),
+                    arrow_ipc_data: vec![],
+                    filter: req.filter.clone(),
+                };
+
+                match tokio::time::timeout(
+                    self.query_timeout,
+                    client.execute_local_write(Request::new(local_req)),
+                ).await {
+                    Ok(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.error.is_empty() {
+                            total_affected += r.affected_rows;
+                            max_version = max_version.max(r.new_version);
+                        } else {
+                            errors.push(format!("{}: {}", worker_id, r.error));
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("{}: {}", worker_id, e)),
+                    Err(_) => errors.push(format!("{}: timeout", worker_id)),
+                }
+            }
+        }
+
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        Ok(Response::new(pb::WriteResponse {
+            affected_rows: total_affected,
+            new_version: max_version,
+            error,
+        }))
+    }
 }
 
 const MAX_K: u32 = 100_000;

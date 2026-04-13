@@ -147,6 +147,55 @@ impl LanceTableRegistry {
         Ok(result)
     }
 
+    /// Execute a write operation (add/delete) on matching tables.
+    pub async fn execute_write(
+        &self,
+        req: &lance_distributed_proto::generated::lance_distributed::LocalWriteRequest,
+    ) -> Result<(u64, u64)> {
+        let targets = self.resolve_tables(&req.table_name)?;
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+
+        for (name, table) in &targets {
+            debug!("Executing write on shard: {}", name);
+            match req.write_type {
+                0 => {
+                    // Add rows
+                    if req.arrow_ipc_data.is_empty() {
+                        return Err(DataFusionError::Plan("Empty data for add".to_string()));
+                    }
+                    let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    let rows = batch.num_rows() as u64;
+                    table.add(vec![batch])
+                        .execute()
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    total_affected += rows;
+                }
+                1 => {
+                    // Delete rows by filter
+                    if req.filter.is_empty() {
+                        return Err(DataFusionError::Plan("Empty filter for delete".to_string()));
+                    }
+                    table.delete(&req.filter)
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    // Lance delete doesn't return count; estimate from pre-count
+                    total_affected += 1; // placeholder
+                }
+                _ => {
+                    return Err(DataFusionError::Plan(format!("Unknown write_type: {}", req.write_type)));
+                }
+            }
+            max_version = max_version.max(
+                table.version().await.unwrap_or(0)
+            );
+        }
+
+        Ok((total_affected, max_version))
+    }
+
     fn resolve_tables(&self, table_name: &str) -> Result<Vec<(&str, &lancedb::Table)>> {
         let matches: Vec<_> = self.tables.iter()
             .filter(|(name, _)| {

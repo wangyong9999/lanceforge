@@ -11,11 +11,15 @@ service LanceSchedulerService {
   rpc HybridSearch (HybridSearchRequest) returns (SearchResponse) {}
   // Cluster status (for monitoring/debugging)
   rpc GetClusterStatus (ClusterStatusRequest) returns (ClusterStatusResponse) {}
+  // Write operations
+  rpc AddRows (AddRowsRequest) returns (WriteResponse) {}
+  rpc DeleteRows (DeleteRowsRequest) returns (WriteResponse) {}
 }
 
 // Service running on each Executor for receiving queries from Scheduler.
 service LanceExecutorService {
   rpc ExecuteLocalSearch (LocalSearchRequest) returns (LocalSearchResponse) {}
+  rpc ExecuteLocalWrite (LocalWriteRequest) returns (LocalWriteResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
 }
@@ -117,5 +121,38 @@ message LocalSearchRequest {
 message LocalSearchResponse {
   bytes arrow_ipc_data = 1;
   uint32 num_rows = 2;
+  string error = 3;
+}
+
+// ============ Client → Scheduler (Writes) ============
+
+message AddRowsRequest {
+  string table_name = 1;
+  bytes arrow_ipc_data = 2;       // Arrow IPC StreamWriter bytes (the rows to add)
+}
+
+message DeleteRowsRequest {
+  string table_name = 1;
+  string filter = 2;              // SQL WHERE predicate (e.g., "id > 100")
+}
+
+message WriteResponse {
+  uint64 affected_rows = 1;
+  uint64 new_version = 2;
+  string error = 3;               // empty if success
+}
+
+// ============ Scheduler → Executor (Writes) ============
+
+message LocalWriteRequest {
+  int32 write_type = 1;           // 0=Add, 1=Delete
+  string table_name = 2;
+  bytes arrow_ipc_data = 3;       // For Add: rows as Arrow IPC
+  string filter = 4;              // For Delete: SQL WHERE predicate
+}
+
+message LocalWriteResponse {
+  uint64 affected_rows = 1;
+  uint64 new_version = 2;
   string error = 3;
 }

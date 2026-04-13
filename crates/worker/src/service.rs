@@ -58,6 +58,32 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn execute_local_write(
+        &self,
+        request: Request<pb::LocalWriteRequest>,
+    ) -> Result<Response<pb::LocalWriteResponse>, Status> {
+        let req = request.into_inner();
+        debug!("Worker write: table={}, type={}", req.table_name, req.write_type);
+
+        match self.registry.execute_write(&req).await {
+            Ok((affected_rows, new_version)) => {
+                Ok(Response::new(pb::LocalWriteResponse {
+                    affected_rows,
+                    new_version,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                warn!("Worker write error: {}", e);
+                Ok(Response::new(pb::LocalWriteResponse {
+                    affected_rows: 0,
+                    new_version: 0,
+                    error: e.to_string(),
+                }))
+            }
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,
