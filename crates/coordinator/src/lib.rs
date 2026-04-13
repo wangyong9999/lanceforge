@@ -6,6 +6,7 @@ pub mod connection_pool;
 pub mod embedding;
 pub mod ha;
 pub mod merge;
+pub mod rest;
 pub mod scatter_gather;
 pub mod service;
 
