@@ -199,7 +199,12 @@ jobs:
           python -m grpc_tools.protoc -I../../crates/proto/proto \
             --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
 
-      - name: Run benchmark regression (quick)
+      - name: Full capability verification (14 tests)
+        run: |
+          cd lance-integration/tools
+          PYTHONPATH=.:../sdk/python python e2e_full_capability_test.py
+
+      - name: Benchmark regression (quick)
         run: |
           cd lance-integration/bench
           PYTHONPATH=../tools:../sdk/python python run_all.py --ci

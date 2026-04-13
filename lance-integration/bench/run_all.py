@@ -105,15 +105,16 @@ def main():
 
     # Define benchmark suites
     quick_suite = [
+        ("Full Capability (14 tests)", os.path.join(TOOLS_DIR, "e2e_full_capability_test.py")),
         ("Recall Benchmark (200K×128d)", os.path.join(BENCH_DIR, "recall_benchmark.py")),
         ("Filtered ANN (200K×128d)", os.path.join(BENCH_DIR, "bench_filtered.py")),
         ("Enterprise E2E (12 tests)", os.path.join(TOOLS_DIR, "e2e_enterprise_test.py")),
     ]
 
     full_suite = quick_suite + [
+        ("Write Path E2E (6 tests)", os.path.join(TOOLS_DIR, "e2e_write_test.py")),
         ("Cosine Distance (100K×128d)", os.path.join(BENCH_DIR, "bench_cosine.py")),
         ("High-Dim (768d+1536d)", os.path.join(BENCH_DIR, "bench_highdim.py")),
-        ("Write Path E2E (6 tests)", os.path.join(TOOLS_DIR, "e2e_write_test.py")),
     ]
 
     # Optional heavy benchmarks (skip in quick/CI)
