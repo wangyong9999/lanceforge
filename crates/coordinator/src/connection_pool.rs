@@ -39,6 +39,8 @@ pub struct ConnectionPool {
     workers: Arc<RwLock<HashMap<String, WorkerState>>>,
     endpoints: HashMap<String, (String, u16)>,
     query_timeout: Duration,
+    /// TLS config for client-side connection to workers.
+    tls_config: Option<tonic::transport::ClientTlsConfig>,
 }
 
 impl ConnectionPool {
@@ -47,7 +49,17 @@ impl ConnectionPool {
             workers: Arc::new(RwLock::new(HashMap::new())),
             endpoints,
             query_timeout,
+            tls_config: None,
         }
+    }
+
+    /// Enable TLS for worker connections using a CA certificate.
+    pub fn with_tls(mut self, ca_cert_pem: Vec<u8>) -> Self {
+        let ca = tonic::transport::Certificate::from_pem(ca_cert_pem);
+        self.tls_config = Some(
+            tonic::transport::ClientTlsConfig::new().ca_certificate(ca)
+        );
+        self
     }
 
     /// Get a healthy client for a Worker, or error if unhealthy/disconnected.
@@ -79,26 +91,35 @@ impl ConnectionPool {
         });
     }
 
+    /// Build an endpoint with standard settings and optional TLS.
+    fn build_endpoint(&self, host: &str, port: u16) -> Result<tonic::transport::Endpoint, String> {
+        let scheme = if self.tls_config.is_some() { "https" } else { "http" };
+        let addr = format!("{}://{}:{}", scheme, host, port);
+        let mut endpoint = tonic::transport::Channel::from_shared(addr.clone())
+            .map_err(|e| format!("Invalid endpoint URI {}: {}", addr, e))?
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(self.query_timeout)
+            .tcp_nodelay(true)
+            .http2_keep_alive_interval(Duration::from_secs(10))
+            .keep_alive_timeout(Duration::from_secs(20))
+            .http2_adaptive_window(true);
+        if let Some(ref tls) = self.tls_config {
+            endpoint = endpoint.tls_config(tls.clone())
+                .map_err(|e| format!("TLS config error: {}", e))?;
+        }
+        Ok(endpoint)
+    }
+
     async fn connect_all(&self) {
         for (wid, (host, port)) in &self.endpoints {
-            let addr = format!("http://{}:{}", host, port);
-            let endpoint = match tonic::transport::Channel::from_shared(addr.clone()) {
+            let endpoint = match self.build_endpoint(host, *port) {
                 Ok(ep) => ep,
                 Err(e) => {
-                    warn!("Invalid endpoint URI for worker {} ({}): {}", wid, addr, e);
+                    warn!("Failed to build endpoint for worker {}: {}", wid, e);
                     continue;
                 }
             };
-            match endpoint
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(self.query_timeout)
-                .tcp_nodelay(true)
-                .http2_keep_alive_interval(Duration::from_secs(10))
-                .keep_alive_timeout(Duration::from_secs(20))
-                .http2_adaptive_window(true)
-                .connect()
-                .await
-            {
+            match endpoint.connect().await {
                 Ok(channel) => {
                     let client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
                     let mut workers = self.workers.write().await;
@@ -108,10 +129,10 @@ impl ConnectionPool {
                         last_check: Instant::now(),
                         consecutive_failures: 0,
                     });
-                    info!("Connected to worker {} at {}", wid, addr);
+                    info!("Connected to worker {} at {}:{}", wid, host, port);
                 }
                 Err(e) => {
-                    warn!("Failed to connect to worker {} at {}: {}", wid, addr, e);
+                    warn!("Failed to connect to worker {} at {}:{}: {}", wid, host, port, e);
                 }
             }
         }
@@ -132,24 +153,14 @@ impl ConnectionPool {
                 let needs_connect = !self.workers.read().await.contains_key(wid);
 
                 if needs_connect {
-                    let addr = format!("http://{}:{}", host, port);
-                    let endpoint = match tonic::transport::Channel::from_shared(addr.clone()) {
+                    let endpoint = match self.build_endpoint(host, *port) {
                         Ok(ep) => ep,
                         Err(e) => {
-                            warn!("Invalid endpoint URI for worker {} ({}): {}", wid, addr, e);
+                            warn!("Failed to build endpoint for worker {}: {}", wid, e);
                             continue;
                         }
                     };
-                    if let Ok(channel) = endpoint
-                        .connect_timeout(Duration::from_secs(3))
-                        .timeout(self.query_timeout)
-                        .tcp_nodelay(true)
-                        .http2_keep_alive_interval(Duration::from_secs(10))
-                        .keep_alive_timeout(Duration::from_secs(20))
-                        .http2_adaptive_window(true)
-                        .connect()
-                        .await
-                    {
+                    if let Ok(channel) = endpoint.connect().await {
                         results.push((wid.clone(), HealthCheckResult::Reconnected {
                             client: pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel),
                             host: host.clone(),

@@ -26,11 +26,20 @@ class LanceForgeClient:
         host: Coordinator address (e.g., "localhost:50050")
         api_key: Optional API key for authentication
         max_message_size: Max gRPC message size in bytes (default 64MB)
+        tls_ca_cert: Path to PEM-encoded CA certificate for TLS verification.
+                     When set, uses secure channel (grpc.secure_channel).
     """
 
-    def __init__(self, host="localhost:50050", api_key=None, max_message_size=64*1024*1024):
+    def __init__(self, host="localhost:50050", api_key=None,
+                 max_message_size=64*1024*1024, tls_ca_cert=None):
         options = [("grpc.max_receive_message_length", max_message_size)]
-        self._channel = grpc.insecure_channel(host, options=options)
+        if tls_ca_cert:
+            with open(tls_ca_cert, 'rb') as f:
+                ca_pem = f.read()
+            credentials = grpc.ssl_channel_credentials(root_certificates=ca_pem)
+            self._channel = grpc.secure_channel(host, credentials, options=options)
+        else:
+            self._channel = grpc.insecure_channel(host, options=options)
         self._stub = pb_grpc.LanceSchedulerServiceStub(self._channel)
         self._api_key = api_key
 

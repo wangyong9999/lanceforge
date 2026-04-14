@@ -147,15 +147,24 @@ pub struct SecurityConfig {
     /// Path to PEM-encoded server private key.
     #[serde(default)]
     pub tls_key: Option<String>,
+    /// Path to PEM-encoded CA certificate for client-side verification.
+    /// When set, coordinator verifies worker TLS certs against this CA.
+    /// Also used by Python SDK for verifying coordinator/worker certs.
+    #[serde(default)]
+    pub tls_ca_cert: Option<String>,
     /// API keys for client authentication (empty = no auth required).
     #[serde(default)]
     pub api_keys: Vec<String>,
 }
 
 impl SecurityConfig {
-    /// Whether TLS is configured.
+    /// Whether TLS is configured (server-side).
     pub fn tls_enabled(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+    /// Whether client-side TLS verification is configured.
+    pub fn tls_client_enabled(&self) -> bool {
+        self.tls_ca_cert.is_some()
     }
     /// Whether API key authentication is required.
     pub fn auth_enabled(&self) -> bool {

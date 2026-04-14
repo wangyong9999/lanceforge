@@ -104,7 +104,19 @@ impl CoordinatorService {
             }
         }
 
-        let pool = Arc::new(ConnectionPool::new(endpoints, query_timeout));
+        let mut pool = ConnectionPool::new(endpoints, query_timeout);
+
+        // Configure client-side TLS for coordinator→worker connections
+        if let Some(ref ca_path) = config.security.tls_ca_cert {
+            match std::fs::read(ca_path) {
+                Ok(ca_pem) => {
+                    pool = pool.with_tls(ca_pem);
+                    info!("TLS enabled for coordinator→worker connections (CA: {})", ca_path);
+                }
+                Err(e) => warn!("Failed to read TLS CA cert {}: {}", ca_path, e),
+            }
+        }
+        let pool = Arc::new(pool);
 
         info!("CoordinatorService: {} executors, {} shard URIs", config.executors.len(), shard_uris.len());
 
