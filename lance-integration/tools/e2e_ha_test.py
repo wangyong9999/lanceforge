@@ -79,10 +79,10 @@ print(f"  HA ENTERPRISE TEST SUITE")
 print(f"{'='*70}")
 
 cleanup_all()
+import shutil
+if os.path.exists(BASE):
+    shutil.rmtree(BASE)
 os.makedirs(BASE, exist_ok=True)
-# Clean previous metadata
-for f in [METADATA_PATH, f"{METADATA_PATH}.tmp"]:
-    if os.path.exists(f): os.remove(f)
 
 np.random.seed(42)
 

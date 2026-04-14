@@ -646,8 +646,12 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<pb::RebalanceResponse>, Status> {
         use lance_distributed_meta::shard_manager::{assign_shards, compute_diff, ShardPolicy};
 
-        let all_executors = self.shard_state.all_executors().await;
-        let executor_ids: Vec<String> = all_executors.iter().map(|(id, _, _)| id.clone()).collect();
+        // Only consider healthy executors for rebalance (skip dead workers)
+        let statuses = self.pool.worker_statuses().await;
+        let executor_ids: Vec<String> = statuses.iter()
+            .filter(|(_, _, _, healthy, _)| *healthy)
+            .map(|(id, _, _, _, _)| id.clone())
+            .collect();
         let all_tables = self.shard_state.all_tables().await;
 
         if executor_ids.is_empty() {

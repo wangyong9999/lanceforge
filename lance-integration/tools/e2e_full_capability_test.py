@@ -71,6 +71,9 @@ print(f"\n{'='*70}")
 print(f"  FULL CAPABILITY VERIFICATION")
 print(f"{'='*70}")
 
+import shutil
+if os.path.exists(BASE):
+    shutil.rmtree(BASE)
 os.makedirs(BASE, exist_ok=True)
 np.random.seed(42)
 

@@ -13,6 +13,17 @@ use tonic::Request;
 use lance_distributed_proto::generated::lance_distributed as pb;
 use lance_distributed_common::shard_state::ShardState;
 
+/// Result of a health check, collected without holding locks.
+enum HealthCheckResult {
+    Reconnected {
+        client: pb::lance_executor_service_client::LanceExecutorServiceClient<tonic::transport::Channel>,
+        host: String,
+        port: u16,
+    },
+    Healthy,
+    Failed,
+}
+
 /// State of a single Worker connection.
 pub struct WorkerState {
     pub client: pb::lance_executor_service_client::LanceExecutorServiceClient<
@@ -114,6 +125,9 @@ impl ConnectionPool {
         loop {
             tokio::time::sleep(check_interval).await;
 
+            // Phase 1: Collect health check results WITHOUT holding locks during I/O
+            let mut results: Vec<(String, HealthCheckResult)> = Vec::new();
+
             for (wid, (host, port)) in &self.endpoints {
                 let needs_connect = !self.workers.read().await.contains_key(wid);
 
@@ -136,59 +150,76 @@ impl ConnectionPool {
                         .connect()
                         .await
                     {
-                        let client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
+                        results.push((wid.clone(), HealthCheckResult::Reconnected {
+                            client: pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel),
+                            host: host.clone(),
+                            port: *port,
+                        }));
+                    }
+                    continue;
+                }
+
+                // Clone client outside of lock, then ping without holding any lock
+                let client = self.workers.read().await
+                    .get(wid).map(|ws| ws.client.clone());
+
+                if let Some(mut c) = client {
+                    let ok = matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(3),
+                            c.health_check(Request::new(pb::HealthCheckRequest {})),
+                        ).await,
+                        Ok(Ok(_))
+                    );
+                    results.push((wid.clone(), if ok {
+                        HealthCheckResult::Healthy
+                    } else {
+                        HealthCheckResult::Failed
+                    }));
+                }
+            }
+
+            // Phase 2: Apply results under brief lock acquisitions
+            for (wid, result) in results {
+                match result {
+                    HealthCheckResult::Reconnected { client, host, port } => {
                         self.workers.write().await.insert(wid.clone(), WorkerState {
                             client, healthy: true,
                             last_check: Instant::now(), consecutive_failures: 0,
                         });
                         info!("Health: worker {} reconnected", wid);
-
-                        // Notify ShardState of new worker
                         if let Some(ref ss) = shard_state {
-                            ss.register_executor(wid, host, *port).await;
+                            ss.register_executor(&wid, &host, port).await;
                         }
                     }
-                    continue;
-                }
-
-                // Ping existing connection
-                let mut client = self.workers.read().await
-                    .get(wid).map(|ws| ws.client.clone());
-
-                if let Some(ref mut c) = client {
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        c.health_check(Request::new(pb::HealthCheckRequest {})),
-                    ).await {
-                        Ok(Ok(_)) => {
-                            let mut workers = self.workers.write().await;
-                            if let Some(ws) = workers.get_mut(wid) {
-                                ws.healthy = true;
-                                ws.last_check = Instant::now();
-                                ws.consecutive_failures = 0;
-                            }
+                    HealthCheckResult::Healthy => {
+                        let mut workers = self.workers.write().await;
+                        if let Some(ws) = workers.get_mut(&wid) {
+                            ws.healthy = true;
+                            ws.last_check = Instant::now();
+                            ws.consecutive_failures = 0;
                         }
-                        _ => {
+                    }
+                    HealthCheckResult::Failed => {
+                        let (should_remove, consecutive) = {
                             let mut workers = self.workers.write().await;
-                            if let Some(ws) = workers.get_mut(wid) {
+                            if let Some(ws) = workers.get_mut(&wid) {
                                 ws.consecutive_failures += 1;
-                                if ws.consecutive_failures >= 3 {
+                                ws.last_check = Instant::now();
+                                if ws.consecutive_failures >= 2 {
                                     ws.healthy = false;
                                     warn!("Health: worker {} unhealthy ({} failures)", wid, ws.consecutive_failures);
                                 }
-                                ws.last_check = Instant::now();
+                                (ws.consecutive_failures >= 5, ws.consecutive_failures)
+                            } else {
+                                (false, 0)
                             }
-                            // Remove after 5 consecutive failures → will reconnect next cycle
-                            let should_remove = self.workers.read().await
-                                .get(wid).map(|ws| ws.consecutive_failures >= 5).unwrap_or(false);
-                            if should_remove {
-                                self.workers.write().await.remove(wid);
-                                warn!("Health: worker {} removed, will retry", wid);
-
-                                // Notify ShardState of worker removal → triggers rebalance
-                                if let Some(ref ss) = shard_state {
-                                    ss.remove_executor(wid).await;
-                                }
+                        };
+                        if should_remove {
+                            self.workers.write().await.remove(&wid);
+                            warn!("Health: worker {} removed, will retry", wid);
+                            if let Some(ref ss) = shard_state {
+                                ss.remove_executor(&wid).await;
                             }
                         }
                     }

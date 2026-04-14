@@ -337,6 +337,35 @@ class LanceForgeClient:
             "total_shards": resp.total_shards,
         }
 
+    # ── Cluster Management ──
+
+    def rebalance(self):
+        """Trigger shard rebalance across all workers.
+
+        Returns:
+            dict with shards_moved count
+        """
+        resp = self._stub.Rebalance(pb.RebalanceRequest(),
+                                    metadata=self._metadata(), timeout=30)
+        if resp.error:
+            raise RuntimeError(f"Rebalance failed: {resp.error}")
+        return {"shards_moved": resp.shards_moved}
+
+    def register_worker(self, worker_id, host, port):
+        """Register a new worker with the coordinator.
+
+        Args:
+            worker_id: Unique worker identifier
+            host: Worker host address
+            port: Worker gRPC port
+        """
+        resp = self._stub.RegisterWorker(
+            pb.RegisterWorkerRequest(worker_id=worker_id, host=host, port=int(port)),
+            metadata=self._metadata(), timeout=10)
+        if resp.error:
+            raise RuntimeError(f"RegisterWorker failed: {resp.error}")
+        return {"assigned_shards": resp.assigned_shards}
+
     # ── Internal ──
 
     def _decode_response(self, resp):

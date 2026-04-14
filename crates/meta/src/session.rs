@@ -175,15 +175,17 @@ mod tests {
     use crate::store::FileMetaStore;
 
     async fn test_store(name: &str) -> Arc<dyn MetaStore> {
-        let path = format!("/tmp/lanceforge_session_{}_{}.json", name, std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let tid = std::thread::current().id();
+        let path = format!("/tmp/lanceforge_session_{}_{}_{:?}.json", name,
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            tid);
         let _ = tokio::fs::remove_file(&path).await;
         Arc::new(FileMetaStore::new(&path).await.unwrap())
     }
 
     #[tokio::test]
     async fn test_register_and_list() {
-        let store = test_store("reg1").await;
+        let store = test_store("register_list").await;
         let mgr = SessionManager::new(store, "test");
 
         mgr.register("w0", "127.0.0.1", 50100).await.unwrap();
@@ -195,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_expiry() {
-        let store = test_store("reg1").await;
+        let store = test_store("expiry").await;
         let mgr = SessionManager::new(store, "test")
             .with_ttl(Duration::from_millis(50));
 
@@ -210,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_extends_session() {
-        let store = test_store("reg1").await;
+        let store = test_store("heartbeat").await;
         let mgr = SessionManager::new(store, "test")
             .with_ttl(Duration::from_millis(200));
 
@@ -225,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_register() {
-        let store = test_store("reg1").await;
+        let store = test_store("dup_register").await;
         let mgr = SessionManager::new(store, "test");
 
         mgr.register("w0", "127.0.0.1", 50100).await.unwrap();
