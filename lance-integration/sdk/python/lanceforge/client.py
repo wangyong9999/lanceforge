@@ -112,7 +112,7 @@ class LanceForgeClient:
         """
         req = pb.FtsSearchRequest(
             table_name=table,
-            text_column="text",
+            text_column=text_column,
             query_text=query_text,
             k=k,
         )
@@ -150,7 +150,7 @@ class LanceForgeClient:
             dimension=len(query_vector),
             nprobes=nprobes,
             metric_type=metric_type,
-            text_column="text",
+            text_column=text_column,
             query_text=query_text,
             k=k,
         )
@@ -399,7 +399,7 @@ class LanceForgeClient:
                                      metadata=self._metadata(), timeout=10)
         if resp.error:
             raise RuntimeError(f"GetSchema failed: {resp.error}")
-        return [{"name": c.name, "type": c.data_type, "nullable": c.nullable}
+        return [{"name": c.name, "type": c.data_type}
                 for c in resp.columns]
 
     # ── Internal ──

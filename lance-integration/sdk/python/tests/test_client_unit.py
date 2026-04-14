@@ -230,6 +230,76 @@ class TestErrorHandling(unittest.TestCase):
             client.rebalance()
 
 
+class TestSearchVariants(unittest.TestCase):
+    """Test text_search, hybrid_search, sparse_search."""
+
+    def _make_client(self):
+        from lanceforge.client import LanceForgeClient
+        with patch('grpc.insecure_channel'):
+            client = LanceForgeClient("fake:50050")
+        client._stub = MagicMock()
+        return client
+
+    def test_text_search(self):
+        client = self._make_client()
+        resp = pb.SearchResponse(arrow_ipc_data=b'', num_rows=0, error='')
+        client._stub.FtsSearch.return_value = resp
+        client.text_search("t", query_text="hello", k=5, text_column="content")
+        req = client._stub.FtsSearch.call_args[0][0]
+        self.assertEqual(req.text_column, "content")
+        self.assertEqual(req.query_text, "hello")
+        self.assertEqual(req.k, 5)
+
+    def test_hybrid_search(self):
+        client = self._make_client()
+        resp = pb.SearchResponse(arrow_ipc_data=b'', num_rows=0, error='')
+        client._stub.HybridSearch.return_value = resp
+        client.hybrid_search("t", query_vector=[1.0, 2.0], query_text="hello",
+                            k=5, text_column="content")
+        req = client._stub.HybridSearch.call_args[0][0]
+        self.assertEqual(req.text_column, "content")
+        self.assertEqual(req.query_text, "hello")
+        self.assertGreater(len(req.query_vector), 0)
+
+    def test_sparse_search(self):
+        client = self._make_client()
+        resp = pb.SearchResponse(arrow_ipc_data=b'', num_rows=0, error='')
+        client._stub.FtsSearch.return_value = resp
+        # sparse_search uses FTS internally
+        client.sparse_search("t", query_text="hello world", k=3)
+        req = client._stub.FtsSearch.call_args[0][0]
+        self.assertEqual(req.query_text, "hello world")
+        self.assertEqual(req.k, 3)
+
+    def test_get_schema(self):
+        client = self._make_client()
+        resp = pb.GetSchemaResponse(
+            columns=[pb.ColumnInfo(name="id", data_type="Int64"),
+                     pb.ColumnInfo(name="vec", data_type="FixedSizeList")],
+            error='')
+        client._stub.GetSchema.return_value = resp
+        result = client.get_schema("t")
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["name"], "id")
+
+
+class TestClientLifecycle(unittest.TestCase):
+
+    def test_close_calls_channel_close(self):
+        from lanceforge.client import LanceForgeClient
+        with patch('grpc.insecure_channel') as mock_ch:
+            client = LanceForgeClient("fake:50050")
+        client.close()
+        mock_ch.return_value.close.assert_called_once()
+
+    def test_context_manager(self):
+        from lanceforge.client import LanceForgeClient
+        with patch('grpc.insecure_channel') as mock_ch:
+            with LanceForgeClient("fake:50050") as client:
+                pass
+        mock_ch.return_value.close.assert_called_once()
+
+
 class TestTLSChannel(unittest.TestCase):
 
     @patch('grpc.ssl_channel_credentials')
