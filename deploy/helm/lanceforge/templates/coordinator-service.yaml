@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lanceforge.fullname" . }}-coordinator
+  labels:
+    {{- include "lanceforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: {{ .Values.coordinator.port }}
+      targetPort: grpc
+      protocol: TCP
+    - name: rest
+      port: {{ .Values.coordinator.restPort }}
+      targetPort: rest
+      protocol: TCP
+  selector:
+    {{- include "lanceforge.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator

@@ -1,0 +1,13 @@
+apiVersion: v2
+name: lanceforge
+description: Distributed multimodal retrieval engine built on LanceDB
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - vector-database
+  - retrieval
+  - lancedb
+  - distributed
+  - ann-search
+home: https://github.com/wangyong9999/lanceforge

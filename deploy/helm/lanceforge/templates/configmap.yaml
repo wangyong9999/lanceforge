@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lanceforge.fullname" . }}-config
+  labels:
+    {{- include "lanceforge.labels" . | nindent 4 }}
+data:
+  cluster_config.yaml: |
+    tables:
+    {{- range .Values.tables }}
+      - name: {{ .name }}
+        shards:
+        {{- $shardPrefix := .shardUriPrefix }}
+        {{- $name := .name }}
+        {{- range $i := until (int .shardCount) }}
+          - name: {{ $name }}_shard_{{ printf "%02d" $i }}
+            uri: "{{ $shardPrefix }}_shard_{{ printf "%02d" $i }}.lance"
+            executors:
+              - worker-{{ mod $i (int $.Values.worker.replicas) }}
+        {{- end }}
+    {{- end }}
+    executors:
+    {{- range $i := until (int .Values.worker.replicas) }}
+      - id: worker-{{ $i }}
+        host: {{ include "lanceforge.fullname" $ }}-worker-{{ $i }}.{{ include "lanceforge.fullname" $ }}-worker-headless
+        port: {{ $.Values.worker.port }}
+    {{- end }}
+    server:
+      query_timeout_secs: {{ .Values.config.queryTimeoutSecs }}
+      keepalive_interval_secs: {{ .Values.config.keepaliveIntervalSecs }}
+      keepalive_timeout_secs: {{ .Values.config.keepaliveTimeoutSecs }}
+      max_concurrent_queries: {{ .Values.config.maxConcurrentQueries }}
+      oversample_factor: {{ .Values.config.oversampleFactor }}
+    cache:
+      ttl_secs: {{ .Values.config.cacheTtlSecs }}
+      max_entries: {{ .Values.config.cacheMaxEntries }}
+      read_consistency_secs: {{ .Values.config.readConsistencySecs }}
+    health_check:
+      interval_secs: {{ .Values.config.healthCheckIntervalSecs }}
+      unhealthy_threshold: {{ .Values.config.unhealthyThreshold }}
+      remove_threshold: {{ .Values.config.removeThreshold }}
+    replica_factor: {{ .Values.config.replicaFactor }}
+    {{- if eq .Values.metadata.type "s3" }}
+    metadata_path: {{ .Values.metadata.s3Uri | quote }}
+    {{- else }}
+    metadata_path: {{ .Values.metadata.filePath | quote }}
+    {{- end }}
+    {{- if .Values.s3Credentials.enabled }}
+    storage_options:
+      aws_access_key_id: {{ .Values.s3Credentials.accessKeyId | quote }}
+      aws_secret_access_key: {{ .Values.s3Credentials.secretAccessKey | quote }}
+      aws_endpoint: {{ .Values.storage.s3Endpoint | quote }}
+      aws_region: {{ .Values.storage.s3Region | quote }}
+    {{- end }}
+    {{- if .Values.security.tls.enabled }}
+    security:
+      tls_cert: /tls/tls.crt
+      tls_key: /tls/tls.key
+      tls_ca_cert: /tls/ca.crt
+    {{- end }}
+    {{- if .Values.security.apiKeys }}
+    security:
+      api_keys:
+      {{- range .Values.security.apiKeys }}
+        - {{ . | quote }}
+      {{- end }}
+    {{- end }}

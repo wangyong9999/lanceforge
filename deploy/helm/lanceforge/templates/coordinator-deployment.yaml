@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lanceforge.fullname" . }}-coordinator
+  labels:
+    {{- include "lanceforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  replicas: {{ .Values.coordinator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "lanceforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: coordinator
+  template:
+    metadata:
+      labels:
+        {{- include "lanceforge.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: coordinator
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "lanceforge.serviceAccountName" . }}
+      containers:
+        - name: coordinator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["lance-coordinator"]
+          args:
+            - /config/cluster_config.yaml
+            - "{{ .Values.coordinator.port }}"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.coordinator.port }}
+              protocol: TCP
+            - name: rest
+              containerPort: {{ .Values.coordinator.restPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: rest
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: rest
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            {{- if eq .Values.metadata.type "file" }}
+            - name: metadata
+              mountPath: /data
+            {{- end }}
+            {{- if .Values.security.tls.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "lanceforge.fullname" . }}-config
+        {{- if eq .Values.metadata.type "file" }}
+        - name: metadata
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.security.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.security.tls.certSecretName }}
+        {{- end }}

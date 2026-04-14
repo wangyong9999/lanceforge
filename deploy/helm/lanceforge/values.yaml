@@ -1,0 +1,91 @@
+# LanceForge Helm Chart values
+# Override these in your values-production.yaml
+
+image:
+  repository: lanceforge
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# --- Coordinator ---
+coordinator:
+  replicas: 1
+  port: 50050
+  restPort: 50051
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 1Gi
+      cpu: 2000m
+
+# --- Worker ---
+worker:
+  replicas: 2
+  port: 50100
+  resources:
+    requests:
+      memory: 2Gi
+      cpu: 1000m
+    limits:
+      memory: 4Gi
+      cpu: 4000m
+
+# --- Storage ---
+storage:
+  # "s3" or "local"
+  type: s3
+  s3Bucket: ""
+  s3Endpoint: ""
+  s3Region: us-east-1
+  # For local storage (emptyDir or PVC)
+  localPath: /data
+
+# --- S3 credentials (if not using IRSA/ServiceAccount) ---
+s3Credentials:
+  enabled: false
+  accessKeyId: ""
+  secretAccessKey: ""
+
+# --- Table configuration ---
+tables: []
+  # - name: products
+  #   shardUriPrefix: "s3://bucket/data/products"
+  #   shardCount: 3
+
+# --- Cluster tuning ---
+config:
+  queryTimeoutSecs: 30
+  keepaliveIntervalSecs: 10
+  keepaliveTimeoutSecs: 20
+  maxConcurrentQueries: 200
+  oversampleFactor: 2
+  cacheTtlSecs: 5
+  cacheMaxEntries: 1000
+  readConsistencySecs: 3
+  healthCheckIntervalSecs: 10
+  unhealthyThreshold: 3
+  removeThreshold: 5
+  replicaFactor: 2
+
+# --- Metadata persistence ---
+metadata:
+  # "file" or "s3"
+  type: file
+  # For file: path inside coordinator container
+  filePath: /data/metadata.json
+  # For s3: full URI
+  s3Uri: ""
+
+# --- Security ---
+security:
+  tls:
+    enabled: false
+    certSecretName: ""
+  apiKeys: []
+
+# --- ServiceAccount ---
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
