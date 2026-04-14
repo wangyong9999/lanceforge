@@ -796,9 +796,31 @@ impl LanceSchedulerService for CoordinatorService {
                 current_assignment.insert(shard.clone(), execs);
             }
 
-            // Compute new assignment with ShardManager
-            let new_assignment = assign_shards(
-                &shard_names, &executor_ids, &policy, Some(&current_assignment));
+            // Collect per-shard row counts for size-aware balancing.
+            // Query each shard's primary for its row count.
+            let mut shard_sizes: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            for (shard_name, primary, secondary) in &current_routing {
+                let worker = if self.pool.get_healthy_client(primary).await.is_ok() {
+                    Some(primary.as_str())
+                } else {
+                    secondary.as_ref().map(|s| s.as_str())
+                };
+                if let Some(wid) = worker {
+                    if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
+                        if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+                            table_name: shard_name.clone(),
+                        })).await {
+                            shard_sizes.insert(shard_name.clone(), resp.into_inner().num_rows);
+                        }
+                    }
+                }
+            }
+
+            // Compute new assignment with size-aware ShardManager
+            let new_assignment = lance_distributed_meta::shard_manager::assign_shards_with_sizes(
+                &shard_names, &executor_ids, &policy, Some(&current_assignment),
+                if shard_sizes.is_empty() { None } else { Some(&shard_sizes) },
+            );
 
             // Compute diff (minimal movement)
             let (to_load, to_unload) = compute_diff(&current_assignment, &new_assignment);

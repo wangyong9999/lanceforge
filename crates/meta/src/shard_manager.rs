@@ -40,11 +40,25 @@ impl Default for ShardPolicy {
 /// 3. No two replicas of the same shard go to the same worker
 ///
 /// `current` is the existing assignment (for soft affinity — prefer not moving).
+/// Compute a balanced shard assignment.
+///
+/// If `shard_sizes` is provided, balances by total data size (rows) per worker.
+/// Otherwise falls back to balancing by shard count.
 pub fn assign_shards(
     shard_names: &[String],
     executor_ids: &[String],
     policy: &ShardPolicy,
     current: Option<&ShardAssignment>,
+) -> ShardAssignment {
+    assign_shards_with_sizes(shard_names, executor_ids, policy, current, None)
+}
+
+pub fn assign_shards_with_sizes(
+    shard_names: &[String],
+    executor_ids: &[String],
+    policy: &ShardPolicy,
+    current: Option<&ShardAssignment>,
+    shard_sizes: Option<&HashMap<String, u64>>,
 ) -> ShardAssignment {
     if shard_names.is_empty() || executor_ids.is_empty() {
         return HashMap::new();
@@ -52,49 +66,62 @@ pub fn assign_shards(
 
     let replica_factor = policy.replica_factor.min(executor_ids.len()).max(1);
     let mut assignment: ShardAssignment = HashMap::new();
-    let mut worker_load: HashMap<String, usize> = executor_ids.iter()
-        .map(|id| (id.clone(), 0))
+    // Track load by data size (rows) if available, otherwise by shard count
+    let mut worker_load: HashMap<String, u64> = executor_ids.iter()
+        .map(|id| (id.clone(), 0u64))
         .collect();
 
-    for shard in shard_names {
+    // Sort shards by size descending (largest first) for better bin-packing
+    let mut sorted_shards: Vec<&String> = shard_names.iter().collect();
+    if let Some(sizes) = shard_sizes {
+        sorted_shards.sort_by(|a, b| {
+            let sa = sizes.get(*a).unwrap_or(&1);
+            let sb = sizes.get(*b).unwrap_or(&1);
+            sb.cmp(sa) // descending
+        });
+    }
+
+    for shard in &sorted_shards {
+        let shard_weight = shard_sizes
+            .and_then(|s| s.get(*shard).copied())
+            .unwrap_or(1); // fallback: count-based (each shard = 1)
+
         // Soft affinity: if shard already assigned and workers are still available, keep it
-        if let Some(existing) = current.and_then(|c| c.get(shard)) {
+        if let Some(existing) = current.and_then(|c| c.get(*shard)) {
             let still_valid: Vec<String> = existing.iter()
                 .filter(|w| executor_ids.contains(w))
                 .cloned()
                 .collect();
             if still_valid.len() >= replica_factor {
-                // Keep existing assignment
                 let kept: Vec<String> = still_valid.into_iter().take(replica_factor).collect();
                 for w in &kept {
-                    *worker_load.entry(w.clone()).or_default() += 1;
+                    *worker_load.entry(w.clone()).or_default() += shard_weight;
                 }
-                assignment.insert(shard.clone(), kept);
+                assignment.insert((*shard).clone(), kept);
                 continue;
             }
         }
 
-        // Assign replica_factor workers, preferring least-loaded
+        // Assign replica_factor workers, preferring least-loaded by data size
         let mut assigned: Vec<String> = Vec::new();
         let mut used: HashSet<String> = HashSet::new();
 
         for _ in 0..replica_factor {
-            // Find least-loaded worker not already assigned to this shard
             if let Some(best) = executor_ids.iter()
                 .filter(|w| !used.contains(*w))
                 .min_by_key(|w| worker_load.get(*w).unwrap_or(&0))
             {
                 assigned.push(best.clone());
                 used.insert(best.clone());
-                *worker_load.entry(best.clone()).or_default() += 1;
+                *worker_load.entry(best.clone()).or_default() += shard_weight;
             }
         }
 
-        assignment.insert(shard.clone(), assigned);
+        assignment.insert((*shard).clone(), assigned);
     }
 
-    info!("Assigned {} shards across {} workers (replica_factor={})",
-        shard_names.len(), executor_ids.len(), replica_factor);
+    info!("Assigned {} shards across {} workers (replica_factor={}, size_aware={})",
+        shard_names.len(), executor_ids.len(), replica_factor, shard_sizes.is_some());
 
     assignment
 }
@@ -260,5 +287,46 @@ mod tests {
         let policy = ShardPolicy::default();
         assert!(assign_shards(&[], &["w0".into()], &policy, None).is_empty());
         assert!(assign_shards(&["s0".into()], &[], &policy, None).is_empty());
+    }
+
+    #[test]
+    fn test_size_aware_balancing() {
+        // 3 shards with very different sizes: 10M, 100, 5M
+        let shards = vec!["big".into(), "tiny".into(), "medium".into()];
+        let executors = vec!["w0".into(), "w1".into()];
+        let policy = ShardPolicy { replica_factor: 1, max_shards_per_worker: 0 };
+        let mut sizes = HashMap::new();
+        sizes.insert("big".to_string(), 10_000_000u64);
+        sizes.insert("tiny".to_string(), 100u64);
+        sizes.insert("medium".to_string(), 5_000_000u64);
+
+        let result = assign_shards_with_sizes(
+            &shards, &executors, &policy, None, Some(&sizes));
+
+        // "big" (10M) should be alone on one worker
+        // "medium" (5M) + "tiny" (100) should share the other worker
+        let big_worker = &result["big"][0];
+        let medium_worker = &result["medium"][0];
+        let tiny_worker = &result["tiny"][0];
+
+        // big and medium should be on DIFFERENT workers (size-aware separation)
+        assert_ne!(big_worker, medium_worker,
+            "10M and 5M shards should be on different workers");
+        // tiny should be co-located with the bigger one to balance load
+        // (5M+100 ≈ 5M vs 10M — best possible split)
+        assert_eq!(tiny_worker, medium_worker,
+            "tiny shard should be with medium, not with big: {:?}", result);
+    }
+
+    #[test]
+    fn test_size_aware_fallback_to_count() {
+        // Without sizes, should still work (fallback to count-based)
+        let shards = vec!["s0".into(), "s1".into(), "s2".into()];
+        let executors = vec!["w0".into(), "w1".into()];
+        let policy = ShardPolicy { replica_factor: 1, max_shards_per_worker: 0 };
+
+        let result = assign_shards_with_sizes(
+            &shards, &executors, &policy, None, None);
+        assert_eq!(result.len(), 3);
     }
 }
