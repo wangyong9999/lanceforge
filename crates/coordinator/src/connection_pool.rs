@@ -348,7 +348,7 @@ mod tests {
         let statuses = pool.worker_statuses().await;
         assert_eq!(statuses.len(), 2);
         // All should be unhealthy (not connected)
-        for (_, _host, _port, healthy, _) in &statuses {
+        for (_, _host, _port, healthy, _, _, _) in &statuses {
             assert!(!healthy);
         }
     }
