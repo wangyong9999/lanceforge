@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let service = if let Some(ref metadata_path) = config.metadata_path {
-        CoordinatorService::with_meta_state(&config, query_timeout, metadata_path).await
+        CoordinatorService::with_meta_state(&config, query_timeout, metadata_path).await?
     } else {
         CoordinatorService::new(&config, query_timeout)
     };
@@ -117,8 +117,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TLS: load server certificate and key if configured
     if config.security.tls_enabled() {
-        let cert = tokio::fs::read(config.security.tls_cert.as_ref().unwrap()).await?;
-        let key = tokio::fs::read(config.security.tls_key.as_ref().unwrap()).await?;
+        let cert_path = config.security.tls_cert.as_ref()
+            .ok_or("TLS enabled but tls_cert path missing")?;
+        let key_path = config.security.tls_key.as_ref()
+            .ok_or("TLS enabled but tls_key path missing")?;
+        let cert = tokio::fs::read(cert_path).await?;
+        let key = tokio::fs::read(key_path).await?;
         let identity = tonic::transport::Identity::from_pem(cert, key);
         let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
         info!("TLS enabled");

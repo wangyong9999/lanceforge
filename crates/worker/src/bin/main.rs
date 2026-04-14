@@ -63,8 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .concurrency_limit_per_connection(server_cfg.concurrency_limit);
 
     if config.security.tls_enabled() {
-        let cert = tokio::fs::read(config.security.tls_cert.as_ref().unwrap()).await?;
-        let key = tokio::fs::read(config.security.tls_key.as_ref().unwrap()).await?;
+        let cert_path = config.security.tls_cert.as_ref()
+            .ok_or("TLS enabled but tls_cert path missing")?;
+        let key_path = config.security.tls_key.as_ref()
+            .ok_or("TLS enabled but tls_key path missing")?;
+        let cert = tokio::fs::read(cert_path).await?;
+        let key = tokio::fs::read(key_path).await?;
         let identity = tonic::transport::Identity::from_pem(cert, key);
         let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
         info!("TLS enabled");

@@ -61,7 +61,7 @@ impl CoordinatorService {
         config: &ClusterConfig,
         query_timeout: Duration,
         metadata_path: &str,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let store: Arc<dyn lance_distributed_meta::store::MetaStore> = if metadata_path.starts_with("s3://")
             || metadata_path.starts_with("gs://")
             || metadata_path.starts_with("az://")
@@ -71,12 +71,12 @@ impl CoordinatorService {
                 lance_distributed_meta::store::S3MetaStore::new(
                     metadata_path,
                     config.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())),
-                ).await.expect("Failed to initialize S3MetaStore")
+                ).await.map_err(|e| format!("S3MetaStore init failed: {e}"))?
             )
         } else {
             Arc::new(
                 lance_distributed_meta::store::FileMetaStore::new(metadata_path).await
-                    .expect("Failed to initialize FileMetaStore")
+                    .map_err(|e| format!("FileMetaStore init failed: {e}"))?
             )
         };
         let meta_state = lance_distributed_meta::state::MetaShardState::new(store.clone(), "lanceforge");
@@ -97,7 +97,7 @@ impl CoordinatorService {
 
         info!("Using MetaStore at {} ({} tables)", metadata_path,
             meta_state.all_tables().await.len());
-        Self::with_shard_state(config, query_timeout, Arc::new(meta_state))
+        Ok(Self::with_shard_state(config, query_timeout, Arc::new(meta_state)))
     }
 
     pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {

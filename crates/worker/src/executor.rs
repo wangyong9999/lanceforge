@@ -227,6 +227,17 @@ impl LanceTableRegistry {
         Ok(())
     }
 
+    /// Get worker status: (loaded_shard_count, total_rows).
+    pub async fn status(&self) -> (u32, u64) {
+        let tables = self.tables.read().await;
+        let shard_count = tables.len() as u32;
+        let mut total_rows = 0u64;
+        for (_, table) in tables.iter() {
+            total_rows += table.count_rows(None).await.unwrap_or(0) as u64;
+        }
+        (shard_count, total_rows)
+    }
+
     /// Get table info (row count + schema).
     pub async fn get_table_info(
         &self,
