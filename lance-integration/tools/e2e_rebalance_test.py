@@ -16,6 +16,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc
+
 import pyarrow as pa
 import lance
 import yaml
@@ -123,9 +125,10 @@ print("-- Phase 1: Baseline --")
 
 w0 = start_worker("w0", 57100)
 w1 = start_worker("w1", 57101)
-time.sleep(3)
+assert wait_for_grpc("127.0.0.1", 57100), "Worker w0 failed to start"
+assert wait_for_grpc("127.0.0.1", 57101), "Worker w1 failed to start"
 coord = start_coordinator()
-time.sleep(5)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 
 def t_baseline():
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
@@ -143,15 +146,19 @@ test("1. Baseline: 2 workers, 4 shards, search returns 10", t_baseline)
 print("\n-- Phase 2: Add Worker + Rebalance --")
 
 w2 = start_worker("w2", 57102)
-time.sleep(3)
+assert wait_for_grpc("127.0.0.1", 57102), "Worker w2 failed to start"
 
 def t_register_w2():
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
     # Register new worker
     client.register_worker("w2", "127.0.0.1", 57102)
-    time.sleep(2)
-    s = client.status()
-    healthy = sum(1 for e in s["executors"] if e["healthy"])
+    # Wait for health check loop to connect to w2 (up to 15s)
+    for _ in range(15):
+        time.sleep(1)
+        s = client.status()
+        healthy = sum(1 for e in s["executors"] if e["healthy"])
+        if healthy == 3:
+            break
     assert healthy == 3, f"Expected 3 healthy after register, got {healthy}"
     client.close()
 test("2. Register 3rd worker, 3 healthy", t_register_w2)

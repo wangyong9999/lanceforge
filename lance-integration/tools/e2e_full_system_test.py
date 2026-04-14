@@ -8,6 +8,8 @@ Covers: S3 storage, large data+index, ANN/Filter/CrossShard, concurrent load,
 import sys, os, time, struct, subprocess, signal, threading, concurrent.futures
 sys.path.insert(0, os.path.dirname(__file__))
 
+from test_helpers import wait_for_grpc
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as ipc
@@ -134,12 +136,13 @@ for i in range(NUM_SHARDS):
     p = subprocess.Popen([f"{BIN}/lance-worker", cfg_path, f"w{i}", str(51200+i)],
         stdout=open(f"{BASE}/w{i}.log","w"), stderr=subprocess.STDOUT)
     processes.append(p); print(f"  Worker {i} (PID {p.pid})")
-time.sleep(4)
+for i in range(NUM_SHARDS):
+    assert wait_for_grpc("127.0.0.1", 51200 + i), f"Worker w{i} failed to start"
 
 p = subprocess.Popen([f"{BIN}/lance-coordinator", cfg_path, "51250"],
     stdout=open(f"{BASE}/coord.log","w"), stderr=subprocess.STDOUT)
 processes.append(p); print(f"  Coordinator (PID {p.pid})")
-time.sleep(5)
+assert wait_for_grpc("127.0.0.1", 51250), "Coordinator failed to start"
 
 for proc in processes:
     assert proc.poll() is None, f"Process died! Check {BASE}/*.log"

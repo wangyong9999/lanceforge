@@ -15,6 +15,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc
+
 import pyarrow as pa
 import lance
 import yaml
@@ -86,13 +88,14 @@ for i in range(2):
         [f"{BIN}/lance-worker", f"{BASE}/config.yaml", f"w{i}", str(57100 + i)],
         stdout=open(f"{BASE}/w{i}.log", "w"), stderr=subprocess.STDOUT)
     processes.append(p)
-time.sleep(3)
+for i in range(2):
+    assert wait_for_grpc("127.0.0.1", 57100 + i), f"Worker w{i} failed to start"
 
 coord = subprocess.Popen(
     [f"{BIN}/lance-coordinator", f"{BASE}/config.yaml", str(COORD_PORT)],
     stdout=open(f"{BASE}/coord.log", "w"), stderr=subprocess.STDOUT)
 processes.append(coord)
-time.sleep(5)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 print("  Cluster running (2 workers, 1 shared shard)\n")
 
 from lanceforge import LanceForgeClient

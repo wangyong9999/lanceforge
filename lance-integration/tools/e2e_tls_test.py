@@ -17,6 +17,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc, wait_for_grpc_tls
+
 import pyarrow as pa
 import lance
 import yaml
@@ -104,7 +106,7 @@ def t_start_worker():
         [f"{BIN}/lance-worker", f"{BASE}/config.yaml", "w0", "58100"],
         stdout=open(f"{BASE}/w0.log", "w"), stderr=subprocess.STDOUT)
     all_processes.append(p)
-    time.sleep(3)
+    assert wait_for_grpc_tls("127.0.0.1", 58100, os.path.join(CERTS, "ca.pem")), "Worker failed to start"
     assert p.poll() is None, "Worker crashed on startup"
     # Check that TLS is enabled in logs
     with open(f"{BASE}/w0.log") as f:
@@ -118,7 +120,7 @@ def t_start_coordinator():
         [f"{BIN}/lance-coordinator", f"{BASE}/config.yaml", str(COORD_PORT)],
         stdout=open(f"{BASE}/coord.log", "w"), stderr=subprocess.STDOUT)
     all_processes.append(p)
-    time.sleep(5)
+    assert wait_for_grpc_tls("127.0.0.1", COORD_PORT, os.path.join(CERTS, "ca.pem")), "Coordinator failed to start"
     assert p.poll() is None, "Coordinator crashed on startup"
     with open(f"{BASE}/coord.log") as f:
         log = f.read()

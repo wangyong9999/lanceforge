@@ -23,6 +23,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc
+
 import pyarrow as pa
 import lance
 import grpc
@@ -126,13 +128,14 @@ for i in range(2):
         [f"{BIN}/lance-worker", cfg_path, f"w{i}", str(52100 + i)],
         stdout=open(f"{BASE}/w{i}.log", "w"), stderr=subprocess.STDOUT)
     processes.append(p)
-time.sleep(3)
+for i in range(2):
+    assert wait_for_grpc("127.0.0.1", 52100 + i), f"Worker w{i} failed to start"
 
 p = subprocess.Popen(
     [f"{BIN}/lance-coordinator", cfg_path, str(COORD_PORT)],
     stdout=open(f"{BASE}/coord.log", "w"), stderr=subprocess.STDOUT)
 processes.append(p)
-time.sleep(4)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 
 for proc in processes:
     assert proc.poll() is None, f"Process died! Check {BASE}/*.log"

@@ -15,6 +15,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc
+
 import pyarrow as pa
 import lance
 import grpc
@@ -73,10 +75,10 @@ with open(os.path.join(BASE, 'config.yaml'), 'w') as f:
 
 p1 = subprocess.Popen([f"{BIN}/lance-worker", f"{BASE}/config.yaml", "w0", "57510"],
     stdout=open(f"{BASE}/w0.log", "w"), stderr=subprocess.STDOUT)
-time.sleep(3)
+assert wait_for_grpc("127.0.0.1", 57510), "Worker failed to start"
 p2 = subprocess.Popen([f"{BIN}/lance-coordinator", f"{BASE}/config.yaml", str(COORD_PORT)],
     stdout=open(f"{BASE}/coord.log", "w"), stderr=subprocess.STDOUT)
-time.sleep(4)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 
 from lanceforge import LanceForgeClient
 import lance_service_pb2 as pb

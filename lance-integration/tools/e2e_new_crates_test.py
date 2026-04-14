@@ -7,6 +7,8 @@ Verifies the split architecture works end-to-end.
 import sys, os, time, struct, subprocess
 sys.path.insert(0, os.path.dirname(__file__))
 
+from test_helpers import wait_for_grpc
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.ipc as ipc
@@ -106,7 +108,8 @@ for i in range(NUM_SHARDS):
     processes.append(p)
     print(f"  Worker {i} (PID {p.pid}, port {port})")
 
-time.sleep(3)
+for i in range(NUM_SHARDS):
+    assert wait_for_grpc("127.0.0.1", 51100 + i), f"Worker {i} failed to start"
 
 coord_port = 51150
 p = subprocess.Popen(
@@ -115,7 +118,7 @@ p = subprocess.Popen(
 processes.append(p)
 print(f"  Coordinator (PID {p.pid}, port {coord_port})")
 
-time.sleep(4)
+assert wait_for_grpc("127.0.0.1", coord_port), "Coordinator failed to start"
 
 for proc in processes:
     if proc.poll() is not None:

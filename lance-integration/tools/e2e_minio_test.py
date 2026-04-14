@@ -12,6 +12,8 @@ Full-stack MinIO E2E test:
 import sys, os, time, struct, subprocess, signal
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../lance-integration/tools'))
 
+from test_helpers import wait_for_grpc
+
 import lance
 import numpy as np
 import pyarrow as pa
@@ -142,7 +144,8 @@ for i in range(NUM_SHARDS):
     processes.append(p)
     print(f"  Executor {i} started (PID {p.pid}, port {port})")
 
-time.sleep(3)
+for i in range(NUM_SHARDS):
+    assert wait_for_grpc("127.0.0.1", 50800 + i), f"Executor {i} failed to start"
 
 p = subprocess.Popen(
     [f"{BIN_DIR}/lance-scheduler", CFG_PATH, "50850"],
@@ -152,7 +155,7 @@ p = subprocess.Popen(
 processes.append(p)
 print(f"  Scheduler started (PID {p.pid}, port 50850)")
 
-time.sleep(4)
+assert wait_for_grpc("127.0.0.1", 50850), "Scheduler failed to start"
 
 # Verify all processes alive
 for i, proc in enumerate(processes):
