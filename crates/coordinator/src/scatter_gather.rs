@@ -17,27 +17,34 @@ use lance_distributed_common::shard_pruning::ShardPruner;
 use super::connection_pool::ConnectionPool;
 
 /// Extract shard-to-worker grouping logic for testability.
-/// Returns Ok(worker_shards) or Err if too many shards have no healthy worker.
+/// Load-balances across all healthy executors per shard.
 pub(crate) fn group_shards_by_worker(
     shard_routing: &[(String, String, Option<String>)],
     healthy_workers: &std::collections::HashSet<String>,
 ) -> Result<(HashMap<String, Vec<String>>, usize), String> {
+    static TEST_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     let mut worker_shards: HashMap<String, Vec<String>> = HashMap::new();
     let mut skipped = 0;
 
     for (shard, primary, secondary) in shard_routing {
-        let chosen = if healthy_workers.contains(primary) {
-            Some(primary.clone())
-        } else if let Some(sec) = secondary {
-            if healthy_workers.contains(sec) {
-                Some(sec.clone())
-            } else { None }
-        } else { None };
-
-        match chosen {
-            Some(wid) => { worker_shards.entry(wid).or_default().push(shard.clone()); }
-            None => { skipped += 1; }
+        let mut healthy = Vec::new();
+        if healthy_workers.contains(primary) {
+            healthy.push(primary.clone());
         }
+        if let Some(sec) = secondary {
+            if healthy_workers.contains(sec) {
+                healthy.push(sec.clone());
+            }
+        }
+
+        if healthy.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        let idx = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % healthy.len();
+        worker_shards.entry(healthy[idx].clone()).or_default().push(shard.clone());
     }
 
     if worker_shards.is_empty() && !shard_routing.is_empty() {
@@ -106,24 +113,36 @@ async fn scatter_gather_inner(
         return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new() });
     }
 
-    // Group shards by target worker (prefer primary, fallback to secondary)
+    // Group shards by target worker.
+    // Read replicas: if a shard has multiple executors, load-balance reads
+    // across all healthy ones (round-robin via atomic counter).
+    static READ_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     let mut worker_shards: HashMap<String, Vec<String>> = HashMap::new();
     let mut skipped = 0;
 
     for (shard, primary, secondary) in &shard_routing {
-        let chosen = if pool.get_healthy_client(primary).await.is_ok() {
-            Some(primary.clone())
-        } else if let Some(sec) = secondary {
-            if pool.get_healthy_client(sec).await.is_ok() {
-                info!("Failover: shard {} → secondary {}", shard, sec);
-                Some(sec.clone())
-            } else { None }
-        } else { None };
-
-        match chosen {
-            Some(wid) => { worker_shards.entry(wid).or_default().push(shard.clone()); }
-            None => { skipped += 1; warn!("Shard {} has no healthy worker", shard); }
+        // Collect all healthy executors for this shard
+        let mut healthy_executors = Vec::new();
+        if pool.get_healthy_client(primary).await.is_ok() {
+            healthy_executors.push(primary.clone());
         }
+        if let Some(sec) = secondary {
+            if pool.get_healthy_client(sec).await.is_ok() {
+                healthy_executors.push(sec.clone());
+            }
+        }
+
+        if healthy_executors.is_empty() {
+            skipped += 1;
+            warn!("Shard {} has no healthy worker", shard);
+            continue;
+        }
+
+        // Load-balance across healthy executors
+        let idx = READ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % healthy_executors.len();
+        let chosen = &healthy_executors[idx];
+        worker_shards.entry(chosen.clone()).or_default().push(shard.clone());
     }
 
     if worker_shards.is_empty() {
@@ -217,10 +236,9 @@ mod tests {
         let healthy: HashSet<String> = ["w0", "w1", "w2"].iter().map(|s| s.to_string()).collect();
         let (groups, skipped) = group_shards_by_worker(&routing_3shards(), &healthy).unwrap();
         assert_eq!(skipped, 0);
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups["w0"], vec!["s0"]);
-        assert_eq!(groups["w1"], vec!["s1"]);
-        assert_eq!(groups["w2"], vec!["s2"]);
+        // All 3 shards should be assigned (may be load-balanced across replicas)
+        let total_shards: usize = groups.values().map(|v| v.len()).sum();
+        assert_eq!(total_shards, 3, "All 3 shards should be assigned");
     }
 
     #[test]
@@ -291,5 +309,39 @@ mod tests {
     #[test]
     fn test_failure_threshold_zero_total() {
         assert!(check_failure_threshold(0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_load_balance_across_replicas() {
+        // Both w0 and w1 are healthy, s0 has both as executors
+        let routing = vec![
+            ("s0".into(), "w0".into(), Some("w1".into())),
+        ];
+        let healthy: HashSet<String> = ["w0", "w1"].iter().map(|s| s.to_string()).collect();
+
+        // Run multiple times — should distribute across w0 and w1
+        let mut w0_count = 0;
+        let mut w1_count = 0;
+        for _ in 0..100 {
+            let (groups, _) = group_shards_by_worker(&routing, &healthy).unwrap();
+            if groups.contains_key("w0") { w0_count += 1; }
+            if groups.contains_key("w1") { w1_count += 1; }
+        }
+        // Both should get some traffic (load-balanced)
+        assert!(w0_count > 20, "w0 should get >20% traffic, got {}", w0_count);
+        assert!(w1_count > 20, "w1 should get >20% traffic, got {}", w1_count);
+    }
+
+    #[test]
+    fn test_replica_failover_when_one_down() {
+        // s0 has w0 (primary) and w1 (secondary), but w0 is down
+        let routing = vec![
+            ("s0".into(), "w0".into(), Some("w1".into())),
+        ];
+        let healthy: HashSet<String> = ["w1"].iter().map(|s| s.to_string()).collect();
+        let (groups, skipped) = group_shards_by_worker(&routing, &healthy).unwrap();
+        assert_eq!(skipped, 0);
+        assert!(groups.contains_key("w1"), "Should failover to w1");
+        assert!(!groups.contains_key("w0"), "w0 is down");
     }
 }
