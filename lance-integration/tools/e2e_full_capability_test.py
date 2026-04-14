@@ -35,6 +35,7 @@ import grpc
 import yaml
 import lance_service_pb2 as pb
 import lance_service_pb2_grpc as pb_grpc
+from test_helpers import wait_for_grpc, wait_for_process
 
 BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
 BASE = "/tmp/lanceforge_capability_test"
@@ -108,16 +109,17 @@ with open(os.path.join(BASE, 'config.yaml'), 'w') as f:
     yaml.dump(cfg, f)
 
 os.system("pkill -f 'lance-coordinator.*54000|lance-worker.*5410' 2>/dev/null")
-time.sleep(2)
+time.sleep(1)
 
 p = subprocess.Popen([f"{BIN}/lance-worker", f"{BASE}/config.yaml", "w0", "54100"],
     stdout=open(f"{BASE}/w0.log", "w"), stderr=subprocess.STDOUT)
 processes.append(p)
-time.sleep(3)
+assert wait_for_grpc("127.0.0.1", 54100), "Worker failed to start"
+
 p = subprocess.Popen([f"{BIN}/lance-coordinator", f"{BASE}/config.yaml", str(COORD_PORT)],
     stdout=open(f"{BASE}/coord.log", "w"), stderr=subprocess.STDOUT)
 processes.append(p)
-time.sleep(4)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 
 for proc in processes:
     assert proc.poll() is None, f"Process died!"

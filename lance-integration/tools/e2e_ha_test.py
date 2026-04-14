@@ -18,6 +18,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'))
 
+from test_helpers import wait_for_grpc
 import pyarrow as pa
 import lance
 import yaml
@@ -124,9 +125,10 @@ print("── Phase 1: Baseline ──")
 
 w0 = start_worker("w0", 56100)
 w1 = start_worker("w1", 56101)
-time.sleep(3)
+assert wait_for_grpc("127.0.0.1", 56100), "Worker w0 failed to start"
+assert wait_for_grpc("127.0.0.1", 56101), "Worker w1 failed to start"
 coord = start_coordinator()
-time.sleep(5)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to start"
 
 def t_baseline():
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
@@ -169,7 +171,7 @@ stop_process(coord)
 
 print("  Restarting coordinator...")
 coord = start_coordinator()
-time.sleep(5)
+assert wait_for_grpc("127.0.0.1", COORD_PORT), "Coordinator failed to restart"
 
 def t_tables_survive():
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
