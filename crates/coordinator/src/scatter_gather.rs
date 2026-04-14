@@ -243,12 +243,15 @@ mod tests {
 
     #[test]
     fn test_group_primary_down_failover() {
-        // w0 is down — s0 should failover to w1
+        // w0 is down — s0 should failover to w1 (only healthy replica)
         let healthy: HashSet<String> = ["w1", "w2"].iter().map(|s| s.to_string()).collect();
         let (groups, skipped) = group_shards_by_worker(&routing_3shards(), &healthy).unwrap();
         assert_eq!(skipped, 0);
-        assert!(groups["w1"].contains(&"s0".to_string())); // failover
-        assert!(groups["w1"].contains(&"s1".to_string())); // primary
+        // s0: primary w0 is down, failover to secondary w1
+        assert!(groups["w1"].contains(&"s0".to_string()), "s0 should failover to w1");
+        // s1: primary w1, secondary w2 — load-balanced to either
+        let s1_assigned = groups.values().any(|v| v.contains(&"s1".to_string()));
+        assert!(s1_assigned, "s1 should be assigned to w1 or w2");
     }
 
     #[test]

@@ -97,6 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         CoordinatorService::new(&config, query_timeout)
     };
     let metrics = service.metrics();
+    // Keep a handle for graceful shutdown
+    let shutdown_handle = service.pool_shutdown_handle();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     // Start REST/metrics HTTP server on port+1
@@ -125,8 +127,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server
         .add_service(svc)
-        .serve_with_shutdown(addr, async { signal::ctrl_c().await.ok(); })
+        .serve_with_shutdown(addr, async {
+            signal::ctrl_c().await.ok();
+            info!("Shutdown signal received — draining in-flight requests...");
+        })
         .await?;
 
+    // Stop background tasks (health check loop)
+    shutdown_handle.shutdown();
+    info!("Server stopped — all in-flight requests completed");
     Ok(())
 }

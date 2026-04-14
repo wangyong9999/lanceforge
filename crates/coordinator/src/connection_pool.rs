@@ -41,6 +41,8 @@ pub struct ConnectionPool {
     query_timeout: Duration,
     /// TLS config for client-side connection to workers.
     tls_config: Option<tonic::transport::ClientTlsConfig>,
+    /// Shutdown signal for the health check loop.
+    shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl ConnectionPool {
@@ -50,7 +52,13 @@ impl ConnectionPool {
             endpoints,
             query_timeout,
             tls_config: None,
+            shutdown: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Signal the health check loop to stop.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_one();
     }
 
     /// Enable TLS for worker connections using a CA certificate.
@@ -144,7 +152,13 @@ impl ConnectionPool {
     ) {
         let check_interval = Duration::from_secs(10);
         loop {
-            tokio::time::sleep(check_interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(check_interval) => {}
+                _ = self.shutdown.notified() => {
+                    info!("Health check loop stopping (shutdown)");
+                    return;
+                }
+            }
 
             // Phase 1: Collect health check results WITHOUT holding locks during I/O
             let mut results: Vec<(String, HealthCheckResult)> = Vec::new();

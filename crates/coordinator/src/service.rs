@@ -49,6 +49,12 @@ impl CoordinatorService {
         self.metrics.clone()
     }
 
+    /// Get a handle that can be used to trigger graceful shutdown.
+    /// Call this before moving `service` into the gRPC server.
+    pub fn pool_shutdown_handle(&self) -> Arc<ConnectionPool> {
+        self.pool.clone()
+    }
+
     /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
     pub async fn with_meta_state(
         config: &ClusterConfig,
