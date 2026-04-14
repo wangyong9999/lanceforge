@@ -108,7 +108,8 @@ def main():
         ("Full Capability (21 tests)", os.path.join(TOOLS_DIR, "e2e_full_capability_test.py")),
         ("HA (8 tests)", os.path.join(TOOLS_DIR, "e2e_ha_test.py")),
         ("Read Replica (4 tests)", os.path.join(TOOLS_DIR, "e2e_replica_test.py")),
-        ("Rebalance (6 tests)", os.path.join(TOOLS_DIR, "e2e_rebalance_test.py")),
+        ("Rebalance (7 tests)", os.path.join(TOOLS_DIR, "e2e_rebalance_test.py")),
+        ("TLS (6 tests)", os.path.join(TOOLS_DIR, "e2e_tls_test.py")),
         ("Recall Benchmark (200K×128d)", os.path.join(BENCH_DIR, "recall_benchmark.py")),
         ("Filtered ANN (200K×128d)", os.path.join(BENCH_DIR, "bench_filtered.py")),
     ]
