@@ -105,10 +105,11 @@ def main():
 
     # Define benchmark suites
     quick_suite = [
-        ("Full Capability (14 tests)", os.path.join(TOOLS_DIR, "e2e_full_capability_test.py")),
+        ("Full Capability (21 tests)", os.path.join(TOOLS_DIR, "e2e_full_capability_test.py")),
+        ("HA (8 tests)", os.path.join(TOOLS_DIR, "e2e_ha_test.py")),
+        ("Read Replica (4 tests)", os.path.join(TOOLS_DIR, "e2e_replica_test.py")),
         ("Recall Benchmark (200K×128d)", os.path.join(BENCH_DIR, "recall_benchmark.py")),
         ("Filtered ANN (200K×128d)", os.path.join(BENCH_DIR, "bench_filtered.py")),
-        ("Enterprise E2E (12 tests)", os.path.join(TOOLS_DIR, "e2e_enterprise_test.py")),
     ]
 
     full_suite = quick_suite + [

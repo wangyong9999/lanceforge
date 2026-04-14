@@ -1,104 +1,48 @@
 # LanceForge Development Plan
 
-## Completed (Phase 1-6)
+## Completed (Phase 1-7)
 
-All archived. Key milestones:
-- Distributed ANN/FTS/Hybrid retrieval (lancedb Table API)
-- Insert/Delete/Upsert, CreateTable/CreateIndex/DropTable DDL
-- Python SDK + LangChain + REST + Metrics + TLS
-- 21/21 capability tests, 99 unit tests, 9 benchmark suites
-- vs Qdrant: unfiltered +34%, concurrent +4x, recall=1.0
-- Real RAG validation with sentence-transformers
+Phase 1-6: MVP → Architecture → Hardening → Capability → DX → DDL
+Phase 7: HA (meta crate, MetaStore CAS, SessionManager, ShardManager,
+  MetaShardState, read replicas, rebalance, compact, worker register)
+  HA E2E: 8/8 (restart survival, worker failure/recovery, lifecycle)
 
-## Architecture Insight: S3 Changes Everything
+## Current: Phase 8 — Validate Everything Real
 
-Unlike Milvus/Qdrant/Weaviate (local disk, need WAL + replication + Raft):
+No new features. Verify every "implemented but untested" capability.
 
-```
-Our S3-backed architecture eliminates:
-  ✗ WAL          — S3 writes are atomic (lance manifest commit)
-  ✗ Data replication — S3 is shared storage, all workers read same data
-  ✗ Raft consensus  — etcd handles metadata, no leader election needed
-  ✗ Data backup     — S3 is durable by design
-  ✗ Shard transfer  — LoadShard same URI (zero-copy)
+### Step 1: Read Replica E2E
+Two workers load same shard → search distributes across both →
+kill one → search still works → restart → both serving again.
 
-What we still need:
-  ✓ Shared metadata store (etcd) — coordinator state survives restarts
-  ✓ Read replicas — multiple workers load same shard for availability
-  ✓ Online rebalance — redistribute shards without restart
-  ✓ Write batching — avoid S3 fragment explosion from frequent writes
-  ✓ Compact — merge small fragments for read performance
-```
+### Step 2: Rebalance E2E
+Start 2 workers → add 3rd worker → trigger rebalance →
+verify shards redistributed → new worker serves queries.
 
-## Phase 7: Distributed Reliability (S3-Native)
+### Step 3: TLS E2E
+Generate self-signed cert → configure tls_cert/tls_key →
+start cluster with TLS → SDK connects with TLS → search works.
 
-### Step 1: etcd ShardState Activation [P0]
+### Step 4: Compact E2E
+Insert 100 small batches (1 row each) → compact → verify
+fragment count reduced → search still works + faster.
 
-The single most important infrastructure gap. Without it:
-- Coordinator restart = lose all runtime-created tables
-- Multi-Active HA is fake (no shared state between coordinators)
-- Dynamic rebalance results don't persist
+### Step 5: Complete CI Pipeline
+Add to run_all.py --ci:
+  - HA test (8 tests)
+  - Full capability (21 tests)
+  - Recall benchmark
+  - Filtered benchmark
+Verify: run_all.py --ci passes end-to-end.
 
-Implementation:
-- Activate existing EtcdShardState (271 lines, feature-gated)
-- Add etcd-client dependency to common crate
-- ClusterConfig: `metadata_store: { type: etcd, endpoints: [...] }`
-- Coordinator binary: choose StaticShardState vs EtcdShardState based on config
-- Test: create table on coordinator A → restart → table still exists
-
-### Step 2: Read Replicas (Multi-Worker Same Shard) [P0]
-
-S3-native replica: multiple workers load the same shard URI.
-No data copying, no sync protocol.
-
-Implementation:
-- ShardConfig.executors already supports Vec<String> (multiple executors)
-- scatter_gather already routes to primary, failover to secondary
-- Change: load-balance reads across all healthy executors (not just primary)
-- Connection pool: add round-robin or least-loaded read routing
-- Test: 1 shard on 2 workers → kill 1 → queries still work
-
-### Step 3: Online Rebalance [P1]
-
-All building blocks exist: LoadShard, UnloadShard, auto_shard discovery.
-Need: trigger rebalance without restart.
-
-Implementation:
-- New RPC: `RebalanceCluster` on coordinator
-- Logic: discover fragments → compute new assignment → diff current vs desired →
-  LoadShard new + UnloadShard old + update shard_state
-- Trigger: manual RPC, or auto on worker join/leave (health check integration)
-- Test: add worker → trigger rebalance → new worker gets shards
-
-### Step 4: Write Batching + Compact [P1]
-
-Frequent small writes → many tiny S3 fragments → read perf degrades.
-
-Implementation:
-- Coordinator-side write buffer: accumulate rows for N seconds or M rows
-- Flush as single table.add() batch
-- Background compact: periodically call lancedb table.optimize() to merge fragments
-- Test: insert 1000 rows one-by-one → compact → verify read perf improves
-
-### Step 5: Cluster Membership (Worker Auto-Register) [P2]
-
-Workers announce themselves to coordinator on startup.
-
-Implementation:
-- Worker binary: on startup, send Register RPC to coordinator
-- Coordinator: register_executor in shard_state → trigger rebalance
-- On worker health check failure → remove_executor → trigger rebalance
-- Already partially implemented (health check loop does remove)
-- Test: start new worker → automatically gets assigned shards
-
-## Phase 8: Scale & Enterprise
-
-- [ ] K8s Helm chart (coordinator Deployment + worker StatefulSet + etcd)
-- [ ] RBAC (collection-level roles stored in etcd)
-- [ ] Sustained load test (1 hour, 200 QPS)
-- [ ] 10M+ scale benchmark
-- [ ] SQL path (DuckDB Lance extension)
+## Phase 9: Production Deployment
+- [ ] S3 MetaStore (replace FileMetaStore for multi-node)
+- [ ] K8s Helm chart
+- [ ] RBAC
+- [ ] 10M+ scale validation
+- [ ] Sustained load test (1 hour)
 
 ## Stats
-- Code: ~5,500 lines Rust | Tests: 99 unit + 29 integration + 21 capability + 9 bench
-- GitHub: 36 commits on main
+- Code: ~6,500 lines Rust (5 crates)
+- Tests: 125 unit | 29 integration | 21 capability | 8 HA | 12 enterprise
+- CI: unit → integration → HA → capability → benchmark
