@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Lance Worker '{}' with {} shards on port {}", worker_id, shards.len(), port);
 
     let ctx = SessionContext::default();
-    let registry = LanceTableRegistry::with_storage_options(ctx, &shards, &config.storage_options).await?;
+    let registry = LanceTableRegistry::with_full_config(ctx, &shards, &config.storage_options, &config.cache).await?;
     let service = WorkerService::new(Arc::new(registry));
 
     let addr = format!("0.0.0.0:{}", port).parse()?;

@@ -19,8 +19,9 @@ use lance_distributed_proto::descriptor::LanceQueryType;
 
 use super::connection_pool::ConnectionPool;
 
-/// Maximum concurrent queries before backpressure (RESOURCE_EXHAUSTED).
-const MAX_CONCURRENT_QUERIES: usize = 200;
+/// Default maximum concurrent queries (overridden by ServerConfig.max_concurrent_queries).
+/// Default max concurrent queries (overridden by ServerConfig).
+const _DEFAULT_MAX_CONCURRENT_QUERIES: usize = 200;
 
 /// Coordinator gRPC service — query entry point.
 pub struct CoordinatorService {
@@ -35,6 +36,8 @@ pub struct CoordinatorService {
     storage_options: std::collections::HashMap<String, String>,
     /// Round-robin counter for write distribution.
     write_counter: std::sync::atomic::AtomicUsize,
+    /// For error messages.
+    max_concurrent_queries: usize,
     /// Shard name → URI registry for LoadShard RPCs during rebalance.
     shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
@@ -124,7 +127,7 @@ impl CoordinatorService {
             }
         }
 
-        let mut pool = ConnectionPool::new(endpoints, query_timeout);
+        let mut pool = ConnectionPool::new(endpoints, query_timeout, &config.health_check);
 
         // Configure client-side TLS for coordinator→worker connections
         if let Some(ref ca_path) = config.security.tls_ca_cert {
@@ -150,7 +153,8 @@ impl CoordinatorService {
         });
 
         let metrics = lance_distributed_common::metrics::Metrics::new();
-        let query_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_QUERIES));
+        let max_queries = config.server.max_concurrent_queries;
+        let query_semaphore = Arc::new(tokio::sync::Semaphore::new(max_queries));
 
         Self {
             pool,
@@ -163,6 +167,7 @@ impl CoordinatorService {
             query_semaphore,
             storage_options: config.storage_options.clone(),
             write_counter: std::sync::atomic::AtomicUsize::new(0),
+            max_concurrent_queries: max_queries,
             shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
         }
     }
@@ -176,7 +181,7 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!(
-                "Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES
+                "Too many concurrent queries (max {})", self.max_concurrent_queries
             ))
         })?;
         let req = request.into_inner();
@@ -230,7 +235,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<FtsSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
-            Status::resource_exhausted(format!("Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES))
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
         let req = request.into_inner();
         let k = validate_k(req.k, self.oversample_factor)?;
@@ -259,7 +264,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<HybridSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
-            Status::resource_exhausted(format!("Too many concurrent queries (max {})", MAX_CONCURRENT_QUERIES))
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
         let req = request.into_inner();
         let k = validate_k(req.k, self.oversample_factor)?;

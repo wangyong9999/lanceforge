@@ -47,6 +47,15 @@ impl LanceTableRegistry {
         shards: &[ShardConfig],
         storage_options: &HashMap<String, String>,
     ) -> Result<Self> {
+        Self::with_full_config(_ctx, shards, storage_options, &Default::default()).await
+    }
+
+    pub async fn with_full_config(
+        _ctx: datafusion::prelude::SessionContext,
+        shards: &[ShardConfig],
+        storage_options: &HashMap<String, String>,
+        cache_config: &lance_distributed_common::config::CacheConfig,
+    ) -> Result<Self> {
         let mut tables = Vec::new();
 
         // Group shards by parent directory to share connections
@@ -86,8 +95,8 @@ impl LanceTableRegistry {
         Ok(Self {
             tables: tokio::sync::RwLock::new(tables),
             cache: Arc::new(crate::cache::QueryCache::new(
-                Duration::from_secs(5),
-                1000,
+                Duration::from_secs(cache_config.ttl_secs),
+                cache_config.max_entries,
             )),
         })
     }

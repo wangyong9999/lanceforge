@@ -43,16 +43,27 @@ pub struct ConnectionPool {
     tls_config: Option<tonic::transport::ClientTlsConfig>,
     /// Shutdown signal for the health check loop.
     shutdown: Arc<tokio::sync::Notify>,
+    /// Health check tuning from config.
+    health_check_interval_secs: u64,
+    unhealthy_threshold: u32,
+    remove_threshold: u32,
 }
 
 impl ConnectionPool {
-    pub fn new(endpoints: HashMap<String, (String, u16)>, query_timeout: Duration) -> Self {
+    pub fn new(
+        endpoints: HashMap<String, (String, u16)>,
+        query_timeout: Duration,
+        health_config: &lance_distributed_common::config::HealthCheckConfig,
+    ) -> Self {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             endpoints,
             query_timeout,
             tls_config: None,
             shutdown: Arc::new(tokio::sync::Notify::new()),
+            health_check_interval_secs: health_config.interval_secs,
+            unhealthy_threshold: health_config.unhealthy_threshold,
+            remove_threshold: health_config.remove_threshold,
         }
     }
 
@@ -150,7 +161,7 @@ impl ConnectionPool {
         &self,
         shard_state: Option<Arc<dyn ShardState>>,
     ) {
-        let check_interval = Duration::from_secs(10);
+        let check_interval = Duration::from_secs(self.health_check_interval_secs);
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(check_interval) => {}
@@ -231,11 +242,11 @@ impl ConnectionPool {
                             if let Some(ws) = workers.get_mut(&wid) {
                                 ws.consecutive_failures += 1;
                                 ws.last_check = Instant::now();
-                                if ws.consecutive_failures >= 2 {
+                                if ws.consecutive_failures >= self.unhealthy_threshold {
                                     ws.healthy = false;
                                     warn!("Health: worker {} unhealthy ({} failures)", wid, ws.consecutive_failures);
                                 }
-                                (ws.consecutive_failures >= 5, ws.consecutive_failures)
+                                (ws.consecutive_failures >= self.remove_threshold, ws.consecutive_failures)
                             } else {
                                 (false, 0)
                             }
@@ -273,7 +284,7 @@ mod tests {
         let endpoints: HashMap<String, (String, u16)> = workers.into_iter()
             .map(|(id, host, port)| (id.to_string(), (host.to_string(), port)))
             .collect();
-        ConnectionPool::new(endpoints, Duration::from_secs(30))
+        ConnectionPool::new(endpoints, Duration::from_secs(30), &Default::default())
     }
 
     #[tokio::test]

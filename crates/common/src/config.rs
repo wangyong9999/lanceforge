@@ -53,6 +53,9 @@ pub struct ServerConfig {
     /// Max concurrent gRPC streams per connection.
     #[serde(default = "ServerConfig::default_concurrency_limit")]
     pub concurrency_limit: usize,
+    /// Max concurrent queries before backpressure (RESOURCE_EXHAUSTED).
+    #[serde(default = "ServerConfig::default_max_concurrent_queries")]
+    pub max_concurrent_queries: usize,
 }
 
 impl ServerConfig {
@@ -60,6 +63,7 @@ impl ServerConfig {
     fn default_keepalive_interval_secs() -> u64 { 10 }
     fn default_keepalive_timeout_secs() -> u64 { 20 }
     fn default_concurrency_limit() -> usize { 256 }
+    fn default_max_concurrent_queries() -> usize { 200 }
 }
 
 impl Default for ServerConfig {
@@ -69,6 +73,7 @@ impl Default for ServerConfig {
             keepalive_interval_secs: Self::default_keepalive_interval_secs(),
             keepalive_timeout_secs: Self::default_keepalive_timeout_secs(),
             concurrency_limit: Self::default_concurrency_limit(),
+            max_concurrent_queries: Self::default_max_concurrent_queries(),
         }
     }
 }
