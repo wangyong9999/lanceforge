@@ -13,3 +13,7 @@ serde_json = "1"
 tokio = { workspace = true, features = ["full"] }
 log = { workspace = true }
 async-trait = { workspace = true }
+
+# S3MetaStore
+object_store = { workspace = true }
+url = "2"

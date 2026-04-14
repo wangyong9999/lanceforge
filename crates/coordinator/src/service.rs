@@ -56,15 +56,29 @@ impl CoordinatorService {
     }
 
     /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
+    /// Supports both file paths and S3 URIs (s3://bucket/path/metadata.json).
     pub async fn with_meta_state(
         config: &ClusterConfig,
         query_timeout: Duration,
         metadata_path: &str,
     ) -> Self {
-        let store = Arc::new(
-            lance_distributed_meta::store::FileMetaStore::new(metadata_path).await
-                .expect("Failed to initialize MetaStore")
-        );
+        let store: Arc<dyn lance_distributed_meta::store::MetaStore> = if metadata_path.starts_with("s3://")
+            || metadata_path.starts_with("gs://")
+            || metadata_path.starts_with("az://")
+        {
+            info!("Initializing S3MetaStore at {}", metadata_path);
+            Arc::new(
+                lance_distributed_meta::store::S3MetaStore::new(
+                    metadata_path,
+                    config.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())),
+                ).await.expect("Failed to initialize S3MetaStore")
+            )
+        } else {
+            Arc::new(
+                lance_distributed_meta::store::FileMetaStore::new(metadata_path).await
+                    .expect("Failed to initialize FileMetaStore")
+            )
+        };
         let meta_state = lance_distributed_meta::state::MetaShardState::new(store.clone(), "lanceforge");
 
         // Initialize from config (merges existing persisted state with config)

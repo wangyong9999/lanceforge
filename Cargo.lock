@@ -4200,9 +4200,11 @@ dependencies = [
  "lance-distributed-common",
  "lance-distributed-proto",
  "log",
+ "object_store",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]
