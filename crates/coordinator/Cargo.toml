@@ -11,6 +11,7 @@ path = "src/bin/main.rs"
 [dependencies]
 lance-distributed-proto = { path = "../proto" }
 lance-distributed-common = { path = "../common" }
+lance-distributed-meta = { path = "../meta" }
 
 # LanceDB (embedding, reranker)
 lancedb = { version = "0.27", default-features = false }

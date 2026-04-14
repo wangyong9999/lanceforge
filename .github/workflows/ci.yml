@@ -199,7 +199,12 @@ jobs:
           python -m grpc_tools.protoc -I../../crates/proto/proto \
             --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
 
-      - name: Full capability verification (14 tests)
+      - name: HA verification (4 tests)
+        run: |
+          cd lance-integration/tools
+          PYTHONPATH=.:../sdk/python python e2e_ha_test.py
+
+      - name: Full capability verification (21 tests)
         run: |
           cd lance-integration/tools
           PYTHONPATH=.:../sdk/python python e2e_full_capability_test.py

@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let service = if let Some(ref metadata_path) = config.metadata_path {
-        CoordinatorService::with_persistent_state(&config, query_timeout, metadata_path).await
+        CoordinatorService::with_meta_state(&config, query_timeout, metadata_path).await
     } else {
         CoordinatorService::new(&config, query_timeout)
     };

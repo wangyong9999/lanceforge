@@ -183,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_list() {
-        let store = test_store("register").await;
+        let store = test_store("reg1").await;
         let mgr = SessionManager::new(store, "test");
 
         mgr.register("w0", "127.0.0.1", 50100).await.unwrap();
@@ -195,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_expiry() {
-        let store = test_store("register").await;
+        let store = test_store("reg1").await;
         let mgr = SessionManager::new(store, "test")
             .with_ttl(Duration::from_millis(50));
 
@@ -210,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_heartbeat_extends_session() {
-        let store = test_store("register").await;
+        let store = test_store("reg1").await;
         let mgr = SessionManager::new(store, "test")
             .with_ttl(Duration::from_millis(200));
 
@@ -225,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_register() {
-        let store = test_store("register").await;
+        let store = test_store("reg1").await;
         let mgr = SessionManager::new(store, "test");
 
         mgr.register("w0", "127.0.0.1", 50100).await.unwrap();

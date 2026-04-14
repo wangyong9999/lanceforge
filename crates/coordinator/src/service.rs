@@ -47,20 +47,35 @@ impl CoordinatorService {
         self.metrics.clone()
     }
 
-    /// Create with persistent metadata (survives restarts).
-    pub async fn with_persistent_state(
+    /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
+    pub async fn with_meta_state(
         config: &ClusterConfig,
         query_timeout: Duration,
         metadata_path: &str,
     ) -> Self {
-        let persistent = lance_distributed_common::persistent_state::PersistentShardState::from_config(
-            metadata_path, config
-        ).await;
-        // Load any previously persisted state
-        let _ = persistent.load().await;
-        let _ = persistent.save().await;
-        info!("Using persistent metadata at {}", metadata_path);
-        Self::with_shard_state(config, query_timeout, Arc::new(persistent))
+        let store = Arc::new(
+            lance_distributed_meta::store::FileMetaStore::new(metadata_path).await
+                .expect("Failed to initialize MetaStore")
+        );
+        let meta_state = lance_distributed_meta::state::MetaShardState::new(store.clone(), "lanceforge");
+
+        // Initialize from config (merges existing persisted state with config)
+        for e in &config.executors {
+            meta_state.register_executor(&e.id, &e.host, e.port).await;
+        }
+        let routing = config.build_routing_table();
+        for (table_name, shard_routes) in &routing {
+            if meta_state.get_current_target(table_name).await.is_none() {
+                let mapping: lance_distributed_common::shard_state::ShardMapping = shard_routes.iter()
+                    .map(|(sname, execs)| (sname.clone(), execs.clone()))
+                    .collect();
+                meta_state.register_table(table_name, mapping).await;
+            }
+        }
+
+        info!("Using MetaStore at {} ({} tables)", metadata_path,
+            meta_state.all_tables().await.len());
+        Self::with_shard_state(config, query_timeout, Arc::new(meta_state))
     }
 
     pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
@@ -629,6 +644,8 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         _request: Request<pb::RebalanceRequest>,
     ) -> Result<Response<pb::RebalanceResponse>, Status> {
+        use lance_distributed_meta::shard_manager::{assign_shards, compute_diff, ShardPolicy};
+
         let all_executors = self.shard_state.all_executors().await;
         let executor_ids: Vec<String> = all_executors.iter().map(|(id, _, _)| id.clone()).collect();
         let all_tables = self.shard_state.all_tables().await;
@@ -640,42 +657,39 @@ impl LanceSchedulerService for CoordinatorService {
             }));
         }
 
+        let policy = ShardPolicy {
+            replica_factor: 2.min(executor_ids.len()),
+            max_shards_per_worker: 0,
+        };
+
         let mut total_moved = 0u32;
 
         for table_name in &all_tables {
             let current_routing = self.shard_state.get_shard_routing(table_name).await;
             if current_routing.is_empty() { continue; }
 
-            // Compute balanced assignment: round-robin shards across executors
-            let mut new_mapping: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-            for (i, (shard_name, _primary, _secondary)) in current_routing.iter().enumerate() {
-                let target = &executor_ids[i % executor_ids.len()];
-                new_mapping.entry(shard_name.clone()).or_default().push(target.clone());
-            }
-
-            // Diff: find shards that need to move
-            for (shard_name, new_executors) in &new_mapping {
-                let current = current_routing.iter()
-                    .find(|(s, _, _)| s == shard_name)
-                    .map(|(_, p, _)| p.clone())
-                    .unwrap_or_default();
-
-                let new_primary = new_executors.first().cloned().unwrap_or_default();
-                if current != new_primary {
-                    // Shard needs to move: LoadShard on new worker
-                    let shard_uri = self.shard_state.get_current_target(table_name).await
-                        .and_then(|m| m.get(shard_name).and_then(|_| {
-                            // We don't store URIs in shard_state — worker already has the shard loaded
-                            // For rebalance, we'd need the URI. Skip data movement for now,
-                            // just update the routing.
-                            None::<String>
-                        }));
-                    total_moved += 1;
+            // Build current assignment map
+            let shard_names: Vec<String> = current_routing.iter().map(|(s, _, _)| s.clone()).collect();
+            let mut current_assignment = std::collections::HashMap::new();
+            for (shard, primary, secondary) in &current_routing {
+                let mut execs = vec![primary.clone()];
+                if let Some(sec) = secondary {
+                    execs.push(sec.clone());
                 }
+                current_assignment.insert(shard.clone(), execs);
             }
 
-            // Update shard_state with new mapping
-            self.shard_state.register_table(table_name, new_mapping).await;
+            // Compute new assignment with ShardManager
+            let new_assignment = assign_shards(
+                &shard_names, &executor_ids, &policy, Some(&current_assignment));
+
+            // Compute diff (minimal movement)
+            let (to_load, to_unload) = compute_diff(&current_assignment, &new_assignment);
+            let moved: usize = to_load.values().map(|v| v.len()).sum();
+            total_moved += moved as u32;
+
+            // Update shard_state
+            self.shard_state.register_table(table_name, new_assignment).await;
         }
 
         info!("Rebalance: {} shards reassigned across {} executors", total_moved, executor_ids.len());

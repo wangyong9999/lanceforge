@@ -4179,6 +4179,7 @@ dependencies = [
  "env_logger",
  "futures",
  "lance-distributed-common",
+ "lance-distributed-meta",
  "lance-distributed-proto",
  "lancedb",
  "log",
@@ -4188,6 +4189,19 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lance-distributed-meta"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lance-distributed-common",
+ "lance-distributed-proto",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
