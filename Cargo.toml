@@ -30,6 +30,7 @@ members = [
     "crates/common",
     "crates/coordinator",
     "crates/worker",
+    "crates/meta",
 ]
 resolver = "3"
 
