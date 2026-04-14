@@ -26,6 +26,7 @@ tokio = { workspace = true, features = ["full"] }
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 tonic-prost = { workspace = true }
 futures = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 tracing = { workspace = true }

@@ -27,6 +27,7 @@ tonic-prost = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde_yaml = "0.9"
+rustls = { version = "0.23", features = ["ring"] }
 log = { workspace = true }
 env_logger = { workspace = true }
 tracing = { workspace = true }
