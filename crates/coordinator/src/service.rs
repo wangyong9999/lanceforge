@@ -297,21 +297,26 @@ impl LanceSchedulerService for CoordinatorService {
         _request: Request<pb::ClusterStatusRequest>,
     ) -> Result<Response<pb::ClusterStatusResponse>, Status> {
         let statuses = self.pool.worker_statuses().await;
-        let executors: Vec<pb::ExecutorStatus> = statuses.iter().map(|(id, host, port, healthy, last_check)| {
-            pb::ExecutorStatus {
-                executor_id: id.clone(),
-                host: host.clone(),
-                port: *port as u32,
-                healthy: *healthy,
-                loaded_shards: 0,
-                last_health_check_ms: last_check.elapsed().as_millis() as i64,
-            }
-        }).collect();
+        let mut total_shards = 0u32;
+        let mut total_rows = 0u64;
+        let executors: Vec<pb::ExecutorStatus> = statuses.iter()
+            .map(|(id, host, port, healthy, last_check, loaded_shards, rows)| {
+                total_shards += loaded_shards;
+                total_rows += rows;
+                pb::ExecutorStatus {
+                    executor_id: id.clone(),
+                    host: host.clone(),
+                    port: *port as u32,
+                    healthy: *healthy,
+                    loaded_shards: *loaded_shards,
+                    last_health_check_ms: last_check.elapsed().as_millis() as i64,
+                }
+            }).collect();
 
         Ok(Response::new(pb::ClusterStatusResponse {
             executors,
-            total_shards: 0,
-            total_rows: 0,
+            total_shards,
+            total_rows,
         }))
     }
 
@@ -708,8 +713,8 @@ impl LanceSchedulerService for CoordinatorService {
         // Only consider healthy executors for rebalance (skip dead workers)
         let statuses = self.pool.worker_statuses().await;
         let executor_ids: Vec<String> = statuses.iter()
-            .filter(|(_, _, _, healthy, _)| *healthy)
-            .map(|(id, _, _, _, _)| id.clone())
+            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
+            .map(|(id, _, _, _, _, _, _)| id.clone())
             .collect();
         let all_tables = self.shard_state.all_tables().await;
 

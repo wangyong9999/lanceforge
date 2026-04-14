@@ -240,6 +240,12 @@ def t_status():
     s = client.status()
     assert len(s["executors"]) >= 1
     assert s["executors"][0]["healthy"]
+    # Verify health_check returns real shard data (not hardcoded zeros)
+    assert s["executors"][0]["loaded_shards"] > 0, \
+        f"loaded_shards should be > 0, got {s['executors'][0]['loaded_shards']}"
+    assert s["total_shards"] > 0, f"total_shards should be > 0, got {s['total_shards']}"
+    assert s["total_rows"] > 0, f"total_rows should be > 0, got {s['total_rows']}"
+    print(f"({s['total_shards']} shards, {s['total_rows']} rows)", end=" ")
 test("11. Cluster status healthy", t_status)
 
 def t_rest_healthz():

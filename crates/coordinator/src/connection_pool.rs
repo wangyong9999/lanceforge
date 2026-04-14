@@ -20,7 +20,7 @@ enum HealthCheckResult {
         host: String,
         port: u16,
     },
-    Healthy,
+    Healthy { loaded_shards: u32, total_rows: u64 },
     Failed,
 }
 
@@ -32,6 +32,8 @@ pub struct WorkerState {
     pub healthy: bool,
     pub last_check: Instant,
     pub consecutive_failures: u32,
+    pub loaded_shards: u32,
+    pub total_rows: u64,
 }
 
 /// Manages connections to all Worker nodes.
@@ -140,15 +142,29 @@ impl ConnectionPool {
             };
             match endpoint.connect().await {
                 Ok(channel) => {
-                    let client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
+                    let mut client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
+                    // Immediate health check to populate shard/row data
+                    let (loaded_shards, total_rows) = match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        client.health_check(Request::new(pb::HealthCheckRequest {})),
+                    ).await {
+                        Ok(Ok(resp)) => {
+                            let r = resp.into_inner();
+                            (r.loaded_shards, r.total_rows)
+                        }
+                        _ => (0, 0),
+                    };
                     let mut workers = self.workers.write().await;
                     workers.insert(wid.clone(), WorkerState {
                         client,
                         healthy: true,
                         last_check: Instant::now(),
                         consecutive_failures: 0,
+                        loaded_shards,
+                        total_rows,
                     });
-                    info!("Connected to worker {} at {}:{}", wid, host, port);
+                    info!("Connected to worker {} at {}:{} ({} shards, {} rows)",
+                        wid, host, port, loaded_shards, total_rows);
                 }
                 Err(e) => {
                     warn!("Failed to connect to worker {} at {}:{}: {}", wid, host, port, e);
@@ -200,18 +216,21 @@ impl ConnectionPool {
                     .get(wid).map(|ws| ws.client.clone());
 
                 if let Some(mut c) = client {
-                    let ok = matches!(
-                        tokio::time::timeout(
-                            Duration::from_secs(3),
-                            c.health_check(Request::new(pb::HealthCheckRequest {})),
-                        ).await,
-                        Ok(Ok(_))
-                    );
-                    results.push((wid.clone(), if ok {
-                        HealthCheckResult::Healthy
-                    } else {
-                        HealthCheckResult::Failed
-                    }));
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        c.health_check(Request::new(pb::HealthCheckRequest {})),
+                    ).await {
+                        Ok(Ok(resp)) => {
+                            let r = resp.into_inner();
+                            results.push((wid.clone(), HealthCheckResult::Healthy {
+                                loaded_shards: r.loaded_shards,
+                                total_rows: r.total_rows,
+                            }));
+                        }
+                        _ => {
+                            results.push((wid.clone(), HealthCheckResult::Failed));
+                        }
+                    }
                 }
             }
 
@@ -222,18 +241,21 @@ impl ConnectionPool {
                         self.workers.write().await.insert(wid.clone(), WorkerState {
                             client, healthy: true,
                             last_check: Instant::now(), consecutive_failures: 0,
+                            loaded_shards: 0, total_rows: 0,
                         });
                         info!("Health: worker {} reconnected", wid);
                         if let Some(ref ss) = shard_state {
                             ss.register_executor(&wid, &host, port).await;
                         }
                     }
-                    HealthCheckResult::Healthy => {
+                    HealthCheckResult::Healthy { loaded_shards, total_rows } => {
                         let mut workers = self.workers.write().await;
                         if let Some(ws) = workers.get_mut(&wid) {
                             ws.healthy = true;
                             ws.last_check = Instant::now();
                             ws.consecutive_failures = 0;
+                            ws.loaded_shards = loaded_shards;
+                            ws.total_rows = total_rows;
                         }
                     }
                     HealthCheckResult::Failed => {
@@ -265,13 +287,13 @@ impl ConnectionPool {
     }
 
     /// Get health status for all workers (for cluster status API).
-    pub async fn worker_statuses(&self) -> Vec<(String, String, u16, bool, Instant)> {
+    pub async fn worker_statuses(&self) -> Vec<(String, String, u16, bool, Instant, u32, u64)> {
         let workers = self.workers.read().await;
         self.endpoints.iter().map(|(id, (host, port))| {
-            let (healthy, last_check) = workers.get(id)
-                .map(|ws| (ws.healthy, ws.last_check))
-                .unwrap_or((false, Instant::now()));
-            (id.clone(), host.clone(), *port, healthy, last_check)
+            let (healthy, last_check, loaded_shards, total_rows) = workers.get(id)
+                .map(|ws| (ws.healthy, ws.last_check, ws.loaded_shards, ws.total_rows))
+                .unwrap_or((false, Instant::now(), 0, 0));
+            (id.clone(), host.clone(), *port, healthy, last_check, loaded_shards, total_rows)
         }).collect()
     }
 }

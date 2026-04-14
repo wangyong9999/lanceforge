@@ -340,10 +340,12 @@ class LanceForgeClient:
                                            metadata=self._metadata(), timeout=10)
         return {
             "executors": [
-                {"id": e.executor_id, "host": e.host, "port": e.port, "healthy": e.healthy}
+                {"id": e.executor_id, "host": e.host, "port": e.port,
+                 "healthy": e.healthy, "loaded_shards": e.loaded_shards}
                 for e in resp.executors
             ],
             "total_shards": resp.total_shards,
+            "total_rows": resp.total_rows,
         }
 
     # ── Cluster Management ──

@@ -241,8 +241,11 @@ impl LanceTableRegistry {
         let tables = self.tables.read().await;
         let shard_count = tables.len() as u32;
         let mut total_rows = 0u64;
-        for (_, table) in tables.iter() {
-            total_rows += table.count_rows(None).await.unwrap_or(0) as u64;
+        for (name, table) in tables.iter() {
+            match table.count_rows(None).await {
+                Ok(count) => total_rows += count as u64,
+                Err(e) => warn!("count_rows failed for shard '{}': {}", name, e),
+            }
         }
         (shard_count, total_rows)
     }
