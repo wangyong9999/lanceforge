@@ -47,8 +47,32 @@ impl CoordinatorService {
         self.metrics.clone()
     }
 
+    /// Create with persistent metadata (survives restarts).
+    pub async fn with_persistent_state(
+        config: &ClusterConfig,
+        query_timeout: Duration,
+        metadata_path: &str,
+    ) -> Self {
+        let persistent = lance_distributed_common::persistent_state::PersistentShardState::from_config(
+            metadata_path, config
+        ).await;
+        // Load any previously persisted state
+        let _ = persistent.load().await;
+        let _ = persistent.save().await;
+        info!("Using persistent metadata at {}", metadata_path);
+        Self::with_shard_state(config, query_timeout, Arc::new(persistent))
+    }
+
     pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
         let shard_state: Arc<dyn ShardState> = Arc::new(StaticShardState::from_config(config));
+        Self::with_shard_state_and_pruner(config, query_timeout, shard_state, pruner)
+    }
+
+    fn with_shard_state(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>) -> Self {
+        Self::with_shard_state_and_pruner(config, query_timeout, shard_state, ShardPruner::empty())
+    }
+
+    fn with_shard_state_and_pruner(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>, pruner: ShardPruner) -> Self {
 
         let mut endpoints = std::collections::HashMap::new();
         for e in &config.executors {

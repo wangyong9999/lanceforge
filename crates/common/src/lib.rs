@@ -5,5 +5,6 @@ pub mod auto_shard;
 pub mod config;
 pub mod ipc;
 pub mod metrics;
+pub mod persistent_state;
 pub mod shard_pruning;
 pub mod shard_state;

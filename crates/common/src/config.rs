@@ -32,6 +32,10 @@ pub struct ClusterConfig {
     /// TLS and authentication configuration.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Path to persistent metadata file (e.g., "/data/metadata.json" or "s3://bucket/metadata.json").
+    /// When set, shard state survives coordinator restarts.
+    #[serde(default)]
+    pub metadata_path: Option<String>,
 }
 
 /// Server-level tuning parameters (coordinator + worker).

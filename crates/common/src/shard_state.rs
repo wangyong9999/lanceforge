@@ -21,7 +21,7 @@ use crate::config::ClusterConfig;
 pub type ShardMapping = HashMap<String, Vec<String>>;
 
 /// Two-phase target state for a table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TargetState {
     pub current: ShardMapping,
     pub next: Option<ShardMapping>,

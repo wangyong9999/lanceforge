@@ -89,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("API key authentication enabled ({} keys configured)", config.security.api_keys.len());
     }
 
-    let service = CoordinatorService::new(&config, query_timeout);
+    let service = if let Some(ref metadata_path) = config.metadata_path {
+        CoordinatorService::with_persistent_state(&config, query_timeout, metadata_path).await
+    } else {
+        CoordinatorService::new(&config, query_timeout)
+    };
     let metrics = service.metrics();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
