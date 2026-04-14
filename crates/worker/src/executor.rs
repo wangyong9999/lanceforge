@@ -286,7 +286,23 @@ impl LanceTableRegistry {
         req: &lance_distributed_proto::generated::lance_distributed::LocalWriteRequest,
     ) -> Result<(u64, u64)> {
         let tables = self.tables.read().await;
-        let targets = resolve_tables_inner(&tables, &req.table_name)?;
+        // For Add (write_type=0): use target_shard for exact match to prevent duplication.
+        // For Delete/Upsert: use prefix match (fan-out to all local shards is correct).
+        let targets = if req.write_type == 0 && !req.target_shard.is_empty() {
+            // Exact match on target shard
+            let matches: Vec<_> = tables.iter()
+                .filter(|(name, _)| name == &req.target_shard)
+                .map(|(name, t)| (name.as_str(), t))
+                .collect();
+            if matches.is_empty() {
+                return Err(DataFusionError::Plan(format!(
+                    "Target shard not found on this worker: {}", req.target_shard
+                )));
+            }
+            matches
+        } else {
+            resolve_tables_inner(&tables, &req.table_name)?
+        };
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
 

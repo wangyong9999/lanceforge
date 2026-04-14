@@ -339,14 +339,23 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("arrow_ipc_data is empty"));
         }
 
-        // Route Add via round-robin across workers for balanced distribution
-        let executors = self.shard_state.executors_for_table(&req.table_name).await;
-        if executors.is_empty() {
-            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        // Route Add via round-robin across SHARDS (not executors) to prevent
+        // duplication when a worker owns multiple shards of the same table.
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
-        let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % executors.len();
-        let worker_id = &executors[idx];
+        let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % routing.len();
+        let (shard_name, primary, secondary) = &routing[idx];
+        // Try primary, fall back to secondary
+        let worker_id = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary
+        } else if let Some(sec) = secondary {
+            sec
+        } else {
+            return Err(Status::unavailable(format!("No healthy worker for shard {}", shard_name)));
+        };
         let mut client = self.pool.get_healthy_client(worker_id).await?;
 
         let local_req = pb::LocalWriteRequest {
@@ -354,7 +363,8 @@ impl LanceSchedulerService for CoordinatorService {
             table_name: req.table_name,
             arrow_ipc_data: req.arrow_ipc_data,
             filter: String::new(),
-                    on_columns: vec![],
+            on_columns: vec![],
+            target_shard: shard_name.clone(),
         };
 
         let result = tokio::time::timeout(
@@ -402,6 +412,7 @@ impl LanceSchedulerService for CoordinatorService {
                     arrow_ipc_data: vec![],
                     filter: req.filter.clone(),
                     on_columns: vec![],
+                    target_shard: String::new(), // fan-out to all local shards
                 };
 
                 match tokio::time::timeout(
@@ -464,6 +475,7 @@ impl LanceSchedulerService for CoordinatorService {
                     arrow_ipc_data: req.arrow_ipc_data.clone(),
                     filter: String::new(),
                     on_columns: req.on_columns.clone(),
+                    target_shard: String::new(), // fan-out to all local shards
                 };
 
                 match tokio::time::timeout(

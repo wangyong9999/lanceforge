@@ -244,6 +244,9 @@ pub struct LocalWriteRequest {
     /// For Upsert: join key columns
     #[prost(string, repeated, tag = "5")]
     pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// For Add: specific shard to write to (prevents duplication)
+    #[prost(string, tag = "6")]
+    pub target_shard: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalWriteResponse {

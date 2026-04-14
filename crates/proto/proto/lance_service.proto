@@ -194,6 +194,7 @@ message LocalWriteRequest {
   bytes arrow_ipc_data = 3;       // For Add/Upsert: rows as Arrow IPC
   string filter = 4;              // For Delete: SQL WHERE predicate
   repeated string on_columns = 5; // For Upsert: join key columns
+  string target_shard = 6;        // For Add: specific shard to write to (prevents duplication)
 }
 
 message LocalWriteResponse {
