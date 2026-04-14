@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [lance-main]
+    branches: [lance-main, lanceforge-clean]
   pull_request:
-    branches: [lance-main]
+    branches: [lance-main, lanceforge-clean]
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,12 +30,16 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace -- -W clippy::all
+
       - name: Check (zero warnings)
         run: |
           cargo check -p lance-distributed-proto \
                        -p lance-distributed-common \
                        -p lance-distributed-coordinator \
-                       -p lance-distributed-worker 2>&1 | tee /tmp/check.log
+                       -p lance-distributed-worker \
+                       -p lance-distributed-meta 2>&1 | tee /tmp/check.log
           ! grep "^warning:" /tmp/check.log
 
       - name: Unit tests — proto
@@ -43,6 +47,9 @@ jobs:
 
       - name: Unit tests — common
         run: cargo test -p lance-distributed-common --lib
+
+      - name: Unit tests — meta
+        run: cargo test -p lance-distributed-meta --lib
 
       - name: Unit tests — coordinator
         run: cargo test -p lance-distributed-coordinator --lib
@@ -199,7 +206,7 @@ jobs:
           python -m grpc_tools.protoc -I../../crates/proto/proto \
             --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
 
-      - name: HA verification (4 tests)
+      - name: HA verification (8 tests)
         run: |
           cd lance-integration/tools
           PYTHONPATH=.:../sdk/python python e2e_ha_test.py
@@ -208,6 +215,16 @@ jobs:
         run: |
           cd lance-integration/tools
           PYTHONPATH=.:../sdk/python python e2e_full_capability_test.py
+
+      - name: TLS verification (6 tests)
+        run: |
+          cd lance-integration/tools
+          PYTHONPATH=.:../sdk/python python e2e_tls_test.py
+
+      - name: Rebalance verification (7 tests)
+        run: |
+          cd lance-integration/tools
+          PYTHONPATH=.:../sdk/python python e2e_rebalance_test.py
 
       - name: Benchmark regression (quick)
         run: |
