@@ -139,6 +139,22 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn compact_all(
+        &self,
+        _request: Request<pb::CompactRequest>,
+    ) -> Result<Response<pb::CompactResponse>, Status> {
+        match self.registry.compact_all().await {
+            Ok(count) => Ok(Response::new(pb::CompactResponse {
+                tables_compacted: count,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::CompactResponse {
+                tables_compacted: 0,
+                error: e.to_string(),
+            })),
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,

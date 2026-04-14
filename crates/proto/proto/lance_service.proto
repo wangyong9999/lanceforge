@@ -51,8 +51,15 @@ service LanceExecutorService {
   rpc UnloadShard (UnloadShardRequest) returns (UnloadShardResponse) {}
   rpc ExecuteCreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
   rpc GetTableInfo (GetTableInfoRequest) returns (GetTableInfoResponse) {}
+  rpc CompactAll (CompactRequest) returns (CompactResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
+}
+
+message CompactRequest {}
+message CompactResponse {
+  uint64 tables_compacted = 1;
+  string error = 2;
 }
 
 // ============ Health / Status ============

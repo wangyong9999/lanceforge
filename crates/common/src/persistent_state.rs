@@ -87,18 +87,9 @@ impl PersistentShardState {
         // Persist merged state
         state.save().await?;
 
-        // Start background sync loop
-        let sync_state = Arc::new(state);
-        let sync_clone = sync_state.clone();
-        tokio::spawn(async move {
-            sync_clone.sync_loop(Duration::from_secs(5)).await;
-        });
-
-        Ok(Arc::try_unwrap(sync_state).unwrap_or_else(|arc| {
-            // If Arc has multiple refs (from spawn), clone the inner
-            // This shouldn't happen in practice since spawn takes a clone
-            panic!("PersistentShardState: unexpected multiple refs")
-        }))
+        // Background sync is started by the caller (coordinator binary)
+        // to avoid Arc ownership issues in constructors.
+        Ok(state)
     }
 
     /// Create without background sync (for simpler usage / testing).
@@ -164,13 +155,17 @@ impl PersistentShardState {
         Ok(())
     }
 
-    async fn sync_loop(self: &Arc<Self>, interval: Duration) {
-        loop {
-            tokio::time::sleep(interval).await;
-            if let Err(e) = self.load().await {
-                debug!("Metadata sync failed: {}", e);
+    /// Start a background sync loop. Call from coordinator binary.
+    pub fn start_sync(self: &Arc<Self>, interval: Duration) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = state.load().await {
+                    debug!("Metadata sync failed: {}", e);
+                }
             }
-        }
+        });
     }
 }
 
