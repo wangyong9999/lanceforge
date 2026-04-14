@@ -49,6 +49,14 @@ pub struct ConnectionPool {
     health_check_interval_secs: u64,
     unhealthy_threshold: u32,
     remove_threshold: u32,
+    /// Worker connection timeout in seconds.
+    connect_timeout_secs: u64,
+    /// Health check ping timeout in seconds.
+    ping_timeout_secs: u64,
+    /// HTTP/2 keepalive interval in seconds.
+    keepalive_interval_secs: u64,
+    /// HTTP/2 keepalive timeout in seconds.
+    keepalive_timeout_secs: u64,
 }
 
 impl ConnectionPool {
@@ -56,6 +64,7 @@ impl ConnectionPool {
         endpoints: HashMap<String, (String, u16)>,
         query_timeout: Duration,
         health_config: &lance_distributed_common::config::HealthCheckConfig,
+        server_config: &lance_distributed_common::config::ServerConfig,
     ) -> Self {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
@@ -66,6 +75,10 @@ impl ConnectionPool {
             health_check_interval_secs: health_config.interval_secs,
             unhealthy_threshold: health_config.unhealthy_threshold,
             remove_threshold: health_config.remove_threshold,
+            connect_timeout_secs: health_config.connect_timeout_secs,
+            ping_timeout_secs: health_config.ping_timeout_secs,
+            keepalive_interval_secs: server_config.keepalive_interval_secs,
+            keepalive_timeout_secs: server_config.keepalive_timeout_secs,
         }
     }
 
@@ -118,11 +131,11 @@ impl ConnectionPool {
         let addr = format!("{}://{}:{}", scheme, host, port);
         let mut endpoint = tonic::transport::Channel::from_shared(addr.clone())
             .map_err(|e| format!("Invalid endpoint URI {}: {}", addr, e))?
-            .connect_timeout(Duration::from_secs(3))
+            .connect_timeout(Duration::from_secs(self.connect_timeout_secs))
             .timeout(self.query_timeout)
             .tcp_nodelay(true)
-            .http2_keep_alive_interval(Duration::from_secs(10))
-            .keep_alive_timeout(Duration::from_secs(20))
+            .http2_keep_alive_interval(Duration::from_secs(self.keepalive_interval_secs))
+            .keep_alive_timeout(Duration::from_secs(self.keepalive_timeout_secs))
             .http2_adaptive_window(true);
         if let Some(ref tls) = self.tls_config {
             endpoint = endpoint.tls_config(tls.clone())
@@ -145,7 +158,7 @@ impl ConnectionPool {
                     let mut client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
                     // Immediate health check to populate shard/row data
                     let (loaded_shards, total_rows) = match tokio::time::timeout(
-                        Duration::from_secs(3),
+                        Duration::from_secs(self.ping_timeout_secs),
                         client.health_check(Request::new(pb::HealthCheckRequest {})),
                     ).await {
                         Ok(Ok(resp)) => {
@@ -217,7 +230,7 @@ impl ConnectionPool {
 
                 if let Some(mut c) = client {
                     match tokio::time::timeout(
-                        Duration::from_secs(3),
+                        Duration::from_secs(self.ping_timeout_secs),
                         c.health_check(Request::new(pb::HealthCheckRequest {})),
                     ).await {
                         Ok(Ok(resp)) => {
@@ -306,7 +319,7 @@ mod tests {
         let endpoints: HashMap<String, (String, u16)> = workers.into_iter()
             .map(|(id, host, port)| (id.to_string(), (host.to_string(), port)))
             .collect();
-        ConnectionPool::new(endpoints, Duration::from_secs(30), &Default::default())
+        ConnectionPool::new(endpoints, Duration::from_secs(30), &Default::default(), &Default::default())
     }
 
     #[tokio::test]

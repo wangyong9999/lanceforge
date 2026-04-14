@@ -34,6 +34,10 @@ pub struct CoordinatorService {
     metrics: Arc<lance_distributed_common::metrics::Metrics>,
     query_semaphore: Arc<tokio::sync::Semaphore>,
     storage_options: std::collections::HashMap<String, String>,
+    /// Default storage path for runtime-created tables.
+    default_table_path: Option<String>,
+    /// Replication factor for shard assignment during rebalance.
+    replica_factor: usize,
     /// Round-robin counter for write distribution.
     write_counter: std::sync::atomic::AtomicUsize,
     /// For error messages.
@@ -127,7 +131,7 @@ impl CoordinatorService {
             }
         }
 
-        let mut pool = ConnectionPool::new(endpoints, query_timeout, &config.health_check);
+        let mut pool = ConnectionPool::new(endpoints, query_timeout, &config.health_check, &config.server);
 
         // Configure client-side TLS for coordinator→worker connections
         if let Some(ref ca_path) = config.security.tls_ca_cert {
@@ -148,8 +152,9 @@ impl CoordinatorService {
 
         // Start reconciliation loop
         let recon_state = shard_state.clone();
+        let recon_interval = Duration::from_secs(config.health_check.reconciliation_interval_secs);
         tokio::spawn(async move {
-            reconciliation_loop(recon_state, Duration::from_secs(5)).await;
+            reconciliation_loop(recon_state, recon_interval).await;
         });
 
         let metrics = lance_distributed_common::metrics::Metrics::new();
@@ -160,12 +165,14 @@ impl CoordinatorService {
             pool,
             shard_state,
             pruner: Arc::new(pruner),
-            oversample_factor: 2,
+            oversample_factor: config.server.oversample_factor,
             query_timeout,
             embedding_config: config.embedding.clone(),
             metrics,
             query_semaphore,
             storage_options: config.storage_options.clone(),
+            default_table_path: config.default_table_path.clone(),
+            replica_factor: config.replica_factor,
             write_counter: std::sync::atomic::AtomicUsize::new(0),
             max_concurrent_queries: max_queries,
             shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
@@ -499,7 +506,8 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         let uri = if req.uri.is_empty() {
-            format!("/tmp/lanceforge_tables/{}.lance", req.table_name)
+            let base = self.default_table_path.as_deref().unwrap_or("/tmp/lanceforge_tables");
+            format!("{}/{}.lance", base.trim_end_matches('/'), req.table_name)
         } else {
             req.uri.clone()
         };
@@ -726,7 +734,7 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         let policy = ShardPolicy {
-            replica_factor: 2.min(executor_ids.len()),
+            replica_factor: self.replica_factor.min(executor_ids.len()),
             max_shards_per_worker: 0,
         };
 

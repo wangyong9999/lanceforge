@@ -32,6 +32,8 @@ use lance_distributed_common::config::ShardConfig;
 pub struct LanceTableRegistry {
     tables: tokio::sync::RwLock<Vec<(String, lancedb::Table)>>,
     cache: Arc<crate::cache::QueryCache>,
+    /// Lance dataset read consistency interval in seconds.
+    read_consistency_secs: u64,
 }
 
 impl LanceTableRegistry {
@@ -71,7 +73,7 @@ impl LanceTableRegistry {
             } else {
                 let db = lancedb::connect(&parent_dir)
                     .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
-                    .read_consistency_interval(Duration::from_secs(3))
+                    .read_consistency_interval(Duration::from_secs(cache_config.read_consistency_secs))
                     .execute()
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -98,6 +100,7 @@ impl LanceTableRegistry {
                 Duration::from_secs(cache_config.ttl_secs),
                 cache_config.max_entries,
             )),
+            read_consistency_secs: cache_config.read_consistency_secs,
         })
     }
 
@@ -167,7 +170,7 @@ impl LanceTableRegistry {
         let (parent_dir, table_name) = split_shard_uri(uri);
         let db = lancedb::connect(&parent_dir)
             .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .read_consistency_interval(Duration::from_secs(3))
+            .read_consistency_interval(Duration::from_secs(self.read_consistency_secs))
             .execute()
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;

@@ -36,6 +36,16 @@ pub struct ClusterConfig {
     /// When set, shard state survives coordinator restarts.
     #[serde(default)]
     pub metadata_path: Option<String>,
+    /// Default storage path for runtime-created tables (CreateTable without explicit URI).
+    #[serde(default)]
+    pub default_table_path: Option<String>,
+    /// Replication factor for shard assignment during rebalance.
+    #[serde(default = "ClusterConfig::default_replica_factor")]
+    pub replica_factor: usize,
+}
+
+impl ClusterConfig {
+    fn default_replica_factor() -> usize { 2 }
 }
 
 /// Server-level tuning parameters (coordinator + worker).
@@ -56,6 +66,9 @@ pub struct ServerConfig {
     /// Max concurrent queries before backpressure (RESOURCE_EXHAUSTED).
     #[serde(default = "ServerConfig::default_max_concurrent_queries")]
     pub max_concurrent_queries: usize,
+    /// Query vector oversampling factor (fetch k*oversample from each shard, merge to k).
+    #[serde(default = "ServerConfig::default_oversample_factor")]
+    pub oversample_factor: u32,
 }
 
 impl ServerConfig {
@@ -64,6 +77,7 @@ impl ServerConfig {
     fn default_keepalive_timeout_secs() -> u64 { 20 }
     fn default_concurrency_limit() -> usize { 256 }
     fn default_max_concurrent_queries() -> usize { 200 }
+    fn default_oversample_factor() -> u32 { 2 }
 }
 
 impl Default for ServerConfig {
@@ -74,6 +88,7 @@ impl Default for ServerConfig {
             keepalive_timeout_secs: Self::default_keepalive_timeout_secs(),
             concurrency_limit: Self::default_concurrency_limit(),
             max_concurrent_queries: Self::default_max_concurrent_queries(),
+            oversample_factor: Self::default_oversample_factor(),
         }
     }
 }
@@ -87,11 +102,15 @@ pub struct CacheConfig {
     /// Maximum number of cached entries.
     #[serde(default = "CacheConfig::default_max_entries")]
     pub max_entries: usize,
+    /// Lance dataset read consistency interval in seconds (worker-side).
+    #[serde(default = "CacheConfig::default_read_consistency_secs")]
+    pub read_consistency_secs: u64,
 }
 
 impl CacheConfig {
     fn default_ttl_secs() -> u64 { 5 }
     fn default_max_entries() -> usize { 1000 }
+    fn default_read_consistency_secs() -> u64 { 3 }
 }
 
 impl Default for CacheConfig {
@@ -99,6 +118,7 @@ impl Default for CacheConfig {
         Self {
             ttl_secs: Self::default_ttl_secs(),
             max_entries: Self::default_max_entries(),
+            read_consistency_secs: Self::default_read_consistency_secs(),
         }
     }
 }
@@ -121,6 +141,12 @@ pub struct HealthCheckConfig {
     /// Shard reconciliation interval in seconds.
     #[serde(default = "HealthCheckConfig::default_reconciliation_interval_secs")]
     pub reconciliation_interval_secs: u64,
+    /// Worker connection timeout in seconds.
+    #[serde(default = "HealthCheckConfig::default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Health check ping timeout in seconds.
+    #[serde(default = "HealthCheckConfig::default_ping_timeout_secs")]
+    pub ping_timeout_secs: u64,
 }
 
 impl HealthCheckConfig {
@@ -129,6 +155,8 @@ impl HealthCheckConfig {
     fn default_remove_threshold() -> u32 { 5 }
     fn default_refresh_interval_secs() -> u64 { 3 }
     fn default_reconciliation_interval_secs() -> u64 { 5 }
+    fn default_connect_timeout_secs() -> u64 { 3 }
+    fn default_ping_timeout_secs() -> u64 { 3 }
 }
 
 impl Default for HealthCheckConfig {
@@ -139,6 +167,8 @@ impl Default for HealthCheckConfig {
             remove_threshold: Self::default_remove_threshold(),
             refresh_interval_secs: Self::default_refresh_interval_secs(),
             reconciliation_interval_secs: Self::default_reconciliation_interval_secs(),
+            connect_timeout_secs: Self::default_connect_timeout_secs(),
+            ping_timeout_secs: Self::default_ping_timeout_secs(),
         }
     }
 }
