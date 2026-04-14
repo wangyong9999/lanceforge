@@ -24,6 +24,33 @@ pub struct RegisterWorkerResponse {
     #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateLocalShardRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub parent_uri: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub arrow_ipc_data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "4")]
+    pub index_column: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub index_num_partitions: u32,
+    #[prost(map = "string, string", tag = "6")]
+    pub storage_options: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateLocalShardResponse {
+    #[prost(uint64, tag = "1")]
+    pub num_rows: u64,
+    #[prost(string, tag = "2")]
+    pub uri: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CompactRequest {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2123,6 +2150,35 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn create_local_shard(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateLocalShardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateLocalShardResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/CreateLocalShard",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "CreateLocalShard",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Health check (Scheduler periodically pings Executors)
         pub async fn health_check(
             &mut self,
@@ -2214,6 +2270,13 @@ pub mod lance_executor_service_server {
             &self,
             request: tonic::Request<super::CompactRequest>,
         ) -> std::result::Result<tonic::Response<super::CompactResponse>, tonic::Status>;
+        async fn create_local_shard(
+            &self,
+            request: tonic::Request<super::CreateLocalShardRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateLocalShardResponse>,
+            tonic::Status,
+        >;
         /// Health check (Scheduler periodically pings Executors)
         async fn health_check(
             &self,
@@ -2617,6 +2680,55 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CompactAllSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/CreateLocalShard" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateLocalShardSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::CreateLocalShardRequest>
+                    for CreateLocalShardSvc<T> {
+                        type Response = super::CreateLocalShardResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateLocalShardRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::create_local_shard(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateLocalShardSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

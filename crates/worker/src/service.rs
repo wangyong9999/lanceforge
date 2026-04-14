@@ -155,6 +155,31 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn create_local_shard(
+        &self,
+        request: Request<pb::CreateLocalShardRequest>,
+    ) -> Result<Response<pb::CreateLocalShardResponse>, Status> {
+        let req = request.into_inner();
+        if req.shard_name.is_empty() || req.parent_uri.is_empty() || req.arrow_ipc_data.is_empty() {
+            return Err(Status::invalid_argument("shard_name, parent_uri, and data required"));
+        }
+        let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::internal(format!("IPC decode: {e}")))?;
+        let index_col = if req.index_column.is_empty() { None } else { Some(req.index_column.as_str()) };
+
+        match self.registry.create_local_shard(
+            &req.shard_name, &req.parent_uri, batch,
+            index_col, req.index_num_partitions, &req.storage_options,
+        ).await {
+            Ok((num_rows, uri)) => Ok(Response::new(pb::CreateLocalShardResponse {
+                num_rows, uri, error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::CreateLocalShardResponse {
+                num_rows: 0, uri: String::new(), error: e.to_string(),
+            })),
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,

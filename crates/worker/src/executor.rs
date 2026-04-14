@@ -185,6 +185,47 @@ impl LanceTableRegistry {
         Ok(row_count)
     }
 
+    /// Create a new local shard from data (called by coordinator during CreateTable auto-sharding).
+    pub async fn create_local_shard(
+        &self,
+        shard_name: &str,
+        parent_uri: &str,
+        batch: arrow::array::RecordBatch,
+        index_column: Option<&str>,
+        num_partitions: u32,
+        storage_options: &std::collections::HashMap<String, String>,
+    ) -> Result<(u64, String)> {
+        let db = lancedb::connect(parent_uri)
+            .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .read_consistency_interval(Duration::from_secs(self.read_consistency_secs))
+            .execute()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        let num_rows = batch.num_rows() as u64;
+        let table = db.create_table(shard_name, vec![batch])
+            .execute()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        // Auto-create index if requested
+        if let Some(col) = index_column {
+            if !col.is_empty() && num_rows >= 256 {
+                let npart = if num_partitions > 0 { num_partitions } else { 32 };
+                table.create_index(&[col], lancedb::index::Index::IvfFlat(
+                    lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
+                )).execute().await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                info!("Created IVF_FLAT index on {}.{} ({} partitions)", shard_name, col, npart);
+            }
+        }
+
+        let uri = format!("{}/{}.lance", parent_uri.trim_end_matches('/'), shard_name);
+        self.tables.write().await.push((shard_name.to_string(), table));
+        info!("Created local shard: {} ({} rows) at {}", shard_name, num_rows, uri);
+        Ok((num_rows, uri))
+    }
+
     /// Compact/optimize all loaded tables (merge small fragments for read performance).
     pub async fn compact_all(&self) -> Result<u64> {
         let tables = self.tables.read().await;

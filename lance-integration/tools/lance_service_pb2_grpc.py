@@ -750,6 +750,11 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.CompactRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.CompactResponse.FromString,
                 _registered_method=True)
+        self.CreateLocalShard = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/CreateLocalShard',
+                request_serializer=lance__service__pb2.CreateLocalShardRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateLocalShardResponse.FromString,
+                _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
                 request_serializer=lance__service__pb2.HealthCheckRequest.SerializeToString,
@@ -803,6 +808,12 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateLocalShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -847,6 +858,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.CompactAll,
                     request_deserializer=lance__service__pb2.CompactRequest.FromString,
                     response_serializer=lance__service__pb2.CompactResponse.SerializeToString,
+            ),
+            'CreateLocalShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateLocalShard,
+                    request_deserializer=lance__service__pb2.CreateLocalShardRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateLocalShardResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -1044,6 +1060,33 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/CompactAll',
             lance__service__pb2.CompactRequest.SerializeToString,
             lance__service__pb2.CompactResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateLocalShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/CreateLocalShard',
+            lance__service__pb2.CreateLocalShardRequest.SerializeToString,
+            lance__service__pb2.CreateLocalShardResponse.FromString,
             options,
             channel_credentials,
             insecure,

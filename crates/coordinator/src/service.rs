@@ -517,67 +517,94 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("arrow_ipc_data required (initial data defines schema)"));
         }
 
-        let uri = if req.uri.is_empty() {
-            let base = self.default_table_path.as_deref().unwrap_or("/tmp/lanceforge_tables");
-            format!("{}/{}.lance", base.trim_end_matches('/'), req.table_name)
-        } else {
-            req.uri.clone()
-        };
-
-        // Split URI to get parent dir
-        let (parent, _) = lance_distributed_common::auto_shard::split_parent_uri(&uri);
-
-        let db = lancedb::connect(&parent)
-            .storage_options(self.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .execute()
-            .await
-            .map_err(|e| Status::internal(format!("Connect failed: {e}")))?;
-
         let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
             .map_err(|e| Status::internal(format!("IPC decode failed: {e}")))?;
         let num_rows = batch.num_rows() as u64;
 
-        db.create_table(&req.table_name, vec![batch])
-            .execute()
-            .await
-            .map_err(|e| Status::internal(format!("Create table failed: {e}")))?;
+        let base = if req.uri.is_empty() {
+            self.default_table_path.as_deref().unwrap_or("/tmp/lanceforge_tables").to_string()
+        } else {
+            // Extract parent dir from user-provided URI
+            let (parent, _) = lance_distributed_common::auto_shard::split_parent_uri(&req.uri);
+            parent
+        };
 
-        // Auto-create vector index if requested
-        if !req.index_column.is_empty() {
-            let table = db.open_table(&req.table_name).execute().await
-                .map_err(|e| Status::internal(format!("Open table failed: {e}")))?;
-            let npart = if req.index_num_partitions > 0 { req.index_num_partitions } else { 32 };
-            table.create_index(&[&req.index_column], lancedb::index::Index::IvfFlat(
-                lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
-            )).execute().await
-                .map_err(|e| Status::internal(format!("Create index failed: {e}")))?;
+        // Get healthy workers for auto-sharding
+        let statuses = self.pool.worker_statuses().await;
+        let healthy: Vec<_> = statuses.iter()
+            .filter(|(_, _, _, h, _, _, _)| *h)
+            .collect();
+
+        if healthy.is_empty() {
+            return Err(Status::unavailable("No healthy workers available"));
         }
 
-        // Register table in shard state + tell first worker to load it
-        let shard_name = format!("{}_shard_00", req.table_name);
-        let actual_uri = format!("{}{}.lance", parent, req.table_name);
-        let executors = self.shard_state.all_executors().await;
-        if let Some((executor_id, _host, _port)) = executors.first() {
-            // Register directly in shard state (bypasses readiness gate)
-            let mut mapping = std::collections::HashMap::new();
-            mapping.insert(shard_name.clone(), vec![executor_id.clone()]);
-            self.shard_state.register_table(&req.table_name, mapping).await;
+        // Determine shard count: min(healthy workers, data size threshold)
+        let n_shards = if num_rows < 1000 { 1 } else { healthy.len() };
 
-            // Register shard URI for future rebalance operations
-            self.shard_uris.write().await.insert(shard_name.clone(), actual_uri.clone());
+        // Split batch into N partitions
+        let partitions = split_batch(&batch, n_shards);
+        let mut mapping = std::collections::HashMap::new();
+        let mut shard_uris_new = Vec::new();
+        let mut total_created = 0u64;
+        let index_col = if req.index_column.is_empty() { String::new() } else { req.index_column.clone() };
 
-            // Tell worker to load the new shard
-            if let Ok(mut client) = self.pool.get_healthy_client(executor_id).await {
-                let load_req = pb::LoadShardRequest {
+        // Send CreateLocalShard to each worker in parallel
+        let mut handles = Vec::new();
+        for (i, partition) in partitions.into_iter().enumerate() {
+            let shard_name = format!("{}_shard_{:02}", req.table_name, i);
+            let worker_id = healthy[i % healthy.len()].0.clone();
+
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
+                let ipc_data = lance_distributed_common::ipc::record_batch_to_ipc(&partition)
+                    .map_err(|e| Status::internal(format!("IPC encode: {e}")))?;
+                let create_req = pb::CreateLocalShardRequest {
                     shard_name: shard_name.clone(),
-                    uri: actual_uri.clone(),
+                    parent_uri: base.clone(),
+                    arrow_ipc_data: ipc_data,
+                    index_column: index_col.clone(),
+                    index_num_partitions: req.index_num_partitions,
                     storage_options: self.storage_options.clone(),
                 };
-                let _ = client.load_shard(Request::new(load_req)).await;
+                let sn = shard_name.clone();
+                let wid = worker_id.clone();
+                handles.push(tokio::spawn(async move {
+                    let result = client.create_local_shard(Request::new(create_req)).await;
+                    (sn, wid, result)
+                }));
+            }
+
+            mapping.insert(shard_name.clone(), vec![worker_id.clone()]);
+        }
+
+        // Gather results
+        for handle in handles {
+            match handle.await {
+                Ok((shard_name, _wid, Ok(resp))) => {
+                    let r = resp.into_inner();
+                    if r.error.is_empty() {
+                        total_created += r.num_rows;
+                        shard_uris_new.push((shard_name, r.uri));
+                    } else {
+                        return Err(Status::internal(format!("CreateLocalShard failed: {}", r.error)));
+                    }
+                }
+                Ok((_, _, Err(e))) => return Err(Status::internal(format!("CreateLocalShard RPC: {e}"))),
+                Err(e) => return Err(Status::internal(format!("Spawn error: {e}"))),
             }
         }
 
-        info!("Created table '{}' at {} ({} rows, shard={})", req.table_name, uri, num_rows, shard_name);
+        // Register all shards in shard state
+        self.shard_state.register_table(&req.table_name, mapping).await;
+
+        // Register shard URIs for rebalance
+        let mut uris = self.shard_uris.write().await;
+        for (shard_name, uri) in &shard_uris_new {
+            uris.insert(shard_name.clone(), uri.clone());
+        }
+
+        info!("Created table '{}' ({} rows across {} shards on {} workers)",
+            req.table_name, total_created, n_shards, healthy.len());
 
         Ok(Response::new(pb::CreateTableResponse {
             table_name: req.table_name.clone(),
@@ -869,6 +896,27 @@ impl LanceSchedulerService for CoordinatorService {
 }
 
 const MAX_K: u32 = 100_000;
+
+/// Split a RecordBatch into N roughly-equal partitions for auto-sharding.
+fn split_batch(batch: &arrow::array::RecordBatch, n: usize) -> Vec<arrow::array::RecordBatch> {
+    if n <= 1 {
+        return vec![batch.clone()];
+    }
+    let total = batch.num_rows();
+    let chunk_size = (total + n - 1) / n;
+    (0..n)
+        .map(|i| {
+            let start = i * chunk_size;
+            let len = chunk_size.min(total.saturating_sub(start));
+            if len == 0 {
+                batch.slice(0, 0) // empty batch with same schema
+            } else {
+                batch.slice(start, len)
+            }
+        })
+        .filter(|b| b.num_rows() > 0)
+        .collect()
+}
 
 fn validate_k(k: u32, oversample_factor: u32) -> std::result::Result<u32, Status> {
     if k == 0 {
