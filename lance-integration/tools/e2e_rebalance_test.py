@@ -170,9 +170,21 @@ def t_search_after_scale_up():
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
     time.sleep(2)
     r = client.search("rebal_table", query_vector=np.zeros(DIM).tolist(), k=10)
-    assert r.num_rows > 0, "Search should return results after rebalance"
+    assert r.num_rows == 10, f"Expected 10 results, got {r.num_rows}"
+    # Verify we get rows from different shards (different ID ranges)
+    ids = sorted(r.column("id").to_pylist())
+    print(f"(ids={ids[:3]}..{ids[-1]})", end=" ")
     client.close()
 test("4. Search works after scale-up rebalance", t_search_after_scale_up)
+
+def t_count_after_rebalance():
+    """Verify total row count unchanged after rebalance."""
+    client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
+    count = client.count_rows("rebal_table")
+    expected = N_SHARDS * N_PER_SHARD
+    assert count == expected, f"Expected {expected} rows, got {count}"
+    client.close()
+test("4b. Row count unchanged after rebalance", t_count_after_rebalance)
 
 # ==========================================
 # Test 3: Kill worker + rebalance (scale down)

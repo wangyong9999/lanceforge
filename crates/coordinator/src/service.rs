@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::info;
+use log::{info, warn};
 use tonic::{Request, Response, Status};
 
 use lance_distributed_common::config::ClusterConfig;
@@ -35,6 +35,8 @@ pub struct CoordinatorService {
     storage_options: std::collections::HashMap<String, String>,
     /// Round-robin counter for write distribution.
     write_counter: std::sync::atomic::AtomicUsize,
+    /// Shard name → URI registry for LoadShard RPCs during rebalance.
+    shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 impl CoordinatorService {
@@ -94,9 +96,17 @@ impl CoordinatorService {
             endpoints.insert(e.id.clone(), (e.host.clone(), e.port));
         }
 
+        // Build shard URI registry from config
+        let mut shard_uris = std::collections::HashMap::new();
+        for table in &config.tables {
+            for shard in &table.shards {
+                shard_uris.insert(shard.name.clone(), shard.uri.clone());
+            }
+        }
+
         let pool = Arc::new(ConnectionPool::new(endpoints, query_timeout));
 
-        info!("CoordinatorService: {} executors", config.executors.len());
+        info!("CoordinatorService: {} executors, {} shard URIs", config.executors.len(), shard_uris.len());
 
         // Start connection pool with ShardState integration
         pool.start_background(Some(shard_state.clone()));
@@ -121,6 +131,7 @@ impl CoordinatorService {
             query_semaphore,
             storage_options: config.storage_options.clone(),
             write_counter: std::sync::atomic::AtomicUsize::new(0),
+            shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
         }
     }
 }
@@ -482,6 +493,7 @@ impl LanceSchedulerService for CoordinatorService {
 
         // Register table in shard state + tell first worker to load it
         let shard_name = format!("{}_shard_00", req.table_name);
+        let actual_uri = format!("{}{}.lance", parent, req.table_name);
         let executors = self.shard_state.all_executors().await;
         if let Some((executor_id, _host, _port)) = executors.first() {
             // Register directly in shard state (bypasses readiness gate)
@@ -489,9 +501,10 @@ impl LanceSchedulerService for CoordinatorService {
             mapping.insert(shard_name.clone(), vec![executor_id.clone()]);
             self.shard_state.register_table(&req.table_name, mapping).await;
 
+            // Register shard URI for future rebalance operations
+            self.shard_uris.write().await.insert(shard_name.clone(), actual_uri.clone());
+
             // Tell worker to load the new shard
-            // lancedb create_table stores at parent_dir/table_name.lance
-            let actual_uri = format!("{}{}.lance", parent, req.table_name);
             if let Ok(mut client) = self.pool.get_healthy_client(executor_id).await {
                 let load_req = pb::LoadShardRequest {
                     shard_name: shard_name.clone(),
@@ -619,16 +632,25 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CountRowsRequest>,
     ) -> Result<Response<pb::CountRowsResponse>, Status> {
         let req = request.into_inner();
-        let executors = self.shard_state.executors_for_table(&req.table_name).await;
-        if executors.is_empty() {
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
-        // Fan out to all workers and sum counts
+        // Count per-shard via primary executor. Query by shard name (not table name)
+        // to avoid double-counting when a worker hosts multiple shards or replicas.
         let mut total = 0u64;
-        for worker_id in &executors {
-            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+        for (shard_name, primary, secondary) in &routing {
+            // Try primary, fall back to secondary
+            let worker = if self.pool.get_healthy_client(primary).await.is_ok() {
+                primary
+            } else if let Some(sec) = secondary {
+                sec
+            } else {
+                continue;
+            };
+            if let Ok(mut client) = self.pool.get_healthy_client(worker).await {
                 if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
-                    table_name: req.table_name.clone(),
+                    table_name: shard_name.clone(), // query by shard name for exact count
                 })).await {
                     total += resp.into_inner().num_rows;
                 }
@@ -667,6 +689,8 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let mut total_moved = 0u32;
+        let mut errors = Vec::new();
+        let shard_uris = self.shard_uris.read().await;
 
         for table_name in &all_tables {
             let current_routing = self.shard_state.get_shard_routing(table_name).await;
@@ -689,17 +713,79 @@ impl LanceSchedulerService for CoordinatorService {
 
             // Compute diff (minimal movement)
             let (to_load, to_unload) = compute_diff(&current_assignment, &new_assignment);
+
+            // Phase 1: Send LoadShard RPCs to workers receiving new shards
+            for (worker_id, shards_to_load) in &to_load {
+                if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                    for shard_name in shards_to_load {
+                        if let Some(uri) = shard_uris.get(shard_name) {
+                            let load_req = pb::LoadShardRequest {
+                                shard_name: shard_name.clone(),
+                                uri: uri.clone(),
+                                storage_options: self.storage_options.clone(),
+                            };
+                            match tokio::time::timeout(
+                                Duration::from_secs(30),
+                                client.load_shard(Request::new(load_req)),
+                            ).await {
+                                Ok(Ok(_)) => {
+                                    info!("Rebalance: loaded {} on {}", shard_name, worker_id);
+                                }
+                                Ok(Err(e)) => {
+                                    errors.push(format!("LoadShard {}->{}: {}", shard_name, worker_id, e));
+                                }
+                                Err(_) => {
+                                    errors.push(format!("LoadShard {}->{}: timeout", shard_name, worker_id));
+                                }
+                            }
+                        } else {
+                            errors.push(format!("No URI for shard {}", shard_name));
+                        }
+                    }
+                }
+            }
+
+            // Phase 2: Send UnloadShard RPCs to workers losing shards
+            for (worker_id, shards_to_unload) in &to_unload {
+                if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+                    for shard_name in shards_to_unload {
+                        let unload_req = pb::UnloadShardRequest {
+                            shard_name: shard_name.clone(),
+                        };
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            client.unload_shard(Request::new(unload_req)),
+                        ).await {
+                            Ok(Ok(_)) => {
+                                info!("Rebalance: unloaded {} from {}", shard_name, worker_id);
+                            }
+                            Ok(Err(e)) => {
+                                // Non-fatal: worker may already have lost the shard
+                                warn!("Rebalance: unload {} from {} failed: {}", shard_name, worker_id, e);
+                            }
+                            Err(_) => {
+                                warn!("Rebalance: unload {} from {} timed out", shard_name, worker_id);
+                            }
+                        }
+                    }
+                }
+            }
+
             let moved: usize = to_load.values().map(|v| v.len()).sum();
             total_moved += moved as u32;
 
-            // Update shard_state
+            // Phase 3: Update shard_state metadata (after RPCs succeed)
             self.shard_state.register_table(table_name, new_assignment).await;
         }
 
-        info!("Rebalance: {} shards reassigned across {} executors", total_moved, executor_ids.len());
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        if !error.is_empty() {
+            warn!("Rebalance completed with errors: {}", error);
+        }
+        info!("Rebalance: {} shards moved across {} executors", total_moved, executor_ids.len());
         Ok(Response::new(pb::RebalanceResponse {
             shards_moved: total_moved,
-            error: String::new(),
+            error,
         }))
     }
 

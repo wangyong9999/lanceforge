@@ -366,6 +366,31 @@ class LanceForgeClient:
             raise RuntimeError(f"RegisterWorker failed: {resp.error}")
         return {"assigned_shards": resp.assigned_shards}
 
+    def count_rows(self, table):
+        """Count rows across all shards of a table.
+
+        Returns:
+            int: Total row count
+        """
+        resp = self._stub.CountRows(pb.CountRowsRequest(table_name=table),
+                                     metadata=self._metadata(), timeout=30)
+        if resp.error:
+            raise RuntimeError(f"CountRows failed: {resp.error}")
+        return resp.count
+
+    def get_schema(self, table):
+        """Get schema columns for a table.
+
+        Returns:
+            list of column info dicts
+        """
+        resp = self._stub.GetSchema(pb.GetSchemaRequest(table_name=table),
+                                     metadata=self._metadata(), timeout=10)
+        if resp.error:
+            raise RuntimeError(f"GetSchema failed: {resp.error}")
+        return [{"name": c.name, "type": c.data_type, "nullable": c.nullable}
+                for c in resp.columns]
+
     # ── Internal ──
 
     def _decode_response(self, resp):
