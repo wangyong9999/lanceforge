@@ -100,6 +100,16 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.CountRowsRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.CountRowsResponse.FromString,
                 _registered_method=True)
+        self.Rebalance = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/Rebalance',
+                request_serializer=lance__service__pb2.RebalanceRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.RebalanceResponse.FromString,
+                _registered_method=True)
+        self.RegisterWorker = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/RegisterWorker',
+                request_serializer=lance__service__pb2.RegisterWorkerRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.RegisterWorkerResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -187,6 +197,18 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Rebalance(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RegisterWorker(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -254,6 +276,16 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.CountRows,
                     request_deserializer=lance__service__pb2.CountRowsRequest.FromString,
                     response_serializer=lance__service__pb2.CountRowsResponse.SerializeToString,
+            ),
+            'Rebalance': grpc.unary_unary_rpc_method_handler(
+                    servicer.Rebalance,
+                    request_deserializer=lance__service__pb2.RebalanceRequest.FromString,
+                    response_serializer=lance__service__pb2.RebalanceResponse.SerializeToString,
+            ),
+            'RegisterWorker': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterWorker,
+                    request_deserializer=lance__service__pb2.RegisterWorkerRequest.FromString,
+                    response_serializer=lance__service__pb2.RegisterWorkerResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -608,6 +640,60 @@ class LanceSchedulerService(object):
             '/lance.distributed.LanceSchedulerService/CountRows',
             lance__service__pb2.CountRowsRequest.SerializeToString,
             lance__service__pb2.CountRowsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Rebalance(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/Rebalance',
+            lance__service__pb2.RebalanceRequest.SerializeToString,
+            lance__service__pb2.RebalanceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterWorker(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/RegisterWorker',
+            lance__service__pb2.RegisterWorkerRequest.SerializeToString,
+            lance__service__pb2.RegisterWorkerResponse.FromString,
             options,
             channel_credentials,
             insecure,

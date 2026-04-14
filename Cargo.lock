@@ -4164,6 +4164,7 @@ dependencies = [
  "lance-distributed-proto",
  "log",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
 ]

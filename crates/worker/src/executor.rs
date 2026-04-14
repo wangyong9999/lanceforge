@@ -17,7 +17,7 @@ use std::time::Duration;
 use arrow::array::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use futures::TryStreamExt;
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use lance_distributed_proto::descriptor::{
     FtsQueryParams, LanceQueryDescriptor, LanceQueryType, VectorQueryParams,
@@ -171,6 +171,24 @@ impl LanceTableRegistry {
         self.tables.write().await.push((shard_name.to_string(), table));
         info!("Dynamically loaded shard: {} ({} rows)", shard_name, row_count);
         Ok(row_count)
+    }
+
+    /// Compact/optimize all loaded tables (merge small fragments for read performance).
+    pub async fn compact_all(&self) -> Result<u64> {
+        let tables = self.tables.read().await;
+        let mut total_compacted = 0u64;
+        for (name, table) in tables.iter() {
+            match table.optimize(lancedb::table::OptimizeAction::All).await {
+                Ok(stats) => {
+                    info!("Compacted {}: {:?}", name, stats);
+                    total_compacted += 1;
+                }
+                Err(e) => {
+                    warn!("Compact failed for {}: {}", name, e);
+                }
+            }
+        }
+        Ok(total_compacted)
     }
 
     /// Unload a shard at runtime (for DropTable).

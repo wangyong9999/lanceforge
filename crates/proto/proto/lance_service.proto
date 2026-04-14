@@ -22,6 +22,25 @@ service LanceSchedulerService {
   rpc CreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
   rpc GetSchema (GetSchemaRequest) returns (GetSchemaResponse) {}
   rpc CountRows (CountRowsRequest) returns (CountRowsResponse) {}
+  rpc Rebalance (RebalanceRequest) returns (RebalanceResponse) {}
+  rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
+}
+
+message RebalanceRequest {}
+message RebalanceResponse {
+  uint32 shards_moved = 1;
+  string error = 2;
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string host = 2;
+  uint32 port = 3;
+}
+
+message RegisterWorkerResponse {
+  uint32 assigned_shards = 1;
+  string error = 2;
 }
 
 // Service running on each Executor for receiving queries from Scheduler.
