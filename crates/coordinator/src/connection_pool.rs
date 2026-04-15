@@ -155,7 +155,9 @@ impl ConnectionPool {
             };
             match endpoint.connect().await {
                 Ok(channel) => {
-                    let mut client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
+                    let mut client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel)
+                        .max_decoding_message_size(256 * 1024 * 1024)
+                        .max_encoding_message_size(256 * 1024 * 1024);
                     // Immediate health check to populate shard/row data
                     let (loaded_shards, total_rows) = match tokio::time::timeout(
                         Duration::from_secs(self.ping_timeout_secs),
@@ -216,7 +218,9 @@ impl ConnectionPool {
                     };
                     if let Ok(channel) = endpoint.connect().await {
                         results.push((wid.clone(), HealthCheckResult::Reconnected {
-                            client: pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel),
+                            client: pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel)
+                        .max_decoding_message_size(256 * 1024 * 1024)
+                        .max_encoding_message_size(256 * 1024 * 1024),
                             host: host.clone(),
                             port: *port,
                         }));

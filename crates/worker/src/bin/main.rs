@@ -101,7 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     server
-        .add_service(LanceExecutorServiceServer::new(service))
+        .add_service(
+            LanceExecutorServiceServer::new(service)
+                .max_decoding_message_size(worker_cap.saturating_add(16 * 1024 * 1024))
+                .max_encoding_message_size(worker_cap.saturating_add(16 * 1024 * 1024))
+        )
         .serve_with_shutdown(addr, async {
             signal::ctrl_c().await.ok();
             info!("Shutdown signal received — draining in-flight requests...");

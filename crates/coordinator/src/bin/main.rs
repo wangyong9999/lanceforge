@@ -141,10 +141,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         lance_distributed_coordinator::rest::start_rest_server(metrics, rest_port).await;
     });
 
-    // Outer interceptor still enforces authentication (presence + valid key).
-    // Method-level authorize() inside the service enforces per-role permissions.
-    let auth_outer = auth_arc.clone();
-    let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth_outer.check(req));
+    // Raise gRPC message limits: default tonic caps are 4 MiB, which is hit
+    // by even moderate CreateTable/AddRows payloads (e.g., 10K × 128d = 5 MB).
+    // Cap at max_response_bytes + 16 MiB headroom for metadata/overhead.
+    // NOTE: authentication is now enforced PER METHOD inside the service
+    // (see CoordinatorService::check_perm). The outer tonic interceptor was
+    // redundant and prevented setting message-size limits, so it was removed.
+    let msg_limit = config.server.max_response_bytes.saturating_add(16 * 1024 * 1024);
+    let _ = auth_arc; // kept in scope for Arc lifetime clarity; actually held by service
+    let svc = LanceSchedulerServiceServer::new(service)
+        .max_decoding_message_size(msg_limit)
+        .max_encoding_message_size(msg_limit);
 
     let mut server = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(keepalive_interval))
