@@ -119,14 +119,47 @@
 
 建议公式：`replica_factor = max(1, ceil(rows / 500_000))`。
 
-### 瓶颈 3：默认 nprobes 在大规模下 recall 偏低（调参问题）
+### 瓶颈 3：nprobes-recall 实测曲线（已实测纠正）
 
 1M × 128d × nprobes=10 × 128 分区 → recall@10 只有 0.26-0.33。
 
-经验公式：`nprobes ≈ sqrt(num_partitions × scale / 1M)`
-- 1M 数据、128 分区 → nprobes ≈ 30 可获得 0.8+ recall
+**实测 nprobes-recall 曲线**（1M × 128d × 128 partitions × shards=1 × conc=10）：
 
-本 benchmark 故意保留 nprobes=10 测系统开销，非生产推荐配置。
+| nprobes | nprobes/parts | recall@10 | QPS | P99 ms |
+|--:|--:|--:|--:|--:|
+| 5  | 4%   | 0.155 | 1824 | 6.2 |
+| 10 | 8%   | 0.245 | 1688 | 7.9 |
+| 20 | 16%  | 0.410 | 1839 | 6.0 |
+| 40 | 31%  | 0.670 | 1770 | 6.3 |
+| **80** | **62%** | **0.910** | 1889 | 6.2 |
+
+**关键发现**：
+- 0.9 recall 需要 nprobes ≈ **62.5%** of partitions
+- **QPS 几乎不受 nprobes 影响**（IVF_FLAT 内部优化），P99 也基本平稳
+- **生产推荐：`nprobes ≈ 0.5 × num_partitions`**
+
+之前文档写过 `sqrt(num_partitions × scale/1M)` ≈ 30 的公式，**实测发现偏低**，本 sweep 已纠正。
+
+### 瓶颈 4：读写混合 — 写入对读 QPS 影响巨大（**待优化**）
+
+100K 数据、10 reader + 1 writer（10 QPS 写入）：
+
+| 场景 | 读 QPS | 读 P50 | 读 P99 | Δ |
+|---|---:|---:|---:|---:|
+| read-only | 2528 | 3.6 ms | 12.0 ms | baseline |
+| read + 10 QPS 写入 | 218 | 42.6 ms | 105.3 ms | **-91%** |
+
+**根因**（怀疑）：
+1. Lance manifest CAS 冲突：写入提交新版本时 reader 需要重新加载 manifest
+2. Worker 端查询缓存（cache.rs）整张表失效 → 每次查询都重做完整 IVF 搜索
+3. `read_consistency_secs=5` 触发频繁的 dataset 刷新
+
+**改进方向**：
+- 调高 `cache.read_consistency_secs`（容忍读到稍旧数据）
+- Lance 侧版本化 cache key（已部分实现，但仍可能整批失效）
+- 物理读写分离：用读副本服务读流量
+
+**当前对策**（用户侧）：写入低频时（< 1 QPS）影响可忽略；高写入场景请用更多 worker 分摊。
 
 ---
 

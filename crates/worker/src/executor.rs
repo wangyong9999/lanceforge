@@ -131,7 +131,13 @@ impl LanceTableRegistry {
             matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
         };
 
-        // Get table version for cache key (I/O done without holding the lock).
+        // Get table version for cache key. We rely on lancedb's
+        // read_consistency_interval to amortize manifest reads — version()
+        // is cached internally there. But under heavy write contention this
+        // call can still serialize. In a hot read+write workload the version
+        // changes rapidly anyway and the cache is constantly invalidated; in
+        // a read-only workload version is stable. Either way, calling it
+        // here is correct.
         let mut dataset_version = 0u64;
         for (_, t) in &target_tables {
             dataset_version = dataset_version.max(t.version().await.unwrap_or(0));

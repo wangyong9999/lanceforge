@@ -49,7 +49,7 @@
 
 ---
 
-## 三、benchmark 暴露的真 bug 全部修复（5 个）
+## 三、benchmark 暴露的真 bug 全部修复（6 个）
 
 | # | 触发 | 根因 | 修复 | 影响 |
 |---|---|---|---|---|
@@ -58,9 +58,14 @@
 | **3** | 1M 查询永远跑不完 | CreateTable 不自动建索引 → 全表扫每次查 1M × 128d 点积 | bench 在 ingest 后显式 `CreateIndex(IVF_FLAT)`；文档 OPERATIONS.md 强调生产必建索引 | 1M+ 规模才有意义跑 benchmark |
 | **4** | conc=50 QPS 崩溃（QPS 跌 10 倍, P99 涨 100 倍）| **客户端**单 gRPC channel 多线程 → HTTP/2 stream 序列化 | bench 改每线程一个 stub；QUICKSTART/LIMITATIONS/TROUBLESHOOTING 三处文档明确警告 | shards=4 conc=50 从 123 QPS → 1295 QPS（+952%） |
 | **5** | RAG nDCG@10 异常低 (0.0021 vs Recall=0.93) | `_distance` 列 sign 约定因 metric 类型而异，直接传 BEIR 评估器导致排序反转 | RAG 脚本改用 retrieval rank 作为 score；适用所有 metric 类型 | nDCG@10 0.0021 → 0.6451 = baseline 完全一致 |
+| **6** | 读写混合下读 QPS 暴跌 (-91% / -98%) | 每次写改变 dataset version → cache 全失效 → 全部读重做 IVF + 读 manifest | 当前对策（文档化）：调高 `cache.read_consistency_secs`；读写分离；Phase 18 cache 优化 | 已识别 + 实测 + 文档警告（LIMITATIONS §11）|
 
 附带性能优化（非 bug，但好实践）：
 - Worker `execute_query` 改为锁内快照、释放锁后 I/O（避免 RwLock 跨 await）
+
+附带新增 benchmark：
+- `bench_phase17_mixed.py` 读写混合压测（30s 持续负载）
+- `--nprobes-sweep` 模式量化 nprobes-recall 曲线
 
 ---
 
@@ -129,17 +134,26 @@ xxxxxxx  Phase 17 Week 1: benchmark + docs + first real-world bug found
 
 ## 八、最终状态
 
-- ✅ Benchmark：smoke + mid + large 全部跑通，数据归档
-- ✅ 文档：8 份核心文档，覆盖用户接入到 SRE 运维全链路
+- ✅ Benchmark：smoke + mid + large + nprobes-sweep + mixed read/write 全跑通
+- ✅ 文档：9 份核心文档（QUICKSTART/ARCHITECTURE/CONFIG/DEPLOYMENT/OPERATIONS/TROUBLESHOOTING/BENCHMARK/LIMITATIONS/PHASE17_SUMMARY）+ RELEASE_NOTES.md
 - ✅ RAG E2E：质量与 baseline 完全一致
-- ✅ 5 个真实 bug 全部修复（gRPC 限制 × 2、索引缺失、客户端串行、scoring sign）
+- ✅ 6 个真实问题已识别（5 个修复 + 1 个文档警告 + 计入 Phase 18）
 - ✅ 单元测试 272 全绿
-- ✅ E2E 回归 6/6 全绿（Phase 11-16）
-- ✅ Smoke benchmark 通过
+- ✅ E2E 回归 6/6 全绿（Phase 11-16）+ smoke benchmark 通过（151s）
+- ✅ CI workflow 已添加 Phase 11-16 E2E + smoke bench
+- ✅ Release notes 1.0-rc 完成
 
 **状态**：可宣布 LanceForge 1.0-rc，等真实用户接入。
 
-## 九、明确不做的（避免提前优化陷阱）
+## 九、Phase 18 候选（已有真实数据驱动）
+
+按 benchmark 实测发现排序：
+
+1. **读写混合 cache 失效优化** — `cache.read_consistency_secs` 调高 + 验证、或 incremental cache invalidation。Phase 17 实测 -98% QPS 是真问题。
+2. **nprobes 文档校准** — 已校准 (nprobes=80 才到 0.91)，新用户文档需要默认配置示例
+3. **大规模 1M+ 不同 dim 完整矩阵** — 跑 768d / 1536d 看 IPC 序列化拐点
+
+## 十、明确不做的（避免提前优化陷阱）
 
 - Add 哈希路由（Upsert 和 Add 一致性问题，等真用户报）
 - OpenTelemetry tracing（结构化日志 + Prometheus + 慢查询日志已 cover 80%）

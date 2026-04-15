@@ -226,6 +226,50 @@ jobs:
           cd lance-integration/tools
           PYTHONPATH=.:../sdk/python python e2e_rebalance_test.py
 
+      # Phase 11-16 E2E suites (added Phase 17). Each test self-manages its
+      # own cluster; pkill before each ensures port reuse cleanly.
+      - name: Phase 11 E2E — auto-shard + write no-dup
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase11_test.py
+
+      - name: Phase 12 E2E — fsync + Saga rollback + RBAC
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase12_test.py
+
+      - name: Phase 13 E2E — pagination + response cap + audit + auto-compaction
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase13_test.py
+
+      - name: Phase 14 E2E — MoveShard + slow-query + per-table metrics
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase14_test.py
+
+      - name: Phase 15 E2E — Delete/Upsert shard-level + DropTable purge
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase15_test.py
+
+      - name: Phase 16 E2E — Upsert hash-partition + orphan GC
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_phase16_test.py
+
+      - name: Phase 17 smoke benchmark (regression guard, ~2 min)
+        run: |
+          cd lance-integration/bench
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=../tools:../sdk/python python -u bench_phase17_matrix.py --smoke
+
       - name: Benchmark regression (quick)
         run: |
           cd lance-integration/bench

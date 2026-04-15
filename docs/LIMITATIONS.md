@@ -82,7 +82,24 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 每一条都有明确理由不在当前版本实现（详见 Phase 15/16 的架构反思日志）。需要时再加。
 
-## 11. 性能拐点（参考 BENCHMARK.md）
+## 11. 读写混合下的读 QPS 严重降级（Phase 17 新发现）
+
+**实测**：100K 行表，10 readers + 1 writer：
+
+| 场景 | 读 QPS | 读 P99 |
+|---|---:|---:|
+| read-only | 2528 | 12 ms |
+| + 10 QPS 写 | **218** | **105 ms** |
+| + 50 QPS 写 | **56** | **272 ms** |
+
+**怀疑根因**：每次写都改变 dataset version → cache 全失效；下次读重做 IVF + 重读 manifest。
+
+**当前对策**：
+- 写入低频（< 1 QPS）时影响可忽略
+- 高写入场景：调高 `cache.read_consistency_secs`（容忍稍旧读），或物理读写分离
+- 等 Phase 18 做更深的 cache 失效优化
+
+## 12. 性能拐点（参考 BENCHMARK.md）
 
 - 小数据量（< 50K 行）下**单 shard 比多 shard 快**，因为 scatter-gather 开销 > 并行收益
 - 大 k（k > 1000）下 IPC 序列化开销开始占比上升

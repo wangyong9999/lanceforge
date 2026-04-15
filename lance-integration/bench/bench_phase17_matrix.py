@@ -66,6 +66,17 @@ LARGE_MATRIX = {
     'nprobes':     [10],
 }
 
+# nprobes recall sweep: validate the empirical formula
+# recall ≈ f(nprobes / num_partitions) at fixed scale.
+NPROBES_MATRIX = {
+    'scale':       [1_000_000],
+    'dim':         [128],
+    'shards':      [1],
+    'concurrency': [10],
+    'k':           [10],
+    'nprobes':     [5, 10, 20, 40, 80],
+}
+
 SMOKE_MATRIX = {
     'scale':       [10_000],
     'dim':         [128],
@@ -435,12 +446,14 @@ def main():
     ap.add_argument('--smoke', action='store_true', help='Small matrix (~5 min)')
     ap.add_argument('--mid', action='store_true', help='Mid matrix: 100K × shards 1/2/4 × conc 1/10/50')
     ap.add_argument('--large', action='store_true', help='Large matrix: 1M × 128d × shards 1/2/4 × conc 10/50')
+    ap.add_argument('--nprobes-sweep', action='store_true', help='nprobes recall sweep at 1M')
     ap.add_argument('--scale', type=int, help='Override: single scale only')
     args = ap.parse_args()
 
     if args.smoke: matrix = SMOKE_MATRIX
     elif args.mid: matrix = MID_MATRIX
     elif args.large: matrix = LARGE_MATRIX
+    elif args.nprobes_sweep: matrix = NPROBES_MATRIX
     else: matrix = FULL_MATRIX
     if args.scale:
         matrix['scale'] = [args.scale]
