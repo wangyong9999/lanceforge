@@ -327,10 +327,9 @@ impl LanceTableRegistry {
         req: &lance_distributed_proto::generated::lance_distributed::LocalWriteRequest,
     ) -> Result<(u64, u64)> {
         let tables = self.tables.read().await;
-        // For Add (write_type=0): use target_shard for exact match to prevent duplication.
-        // For Delete/Upsert: use prefix match (fan-out to all local shards is correct).
-        let targets = if req.write_type == 0 && !req.target_shard.is_empty() {
-            // Exact match on target shard
+        // When target_shard is set (coordinator routes per-shard for Add/Delete/Upsert),
+        // match exactly one shard. Otherwise fall back to prefix match for legacy callers.
+        let targets = if !req.target_shard.is_empty() {
             let matches: Vec<_> = tables.iter()
                 .filter(|(name, _)| name == &req.target_shard)
                 .map(|(name, t)| (name.as_str(), t))

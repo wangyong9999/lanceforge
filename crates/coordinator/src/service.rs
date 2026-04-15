@@ -457,27 +457,39 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("filter is required for delete"));
         }
 
-        // Delete fans out to ALL workers (don't know which shard has matching rows)
-        let executors = self.shard_state.executors_for_table(&req.table_name).await;
-        if executors.is_empty() {
-            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        // Fan-out ONCE PER SHARD (not per worker): the data is a single OBS-backed
+        // Lance table per shard URI; a Lance delete on the same URI from multiple
+        // workers is redundant work. Route each shard's delete to a single healthy
+        // owner (primary, or secondary if primary is down).
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
         let mut errors = Vec::new();
 
-        for worker_id in &executors {
-            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+        for (shard_name, primary, secondary) in &routing {
+            let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { Some(s.clone()) } else { None }
+            } else { None };
+
+            let worker_id = match chosen {
+                Some(w) => w,
+                None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
+            };
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
                 let local_req = pb::LocalWriteRequest {
                     write_type: 1, // Delete
                     table_name: req.table_name.clone(),
                     arrow_ipc_data: vec![],
                     filter: req.filter.clone(),
                     on_columns: vec![],
-                    target_shard: String::new(), // fan-out to all local shards
+                    target_shard: shard_name.clone(),
                 };
-
                 match tokio::time::timeout(
                     self.query_timeout,
                     client.execute_local_write(Request::new(local_req)),
@@ -488,11 +500,11 @@ impl LanceSchedulerService for CoordinatorService {
                             total_affected += r.affected_rows;
                             max_version = max_version.max(r.new_version);
                         } else {
-                            errors.push(format!("{}: {}", worker_id, r.error));
+                            errors.push(format!("{}: {}", shard_name, r.error));
                         }
                     }
-                    Ok(Err(e)) => errors.push(format!("{}: {}", worker_id, e)),
-                    Err(_) => errors.push(format!("{}: timeout", worker_id)),
+                    Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
+                    Err(_) => errors.push(format!("{}: timeout", shard_name)),
                 }
             }
         }
@@ -521,27 +533,36 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("on_columns required for upsert"));
         }
 
-        // Upsert fans out to ALL workers (each applies merge_insert on local shard)
-        let executors = self.shard_state.executors_for_table(&req.table_name).await;
-        if executors.is_empty() {
-            return Err(Status::not_found(format!("No executors for table: {}", req.table_name)));
+        // Per-shard routing (same rationale as delete_rows above).
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
         let mut errors = Vec::new();
 
-        for worker_id in &executors {
-            if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
+        for (shard_name, primary, secondary) in &routing {
+            let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { Some(s.clone()) } else { None }
+            } else { None };
+
+            let worker_id = match chosen {
+                Some(w) => w,
+                None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
+            };
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
                 let local_req = pb::LocalWriteRequest {
                     write_type: 2, // Upsert
                     table_name: req.table_name.clone(),
                     arrow_ipc_data: req.arrow_ipc_data.clone(),
                     filter: String::new(),
                     on_columns: req.on_columns.clone(),
-                    target_shard: String::new(), // fan-out to all local shards
+                    target_shard: shard_name.clone(),
                 };
-
                 match tokio::time::timeout(
                     self.query_timeout,
                     client.execute_local_write(Request::new(local_req)),
@@ -552,11 +573,11 @@ impl LanceSchedulerService for CoordinatorService {
                             total_affected += r.affected_rows;
                             max_version = max_version.max(r.new_version);
                         } else {
-                            errors.push(format!("{}: {}", worker_id, r.error));
+                            errors.push(format!("{}: {}", shard_name, r.error));
                         }
                     }
-                    Ok(Err(e)) => errors.push(format!("{}: {}", worker_id, e)),
-                    Err(_) => errors.push(format!("{}: timeout", worker_id)),
+                    Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
+                    Err(_) => errors.push(format!("{}: timeout", shard_name)),
                 }
             }
         }
@@ -725,19 +746,42 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
-        // Tell workers to unload shards for this table
+        // Tell all workers (primary + secondary) to unload shards for this table
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
-        for (shard_name, primary, _secondary) in &routing {
-            if let Ok(mut client) = self.pool.get_healthy_client(primary).await {
-                let _ = client.unload_shard(Request::new(pb::UnloadShardRequest {
-                    shard_name: shard_name.clone(),
-                })).await;
+        for (shard_name, primary, secondary) in &routing {
+            for wid in std::iter::once(primary).chain(secondary.iter()) {
+                if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
+                    let _ = client.unload_shard(Request::new(pb::UnloadShardRequest {
+                        shard_name: shard_name.clone(),
+                    })).await;
+                }
             }
+        }
+
+        // Delete the backing Lance datasets on object storage to prevent
+        // cost leak (previously DropTable only removed metadata; .lance
+        // directories on S3/MinIO stayed forever).
+        let shard_uris: Vec<(String, String)> = {
+            let uris = self.shard_uris.read().await;
+            routing.iter()
+                .filter_map(|(sn, _, _)| uris.get(sn).map(|u| (sn.clone(), u.clone())))
+                .collect()
+        };
+        for (shard_name, uri) in &shard_uris {
+            match delete_lance_dataset(uri, &self.storage_options).await {
+                Ok(()) => info!("Deleted shard storage: {} ({})", shard_name, uri),
+                Err(e) => warn!("Failed to delete shard storage {} ({}): {}", shard_name, uri, e),
+            }
+        }
+        // Drop from URI registry
+        {
+            let mut uris = self.shard_uris.write().await;
+            for (sn, _, _) in &routing { uris.remove(sn); }
         }
         // Remove from shard state (set empty mapping)
         let empty: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         self.shard_state.register_table(&req.table_name, empty).await;
-        info!("Dropped table '{}'", req.table_name);
+        info!("Dropped table '{}' (purged {} shard(s) from storage)", req.table_name, shard_uris.len());
         Ok(Response::new(pb::DropTableResponse { error: String::new() }))
     }
 
@@ -1113,6 +1157,35 @@ impl LanceSchedulerService for CoordinatorService {
 }
 
 const MAX_K: u32 = 100_000;
+
+/// Delete a Lance dataset (the .lance directory) from local fs or object store.
+/// Missing datasets are a no-op. Used by DropTable to prevent storage leak.
+async fn delete_lance_dataset(
+    uri: &str,
+    storage_options: &std::collections::HashMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let is_remote = uri.starts_with("s3://") || uri.starts_with("gs://") || uri.starts_with("az://");
+    if !is_remote {
+        let path = uri.strip_prefix("file://").unwrap_or(uri);
+        if tokio::fs::metadata(path).await.is_ok() {
+            tokio::fs::remove_dir_all(path).await?;
+        }
+        return Ok(());
+    }
+    let (parent, name) = lance_distributed_common::auto_shard::split_parent_uri(uri);
+    let db = lancedb::connect(&parent)
+        .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .execute()
+        .await?;
+    if let Err(e) = db.drop_table(&name, &[]).await {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("not found") || msg.contains("does not exist") || msg.contains("no such") {
+            return Ok(());
+        }
+        return Err(Box::new(e));
+    }
+    Ok(())
+}
 
 /// Split a RecordBatch into N roughly-equal partitions for auto-sharding.
 fn split_batch(batch: &arrow::array::RecordBatch, n: usize) -> Vec<arrow::array::RecordBatch> {

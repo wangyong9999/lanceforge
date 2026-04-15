@@ -377,17 +377,28 @@ impl ShardState for StaticShardState {
     }
 
     async fn all_tables(&self) -> Vec<String> {
-        self.targets.read().await.keys().cloned().collect()
+        // Skip dropped tables: a table whose current mapping is empty has
+        // been dropped (see register_table with empty mapping from DropTable).
+        self.targets.read().await.iter()
+            .filter(|(_, ts)| !ts.current.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     async fn register_table(&self, table_name: &str, mapping: ShardMapping) {
         let mut targets = self.targets.write().await;
-        targets.insert(table_name.to_string(), TargetState {
-            current: mapping,
-            next: None,
-            version: 1,
-        });
-        info!("Registered new table '{}' in shard state", table_name);
+        if mapping.is_empty() {
+            // Treat empty mapping as drop.
+            targets.remove(table_name);
+            info!("Dropped table '{}' from shard state", table_name);
+        } else {
+            targets.insert(table_name.to_string(), TargetState {
+                current: mapping,
+                next: None,
+                version: 1,
+            });
+            info!("Registered new table '{}' in shard state", table_name);
+        }
     }
 }
 

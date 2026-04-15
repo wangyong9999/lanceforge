@@ -39,8 +39,13 @@ pub struct ClusterConfig {
     /// Default storage path for runtime-created tables (CreateTable without explicit URI).
     #[serde(default)]
     pub default_table_path: Option<String>,
-    /// Replication factor for shard assignment during rebalance.
-    #[serde(default = "ClusterConfig::default_replica_factor")]
+    /// Read-parallelism factor: how many workers are assigned to hold the same
+    /// shard (same OBS URI). This is NOT a data-replication knob — data
+    /// durability is provided by the object store (S3/GCS/Azure). The extra
+    /// worker(s) exist purely to fan-out read queries and provide failover
+    /// when the primary worker is unhealthy. YAML key kept as
+    /// `replica_factor` for backward compatibility.
+    #[serde(default = "ClusterConfig::default_replica_factor", alias = "read_parallelism")]
     pub replica_factor: usize,
     /// Worker-side periodic compaction.
     #[serde(default)]

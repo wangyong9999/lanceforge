@@ -18,11 +18,19 @@ use pb::{
 /// gRPC service running on each Worker (Executor) node.
 pub struct WorkerService {
     registry: Arc<LanceTableRegistry>,
+    /// Per-response payload cap (bytes). 0 = disabled. When exceeded, the
+    /// worker shrinks the returned batch to fit, preventing a hot-row-size
+    /// query from ballooning the coordinator's gather buffer.
+    max_response_bytes: usize,
 }
 
 impl WorkerService {
     pub fn new(registry: Arc<LanceTableRegistry>) -> Self {
-        Self { registry }
+        Self { registry, max_response_bytes: 128 * 1024 * 1024 }
+    }
+
+    pub fn with_max_response_bytes(registry: Arc<LanceTableRegistry>, max_bytes: usize) -> Self {
+        Self { registry, max_response_bytes: max_bytes }
     }
 }
 
@@ -38,9 +46,24 @@ impl LanceExecutorService for WorkerService {
         let descriptor = local_request_to_descriptor(&req);
 
         match self.registry.execute_query(&descriptor).await {
-            Ok(batch) => {
-                let ipc_data = record_batch_to_ipc(&batch)
+            Ok(mut batch) => {
+                let mut ipc_data = record_batch_to_ipc(&batch)
                     .map_err(|e| Status::internal(format!("IPC error: {e}")))?;
+                // Cap response size. If oversized, shrink rows by halving until under cap.
+                if self.max_response_bytes > 0 && ipc_data.len() > self.max_response_bytes {
+                    let mut rows = batch.num_rows();
+                    while rows > 1 {
+                        rows = (rows + 1) / 2;
+                        let trial = batch.slice(0, rows);
+                        if let Ok(buf) = record_batch_to_ipc(&trial) {
+                            if buf.len() <= self.max_response_bytes {
+                                batch = trial; ipc_data = buf; break;
+                            }
+                        }
+                    }
+                    warn!("Worker response capped to {} rows ({} bytes) by max_response_bytes={}",
+                        batch.num_rows(), ipc_data.len(), self.max_response_bytes);
+                }
                 Ok(Response::new(LocalSearchResponse {
                     arrow_ipc_data: ipc_data,
                     num_rows: batch.num_rows() as u32,

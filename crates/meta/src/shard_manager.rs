@@ -15,9 +15,18 @@ use log::info;
 pub type ShardAssignment = HashMap<String, Vec<String>>;
 
 /// Configuration for shard assignment policy.
+///
+/// NOTE ON SEMANTICS: LanceForge stores data on object storage (S3/GCS/Azure),
+/// which already provides durability. `replica_factor` here is NOT data
+/// replication — it controls **read fan-out**: how many workers are assigned
+/// to hold (open a handle on) the same Lance URI. The extra workers serve
+/// reads for QPS scaling and act as read-failover targets. Writes still go
+/// to a single primary per shard (coordinator's per-shard routing), because
+/// Lance's manifest-CAS already makes a single writer atomic.
 #[derive(Debug, Clone)]
 pub struct ShardPolicy {
-    /// Number of replicas per shard (1 = no replication, 2 = one primary + one backup).
+    /// Read-parallelism per shard: 1 = single owner, 2 = primary + read-replica.
+    /// Not data replication (OBS handles durability).
     pub replica_factor: usize,
     /// Maximum shards per worker (0 = unlimited).
     pub max_shards_per_worker: usize,

@@ -75,7 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let service = WorkerService::new(registry);
+    // Worker cap is a pathological-single-shard defense (not coord's per-response
+    // cap). Keep it generous: 4× coord's cap. Worker truncates only when a
+    // single shard's output alone would dwarf the intended global response.
+    let worker_cap = config.server.max_response_bytes.saturating_mul(4).max(64 * 1024 * 1024);
+    let service = WorkerService::with_max_response_bytes(registry, worker_cap);
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
     let mut server = tonic::transport::Server::builder()
