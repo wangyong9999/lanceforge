@@ -139,10 +139,13 @@ def run_distributed(doc_ids, doc_vecs, query_ids, query_vecs):
         t = ipc.open_stream(r.arrow_ipc_data).read_all() if r.arrow_ipc_data else None
         hits = {}
         if t is not None and t.num_rows > 0:
-            for idx, dist in zip(t.column("id").to_pylist(),
-                                  t.column("_distance").to_pylist() if "_distance" in t.schema.names else [0]*t.num_rows):
-                # Higher is better for dot product
-                hits[int_to_str[idx]] = float(dist)
+            # Use retrieval rank as score: higher = better. Lance returns
+            # results already sorted by the distance metric, so position is
+            # the cleanest cross-metric signal. (Raw `_distance` semantics
+            # differ per metric type and can confuse BEIR's evaluator.)
+            ids = t.column("id").to_pylist()
+            for rank, idx in enumerate(ids):
+                hits[int_to_str[idx]] = float(len(ids) - rank)  # K..1
         retrieved[qid] = hits
     wall = time.perf_counter() - t0
     print(f"[dist] {len(query_ids)} queries in {wall:.1f}s ({len(query_ids)/wall:.1f} QPS)")
@@ -154,34 +157,27 @@ def run_distributed(doc_ids, doc_vecs, query_ids, query_vecs):
 # ──────────────────────────────────────────────────────────────────────────
 
 def run_baseline(doc_ids, doc_vecs, query_ids, query_vecs):
-    import lance
-    import lancedb
-    path = str(Path(__file__).parent / 'baseline.lance')
-    if Path(path).exists():
-        import shutil; shutil.rmtree(path)
+    """Pure-numpy cosine similarity baseline (no lancedb dependency).
+    Acts as ground truth for the distributed path's ordering quality."""
     int_to_str = {i: d for i, d in enumerate(doc_ids)}
+    # Pre-normalize (embeddings are already normalized, but be explicit)
+    docs_n = doc_vecs / np.linalg.norm(doc_vecs, axis=1, keepdims=True).clip(min=1e-9)
+    queries_n = query_vecs / np.linalg.norm(query_vecs, axis=1, keepdims=True).clip(min=1e-9)
 
-    tbl = pa.table({
-        'id': pa.array(range(len(doc_ids)), type=pa.int64()),
-        'vector': pa.FixedSizeListArray.from_arrays(
-            pa.array(doc_vecs.flatten()), list_size=DIM),
-    })
-    lance.write_dataset(tbl, path, mode='overwrite')
-    ds = lance.dataset(path)
-    ds.create_index('vector', index_type='IVF_FLAT', num_partitions=32)
-
-    db = lancedb.connect(str(Path(__file__).parent))
-    table = db.open_table('baseline')
-
-    print(f"[baseline] Running {len(query_ids)} queries")
+    print(f"[baseline] Exhaustive cosine: {len(query_ids)} queries × {len(doc_ids)} docs")
     t0 = time.perf_counter()
+    # Batch dot product: (Q, dim) × (dim, D) → (Q, D)
+    sims = queries_n @ docs_n.T
+    # Top-K indices per query
+    top_k = np.argpartition(-sims, K, axis=1)[:, :K]
     retrieved = {}
-    for qid, qv in zip(query_ids, query_vecs):
-        result = table.search(qv.tolist()).limit(K).to_arrow()
+    for qi, qid in enumerate(query_ids):
+        row_sims = sims[qi, top_k[qi]]
+        order = np.argsort(-row_sims)
         hits = {}
-        for idx, dist in zip(result.column("id").to_pylist(),
-                              result.column("_distance").to_pylist()):
-            hits[int_to_str[idx]] = -float(dist)  # smaller dist → higher score
+        for rank, pos in enumerate(order):
+            doc_idx = int(top_k[qi, pos])
+            hits[int_to_str[doc_idx]] = float(K - rank)
         retrieved[qid] = hits
     wall = time.perf_counter() - t0
     print(f"[baseline] {len(query_ids)} queries in {wall:.1f}s ({len(query_ids)/wall:.1f} QPS)")

@@ -114,3 +114,4 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+examples/rag_beir/datasets/
