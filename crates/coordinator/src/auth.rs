@@ -104,6 +104,23 @@ impl ApiKeyInterceptor {
             )))
         }
     }
+
+    /// Extract a short, non-secret principal identifier for audit logs.
+    /// Returns the prefix of the API key (first 8 chars) or "anonymous".
+    pub fn principal<T>(&self, req: &Request<T>) -> String {
+        if self.keys.is_empty() {
+            return "anonymous".to_string();
+        }
+        req.metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
+            .map(|k| {
+                let take = k.len().min(8);
+                format!("key:{}…", &k[..take])
+            })
+            .unwrap_or_else(|| "missing".to_string())
+    }
 }
 
 #[cfg(test)]

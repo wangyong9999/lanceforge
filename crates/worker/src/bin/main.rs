@@ -53,8 +53,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Lance Worker '{}' with {} shards on port {}", worker_id, shards.len(), port);
 
     let ctx = SessionContext::default();
-    let registry = LanceTableRegistry::with_full_config(ctx, &shards, &config.storage_options, &config.cache).await?;
-    let service = WorkerService::new(Arc::new(registry));
+    let registry = Arc::new(
+        LanceTableRegistry::with_full_config(ctx, &shards, &config.storage_options, &config.cache).await?
+    );
+
+    // Spawn periodic auto-compaction loop (Phase 13: prevents fragment accumulation).
+    if config.compaction.enabled {
+        let reg = registry.clone();
+        let interval = Duration::from_secs(config.compaction.interval_secs);
+        info!("Auto-compaction enabled (interval={}s)", config.compaction.interval_secs);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.tick().await; // skip immediate first tick
+            loop {
+                tick.tick().await;
+                match reg.compact_all().await {
+                    Ok(n) => info!("Auto-compaction: {} table(s) optimized", n),
+                    Err(e) => log::warn!("Auto-compaction failed: {}", e),
+                }
+            }
+        });
+    }
+
+    let service = WorkerService::new(registry);
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
     let mut server = tonic::transport::Server::builder()

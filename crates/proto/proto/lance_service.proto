@@ -118,6 +118,7 @@ message AnnSearchRequest {
   repeated string columns = 8;
   int32 metric_type = 9;       // 0=L2, 1=Cosine, 2=Dot
   optional string query_text = 10;  // If set, auto-embed to vector (requires embedding model config)
+  uint32 offset = 11;          // Pagination: skip the first N globally-merged hits (0 = first page)
 }
 
 message FtsSearchRequest {
@@ -127,6 +128,7 @@ message FtsSearchRequest {
   uint32 k = 4;
   optional string filter = 5;
   repeated string columns = 6;
+  uint32 offset = 7;
 }
 
 message HybridSearchRequest {
@@ -144,12 +146,15 @@ message HybridSearchRequest {
   optional string filter = 9;
   repeated string columns = 10;
   int32 metric_type = 11;
+  uint32 offset = 12;
 }
 
 message SearchResponse {
   bytes arrow_ipc_data = 1;    // Arrow IPC StreamWriter bytes
   uint32 num_rows = 2;
   string error = 3;            // empty if success
+  bool truncated = 4;          // true if response was capped by max_response_bytes
+  uint32 next_offset = 5;      // Suggested offset for the next page (0 if no more)
 }
 
 // ============ Scheduler → Executor ============

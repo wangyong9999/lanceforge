@@ -42,6 +42,9 @@ pub struct ClusterConfig {
     /// Replication factor for shard assignment during rebalance.
     #[serde(default = "ClusterConfig::default_replica_factor")]
     pub replica_factor: usize,
+    /// Worker-side periodic compaction.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 impl ClusterConfig {
@@ -69,6 +72,16 @@ pub struct ServerConfig {
     /// Query vector oversampling factor (fetch k*oversample from each shard, merge to k).
     #[serde(default = "ServerConfig::default_oversample_factor")]
     pub oversample_factor: u32,
+    /// Maximum response payload size in bytes. Responses exceeding this are truncated
+    /// (rows dropped from the tail) and `truncated=true` is set in the response.
+    /// Default: 64 MiB. Set to 0 to disable the cap (NOT recommended).
+    #[serde(default = "ServerConfig::default_max_response_bytes")]
+    pub max_response_bytes: usize,
+    /// Hard upper limit on `k` (and `k+offset` for paginated requests) per call.
+    /// Prevents runaway requests that try to fetch millions of rows in one shot.
+    /// Default: 10000.
+    #[serde(default = "ServerConfig::default_max_k")]
+    pub max_k: u32,
 }
 
 impl ServerConfig {
@@ -78,6 +91,8 @@ impl ServerConfig {
     fn default_concurrency_limit() -> usize { 256 }
     fn default_max_concurrent_queries() -> usize { 200 }
     fn default_oversample_factor() -> u32 { 2 }
+    fn default_max_response_bytes() -> usize { 64 * 1024 * 1024 }
+    fn default_max_k() -> u32 { 10_000 }
 }
 
 impl Default for ServerConfig {
@@ -89,6 +104,37 @@ impl Default for ServerConfig {
             concurrency_limit: Self::default_concurrency_limit(),
             max_concurrent_queries: Self::default_max_concurrent_queries(),
             oversample_factor: Self::default_oversample_factor(),
+            max_response_bytes: Self::default_max_response_bytes(),
+            max_k: Self::default_max_k(),
+        }
+    }
+}
+
+/// Background compaction configuration for workers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Whether the periodic compaction loop is enabled. Default: true.
+    #[serde(default = "CompactionConfig::default_enabled")]
+    pub enabled: bool,
+    /// Interval in seconds between compaction sweeps. Default: 3600 (1h).
+    #[serde(default = "CompactionConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Skip compaction if the worker is busy (loaded shards count > 0 always allows).
+    #[serde(default)]
+    pub skip_if_busy: bool,
+}
+
+impl CompactionConfig {
+    fn default_enabled() -> bool { true }
+    fn default_interval_secs() -> u64 { 3600 }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_secs: Self::default_interval_secs(),
+            skip_if_busy: false,
         }
     }
 }

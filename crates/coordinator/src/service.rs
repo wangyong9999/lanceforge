@@ -46,6 +46,10 @@ pub struct CoordinatorService {
     shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
     /// Auth + RBAC interceptor (None = no auth).
     auth: Option<Arc<super::auth::ApiKeyInterceptor>>,
+    /// Max bytes per SearchResponse (0 = unlimited).
+    max_response_bytes: usize,
+    /// Hard upper limit on k (and offset+k) per call.
+    max_k: u32,
 }
 
 impl CoordinatorService {
@@ -179,6 +183,8 @@ impl CoordinatorService {
             max_concurrent_queries: max_queries,
             shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
             auth: None,
+            max_response_bytes: config.server.max_response_bytes,
+            max_k: config.server.max_k,
         }
     }
 
@@ -195,6 +201,15 @@ impl CoordinatorService {
         }
         Ok(())
     }
+
+    /// Emit an audit log line for a sensitive action (write/admin). Level=info.
+    /// Format: `audit op=<op> principal=<short_key> target=<table> details=<...>`
+    fn audit<T>(&self, req: &Request<T>, op: &str, target: &str, details: &str) {
+        let principal = self.auth.as_ref()
+            .map(|a| a.principal(req))
+            .unwrap_or_else(|| "no-auth".to_string());
+        info!("audit op={} principal={} target={} details={}", op, principal, target, details);
+    }
 }
 
 #[tonic::async_trait]
@@ -210,8 +225,8 @@ impl LanceSchedulerService for CoordinatorService {
             ))
         })?;
         let req = request.into_inner();
-        let k = validate_k(req.k, self.oversample_factor)?;
-        let oversample_k = k * self.oversample_factor;
+        let (merge_limit, oversample_k) = validate_offset_k(req.offset, req.k, self.max_k, self.oversample_factor)?;
+        let _ = validate_k(req.k, self.oversample_factor)?;
 
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -248,11 +263,12 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, k, true, self.query_timeout,
+            &req.table_name, local_req, merge_limit, true, self.query_timeout,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
-        Ok(Response::new(result?))
+        let resp = result?;
+        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
     }
 
     async fn fts_search(
@@ -264,8 +280,7 @@ impl LanceSchedulerService for CoordinatorService {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
         let req = request.into_inner();
-        let k = validate_k(req.k, self.oversample_factor)?;
-        let oversample_k = k * self.oversample_factor;
+        let (merge_limit, oversample_k) = validate_offset_k(req.offset, req.k, self.max_k, self.oversample_factor)?;
 
         let local_req = pb::LocalSearchRequest {
             query_type: LanceQueryType::Fts as i32,
@@ -279,10 +294,11 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, k, false, self.query_timeout,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout,
         ).await;
         self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
-        Ok(Response::new(result?))
+        let resp = result?;
+        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
     }
 
     async fn hybrid_search(
@@ -294,8 +310,7 @@ impl LanceSchedulerService for CoordinatorService {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
         let req = request.into_inner();
-        let k = validate_k(req.k, self.oversample_factor)?;
-        let oversample_k = k * self.oversample_factor;
+        let (merge_limit, oversample_k) = validate_offset_k(req.offset, req.k, self.max_k, self.oversample_factor)?;
 
         let local_req = pb::LocalSearchRequest {
             query_type: LanceQueryType::Hybrid as i32,
@@ -313,10 +328,11 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, k, false, self.query_timeout,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout,
         ).await;
         self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
-        Ok(Response::new(result?))
+        let resp = result?;
+        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
     }
 
     async fn get_cluster_status(
@@ -534,6 +550,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CreateTableRequest>,
     ) -> Result<Response<pb::CreateTableResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.audit(&request, "CreateTable", "<inline>", "");
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -679,6 +696,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::DropTableRequest>,
     ) -> Result<Response<pb::DropTableResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.audit(&request, "DropTable", &request.get_ref().table_name, "");
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -704,6 +722,9 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CreateIndexRequest>,
     ) -> Result<Response<pb::CreateIndexResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.audit(&request, "CreateIndex",
+            &request.get_ref().table_name,
+            &format!("column={} type={}", request.get_ref().column, request.get_ref().index_type));
         let req = request.into_inner();
         if req.table_name.is_empty() || req.column.is_empty() {
             return Err(Status::invalid_argument("table_name and column required"));
@@ -810,6 +831,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::RebalanceRequest>,
     ) -> Result<Response<pb::RebalanceResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.audit(&request, "Rebalance", "*", "");
         use lance_distributed_meta::shard_manager::{assign_shards, compute_diff, ShardPolicy};
 
         // Only consider healthy executors for rebalance (skip dead workers)
@@ -1007,6 +1029,78 @@ fn validate_k(k: u32, oversample_factor: u32) -> std::result::Result<u32, Status
         Status::invalid_argument(format!("k={k} * oversample={oversample_factor} overflows u32"))
     })?;
     Ok(k)
+}
+
+/// Validate offset+k against per-call limit and oversample headroom.
+fn validate_offset_k(offset: u32, k: u32, max_k: u32, oversample_factor: u32) -> std::result::Result<(u32, u32), Status> {
+    if k == 0 { return Err(Status::invalid_argument("k must be > 0")); }
+    let total = offset.checked_add(k).ok_or_else(||
+        Status::invalid_argument(format!("offset({offset}) + k({k}) overflow")))?;
+    if total > max_k {
+        return Err(Status::invalid_argument(format!(
+            "offset+k = {} exceeds max_k {}", total, max_k
+        )));
+    }
+    total.checked_mul(oversample_factor).ok_or_else(||
+        Status::invalid_argument(format!("(offset+k)*oversample overflow")))?;
+    Ok((total, total * oversample_factor))
+}
+
+/// Apply offset slicing and response-size cap to a merged SearchResponse.
+/// - Decodes IPC, slices [offset .. offset+k] (or fewer if results limited).
+/// - If serialized payload exceeds `max_bytes`, drops tail rows until under cap
+///   and sets `truncated=true`. `next_offset` set when more rows likely remain.
+fn apply_pagination_and_cap(
+    resp: pb::SearchResponse,
+    offset: u32,
+    k: u32,
+    max_bytes: usize,
+) -> pb::SearchResponse {
+    if !resp.error.is_empty() || resp.arrow_ipc_data.is_empty() {
+        return resp;
+    }
+    let batch = match lance_distributed_common::ipc::ipc_to_record_batch(&resp.arrow_ipc_data) {
+        Ok(b) => b,
+        Err(_) => return resp,
+    };
+    let total_rows = batch.num_rows();
+    let off = offset as usize;
+    if off >= total_rows {
+        return pb::SearchResponse {
+            arrow_ipc_data: vec![], num_rows: 0, error: String::new(),
+            truncated: false, next_offset: 0,
+        };
+    }
+    let want = (k as usize).min(total_rows - off);
+    let mut sliced = batch.slice(off, want);
+    let next_offset = if off + want < total_rows { (off + want) as u32 } else { 0 };
+
+    // Encode and cap by bytes
+    let mut ipc = match lance_distributed_common::ipc::record_batch_to_ipc(&sliced) {
+        Ok(b) => b,
+        Err(_) => return resp,
+    };
+    let mut truncated = false;
+    if max_bytes > 0 && ipc.len() > max_bytes && sliced.num_rows() > 1 {
+        // Halve until under cap (binary shrink)
+        let mut rows = sliced.num_rows();
+        while rows > 1 {
+            rows = (rows + 1) / 2;
+            let trial = sliced.slice(0, rows);
+            if let Ok(buf) = lance_distributed_common::ipc::record_batch_to_ipc(&trial) {
+                if buf.len() <= max_bytes {
+                    sliced = trial; ipc = buf; truncated = true; break;
+                }
+            }
+        }
+    }
+    pb::SearchResponse {
+        num_rows: sliced.num_rows() as u32,
+        arrow_ipc_data: ipc,
+        error: String::new(),
+        truncated,
+        next_offset: if truncated { (off + sliced.num_rows()) as u32 } else { next_offset },
+    }
 }
 
 #[cfg(test)]

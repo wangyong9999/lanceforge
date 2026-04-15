@@ -123,6 +123,9 @@ pub struct AnnSearchRequest {
     /// If set, auto-embed to vector (requires embedding model config)
     #[prost(string, optional, tag = "10")]
     pub query_text: ::core::option::Option<::prost::alloc::string::String>,
+    /// Pagination: skip the first N globally-merged hits (0 = first page)
+    #[prost(uint32, tag = "11")]
+    pub offset: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FtsSearchRequest {
@@ -138,6 +141,8 @@ pub struct FtsSearchRequest {
     pub filter: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "6")]
     pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag = "7")]
+    pub offset: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HybridSearchRequest {
@@ -166,6 +171,8 @@ pub struct HybridSearchRequest {
     pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(int32, tag = "11")]
     pub metric_type: i32,
+    #[prost(uint32, tag = "12")]
+    pub offset: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SearchResponse {
@@ -177,6 +184,12 @@ pub struct SearchResponse {
     /// empty if success
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
+    /// true if response was capped by max_response_bytes
+    #[prost(bool, tag = "4")]
+    pub truncated: bool,
+    /// Suggested offset for the next page (0 if no more)
+    #[prost(uint32, tag = "5")]
+    pub next_offset: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalSearchRequest {

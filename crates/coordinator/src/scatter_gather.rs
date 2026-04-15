@@ -110,7 +110,7 @@ async fn scatter_gather_inner(
     };
 
     if shard_routing.is_empty() {
-        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new() });
+        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0 });
     }
 
     // Group shards by target worker.
@@ -198,7 +198,7 @@ async fn scatter_gather_inner(
     }
 
     if batches.is_empty() {
-        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new() });
+        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0 });
     }
 
     // Merge
@@ -212,9 +212,9 @@ async fn scatter_gather_inner(
         Ok(batch) => {
             let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch)
                 .map_err(|e| tonic::Status::internal(format!("IPC error: {e}")))?;
-            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: String::new() })
+            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: String::new(), truncated: false, next_offset: 0 })
         }
-        Err(e) => Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: e.to_string() }),
+        Err(e) => Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(), truncated: false, next_offset: 0 }),
     }
 }
 
