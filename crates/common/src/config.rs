@@ -82,6 +82,10 @@ pub struct ServerConfig {
     /// Default: 10000.
     #[serde(default = "ServerConfig::default_max_k")]
     pub max_k: u32,
+    /// Slow-query threshold in milliseconds. Queries exceeding this emit a
+    /// structured warn-level log. Default: 1000 ms. Set to 0 to disable.
+    #[serde(default = "ServerConfig::default_slow_query_ms")]
+    pub slow_query_ms: u64,
 }
 
 impl ServerConfig {
@@ -93,6 +97,7 @@ impl ServerConfig {
     fn default_oversample_factor() -> u32 { 2 }
     fn default_max_response_bytes() -> usize { 64 * 1024 * 1024 }
     fn default_max_k() -> u32 { 10_000 }
+    fn default_slow_query_ms() -> u64 { 1000 }
 }
 
 impl Default for ServerConfig {
@@ -106,6 +111,7 @@ impl Default for ServerConfig {
             oversample_factor: Self::default_oversample_factor(),
             max_response_bytes: Self::default_max_response_bytes(),
             max_k: Self::default_max_k(),
+            slow_query_ms: Self::default_slow_query_ms(),
         }
     }
 }

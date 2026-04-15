@@ -2,8 +2,18 @@
 // Simple metrics for LanceForge observability.
 // Exposes Prometheus-compatible text format via HTTP.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// Per-table counters (queries, errors, rows). Tracked server-side so that
+/// Prometheus can emit labelled series (`table=` label).
+#[derive(Debug, Default)]
+pub struct TableMetric {
+    pub query_count: AtomicU64,
+    pub query_error_count: AtomicU64,
+    pub rows_returned: AtomicU64,
+}
 
 /// Simple atomic counters for key metrics.
 /// Thread-safe, lock-free, usable from any async context.
@@ -15,6 +25,10 @@ pub struct Metrics {
     pub query_latency_max_us: AtomicU64,
     pub executor_healthy_count: AtomicU64,
     pub executor_total_count: AtomicU64,
+    pub slow_query_count: AtomicU64,
+    /// Per-table metrics. RwLock is held only briefly on first-use insert;
+    /// hot-path reads use `get` under read lock then atomic increments.
+    pub per_table: RwLock<HashMap<String, Arc<TableMetric>>>,
 }
 
 impl Metrics {
@@ -29,6 +43,30 @@ impl Metrics {
         }
         self.query_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
         self.query_latency_max_us.fetch_max(latency_us, Ordering::Relaxed);
+    }
+
+    /// Record a per-table query outcome (hot path: read-locked fast path).
+    pub fn record_table_query(&self, table: &str, rows: u64, success: bool) {
+        let tm = {
+            let map = self.per_table.read().unwrap();
+            map.get(table).cloned()
+        };
+        let tm = match tm {
+            Some(t) => t,
+            None => {
+                let mut map = self.per_table.write().unwrap();
+                map.entry(table.to_string())
+                    .or_insert_with(|| Arc::new(TableMetric::default()))
+                    .clone()
+            }
+        };
+        tm.query_count.fetch_add(1, Ordering::Relaxed);
+        if !success { tm.query_error_count.fetch_add(1, Ordering::Relaxed); }
+        tm.rows_returned.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    pub fn record_slow_query(&self) {
+        self.slow_query_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn set_executor_health(&self, healthy: u64, total: u64) {
@@ -46,7 +84,9 @@ impl Metrics {
         let healthy = self.executor_healthy_count.load(Ordering::Relaxed);
         let total = self.executor_total_count.load(Ordering::Relaxed);
 
-        format!(
+        let slow = self.slow_query_count.load(Ordering::Relaxed);
+
+        let mut out = format!(
             "# HELP lance_query_total Total number of queries\n\
              # TYPE lance_query_total counter\n\
              lance_query_total {count}\n\
@@ -64,10 +104,51 @@ impl Metrics {
              lance_executors_healthy {healthy}\n\
              # HELP lance_executors_total Total number of configured executors\n\
              # TYPE lance_executors_total gauge\n\
-             lance_executors_total {total}\n",
+             lance_executors_total {total}\n\
+             # HELP lance_slow_query_total Queries exceeding slow_query_ms threshold\n\
+             # TYPE lance_slow_query_total counter\n\
+             lance_slow_query_total {slow}\n",
             max_ms = max_us as f64 / 1000.0,
-        )
+        );
+
+        // Per-table labels
+        if let Ok(map) = self.per_table.read() {
+            if !map.is_empty() {
+                out.push_str("# HELP lance_table_query_total Queries per table\n");
+                out.push_str("# TYPE lance_table_query_total counter\n");
+                for (table, tm) in map.iter() {
+                    out.push_str(&format!(
+                        "lance_table_query_total{{table=\"{}\"}} {}\n",
+                        escape_label(table),
+                        tm.query_count.load(Ordering::Relaxed),
+                    ));
+                }
+                out.push_str("# HELP lance_table_query_errors_total Query errors per table\n");
+                out.push_str("# TYPE lance_table_query_errors_total counter\n");
+                for (table, tm) in map.iter() {
+                    out.push_str(&format!(
+                        "lance_table_query_errors_total{{table=\"{}\"}} {}\n",
+                        escape_label(table),
+                        tm.query_error_count.load(Ordering::Relaxed),
+                    ));
+                }
+                out.push_str("# HELP lance_table_rows_returned_total Rows returned per table\n");
+                out.push_str("# TYPE lance_table_rows_returned_total counter\n");
+                for (table, tm) in map.iter() {
+                    out.push_str(&format!(
+                        "lance_table_rows_returned_total{{table=\"{}\"}} {}\n",
+                        escape_label(table),
+                        tm.rows_returned.load(Ordering::Relaxed),
+                    ));
+                }
+            }
+        }
+        out
     }
+}
+
+fn escape_label(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
 /// Start a simple HTTP server on the given port that serves /metrics.

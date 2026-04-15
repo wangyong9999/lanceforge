@@ -110,6 +110,11 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.RegisterWorkerRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.RegisterWorkerResponse.FromString,
                 _registered_method=True)
+        self.MoveShard = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/MoveShard',
+                request_serializer=lance__service__pb2.MoveShardRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.MoveShardResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -209,6 +214,12 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def MoveShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -286,6 +297,11 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.RegisterWorker,
                     request_deserializer=lance__service__pb2.RegisterWorkerRequest.FromString,
                     response_serializer=lance__service__pb2.RegisterWorkerResponse.SerializeToString,
+            ),
+            'MoveShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.MoveShard,
+                    request_deserializer=lance__service__pb2.MoveShardRequest.FromString,
+                    response_serializer=lance__service__pb2.MoveShardResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -694,6 +710,33 @@ class LanceSchedulerService(object):
             '/lance.distributed.LanceSchedulerService/RegisterWorker',
             lance__service__pb2.RegisterWorkerRequest.SerializeToString,
             lance__service__pb2.RegisterWorkerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MoveShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/MoveShard',
+            lance__service__pb2.MoveShardRequest.SerializeToString,
+            lance__service__pb2.MoveShardResponse.FromString,
             options,
             channel_credentials,
             insecure,

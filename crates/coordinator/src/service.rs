@@ -50,6 +50,8 @@ pub struct CoordinatorService {
     max_response_bytes: usize,
     /// Hard upper limit on k (and offset+k) per call.
     max_k: u32,
+    /// Slow-query threshold (ms). 0 disables slow-query logging.
+    slow_query_ms: u64,
 }
 
 impl CoordinatorService {
@@ -185,6 +187,7 @@ impl CoordinatorService {
             auth: None,
             max_response_bytes: config.server.max_response_bytes,
             max_k: config.server.max_k,
+            slow_query_ms: config.server.slow_query_ms,
         }
     }
 
@@ -209,6 +212,16 @@ impl CoordinatorService {
             .map(|a| a.principal(req))
             .unwrap_or_else(|| "no-auth".to_string());
         info!("audit op={} principal={} target={} details={}", op, principal, target, details);
+    }
+
+    /// Emit a structured slow-query warn log if elapsed exceeds threshold.
+    fn maybe_slow<'a>(&self, op: &str, table: &str, k: u32, elapsed_us: u64, num_rows: u32) {
+        if self.slow_query_ms == 0 { return; }
+        if elapsed_us / 1000 >= self.slow_query_ms {
+            warn!("slow_query op={} table={} k={} rows={} elapsed_ms={}",
+                op, table, k, num_rows, elapsed_us / 1000);
+            self.metrics.record_slow_query();
+        }
     }
 }
 
@@ -268,7 +281,10 @@ impl LanceSchedulerService for CoordinatorService {
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
+        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
+        self.maybe_slow("ann_search", &req.table_name, req.k, latency_us, paged.num_rows);
+        Ok(Response::new(paged))
     }
 
     async fn fts_search(
@@ -296,9 +312,13 @@ impl LanceSchedulerService for CoordinatorService {
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, merge_limit, false, self.query_timeout,
         ).await;
-        self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
+        let latency_us = t0.elapsed().as_micros() as u64;
+        self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
+        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
+        self.maybe_slow("fts_search", &req.table_name, req.k, latency_us, paged.num_rows);
+        Ok(Response::new(paged))
     }
 
     async fn hybrid_search(
@@ -330,9 +350,13 @@ impl LanceSchedulerService for CoordinatorService {
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, merge_limit, false, self.query_timeout,
         ).await;
-        self.metrics.record_query(t0.elapsed().as_micros() as u64, result.is_ok());
+        let latency_us = t0.elapsed().as_micros() as u64;
+        self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        Ok(Response::new(apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes)))
+        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
+        self.maybe_slow("hybrid_search", &req.table_name, req.k, latency_us, paged.num_rows);
+        Ok(Response::new(paged))
     }
 
     async fn get_cluster_status(
@@ -974,6 +998,99 @@ impl LanceSchedulerService for CoordinatorService {
         Ok(Response::new(pb::RebalanceResponse {
             shards_moved: total_moved,
             error,
+        }))
+    }
+
+    async fn move_shard(
+        &self,
+        request: Request<pb::MoveShardRequest>,
+    ) -> Result<Response<pb::MoveShardResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.audit(&request, "MoveShard",
+            &request.get_ref().shard_name,
+            &format!("to={} force={}",
+                request.get_ref().to_worker, request.get_ref().force));
+        let req = request.into_inner();
+        if req.shard_name.is_empty() || req.to_worker.is_empty() {
+            return Err(Status::invalid_argument("shard_name and to_worker required"));
+        }
+
+        // Find the table that owns this shard and its current owner.
+        let mut found: Option<(String, String)> = None; // (table_name, from_worker)
+        for tbl in self.shard_state.all_tables().await {
+            let routing = self.shard_state.get_shard_routing(&tbl).await;
+            for (sname, primary, _sec) in routing {
+                if sname == req.shard_name {
+                    found = Some((tbl.clone(), primary));
+                    break;
+                }
+            }
+            if found.is_some() { break; }
+        }
+        let (table_name, from_worker) = found.ok_or_else(||
+            Status::not_found(format!("Shard not found: {}", req.shard_name)))?;
+
+        if from_worker == req.to_worker {
+            return Ok(Response::new(pb::MoveShardResponse {
+                from_worker, to_worker: req.to_worker, error: String::new(),
+            }));
+        }
+
+        // Phase 1: LoadShard on destination worker.
+        let shard_uri = {
+            let uris = self.shard_uris.read().await;
+            uris.get(&req.shard_name).cloned()
+                .ok_or_else(|| Status::failed_precondition(
+                    format!("Shard URI unknown for {}", req.shard_name)))?
+        };
+        let mut to_client = self.pool.get_healthy_client(&req.to_worker).await
+            .map_err(|e| Status::unavailable(format!("to_worker {} unavailable: {e}", req.to_worker)))?;
+        let load_resp = tokio::time::timeout(
+            Duration::from_secs(60),
+            to_client.load_shard(Request::new(pb::LoadShardRequest {
+                shard_name: req.shard_name.clone(),
+                uri: shard_uri,
+                storage_options: self.storage_options.clone(),
+            })),
+        ).await
+            .map_err(|_| Status::deadline_exceeded("LoadShard timeout"))?
+            .map_err(|e| Status::internal(format!("LoadShard RPC: {e}")))?
+            .into_inner();
+        if !load_resp.error.is_empty() {
+            return Err(Status::internal(format!("LoadShard failed: {}", load_resp.error)));
+        }
+
+        // Phase 2: update routing to the new owner (before unloading old, so reads
+        // have a valid target during the switch).
+        let current_routing = self.shard_state.get_shard_routing(&table_name).await;
+        let new_mapping: std::collections::HashMap<String, Vec<String>> = current_routing.into_iter()
+            .map(|(sname, primary, sec)| {
+                if sname == req.shard_name {
+                    let mut new_list = vec![req.to_worker.clone()];
+                    if let Some(s) = sec { if s != req.to_worker { new_list.push(s); } }
+                    (sname, new_list)
+                } else {
+                    let mut v = vec![primary];
+                    if let Some(s) = sec { v.push(s); }
+                    (sname, v)
+                }
+            })
+            .collect();
+        self.shard_state.register_table(&table_name, new_mapping).await;
+
+        // Phase 3: UnloadShard on old worker (best-effort; ignore failures if force=true).
+        if let Ok(mut from_client) = self.pool.get_healthy_client(&from_worker).await {
+            let _ = from_client.unload_shard(Request::new(pb::UnloadShardRequest {
+                shard_name: req.shard_name.clone(),
+            })).await;
+        } else if !req.force {
+            warn!("MoveShard: old worker {} unreachable (shard routed to {} but not unloaded)",
+                from_worker, req.to_worker);
+        }
+
+        info!("MoveShard: {} moved from {} to {}", req.shard_name, from_worker, req.to_worker);
+        Ok(Response::new(pb::MoveShardResponse {
+            from_worker, to_worker: req.to_worker, error: String::new(),
         }))
     }
 
