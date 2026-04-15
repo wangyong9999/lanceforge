@@ -77,9 +77,17 @@ SMOKE_MATRIX = {
 
 # Per-config measurement parameters
 WARMUP_QUERIES   = 20
-MEASURE_QUERIES  = 200    # per thread
+MEASURE_QUERIES  = 200    # per thread (default)
 GROUND_TRUTH_N   = 50     # queries for recall computation
 RECALL_K         = 10
+
+
+def queries_for_scale(scale):
+    """Auto-adjust per-thread query count by dataset size to keep per-config
+    runtime under ~2 minutes. 1M IVF queries are ~10x slower than 100K."""
+    if scale >= 1_000_000: return 40
+    if scale >= 500_000:   return 80
+    return MEASURE_QUERIES
 
 # Cluster layout
 BASE_PORT = 58000
@@ -167,7 +175,7 @@ def _make_batch(ids_range, vecs, dim):
     ], names=['id', 'vector'])
 
 
-def ingest(stub, table_name, vecs, dim, chunk_rows=None):
+def ingest(stub, table_name, vecs, dim, chunk_rows=None, create_index=True):
     if chunk_rows is None:
         # ~64 MB per chunk to stay under default server 256 MB limit even
         # with overhead. 64MB / (dim × 4B) rows.
@@ -193,6 +201,18 @@ def ingest(stub, table_name, vecs, dim, chunk_rows=None):
         if ar.error: raise RuntimeError(f"AddRows: {ar.error}")
         total += ar.affected_rows
         off = end
+    # Create IVF_FLAT index on vector column — crucial for fair latency.
+    # Without this, queries scan full table (100x slower at 1M rows).
+    if create_index:
+        num_partitions = 32 if n < 100_000 else 128
+        t_idx = time.perf_counter()
+        ir = stub.CreateIndex(pb.CreateIndexRequest(
+            table_name=table_name, column="vector",
+            index_type="IVF_FLAT", num_partitions=num_partitions))
+        if ir.error:
+            print(f"[ingest] WARN CreateIndex failed: {ir.error}")
+        else:
+            print(f"[ingest] Index built in {time.perf_counter()-t_idx:.1f}s ({num_partitions} partitions)", flush=True)
     return total
 
 
@@ -223,7 +243,7 @@ def run_single_query(stub, table, vec, dim, k, nprobes):
     return elapsed, ids
 
 
-def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids):
+def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids, scale=0):
     """Run WARMUP + MEASURE queries at a given concurrency level.
     Returns dict of metrics: p50, p95, p99, qps, recall, errors.
 
@@ -239,7 +259,7 @@ def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids):
     latencies = []
     recalls = []
     errors = 0
-    total = MEASURE_QUERIES
+    total = queries_for_scale(scale) if scale else MEASURE_QUERIES
 
     def worker(tid):
         # Per-thread channel + stub (avoids shared HTTP/2 serialization).
@@ -335,7 +355,7 @@ def run_matrix(matrix, smoke):
                                 cfg_label = f"scale={scale} dim={dim} shards={shards} k={k} nprobes={nprobes} conc={conc}"
                                 print(f"[{run_idx}/{total_runs}] {cfg_label}")
                                 metrics = measure_config(
-                                    stub, table, test, dim, k, nprobes, conc, gt)
+                                    stub, table, test, dim, k, nprobes, conc, gt, scale=scale)
                                 row = {
                                     'scale': scale, 'dim': dim, 'shards': shards,
                                     'k': k, 'nprobes': nprobes, 'concurrency': conc,
