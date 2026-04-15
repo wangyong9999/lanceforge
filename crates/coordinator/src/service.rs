@@ -197,6 +197,15 @@ impl CoordinatorService {
         self
     }
 
+    /// Build a handle that background tasks (orphan GC, etc.) can hold
+    /// without owning the CoordinatorService.
+    pub fn orphan_gc_handle(&self) -> OrphanGcHandle {
+        OrphanGcHandle {
+            shard_uris: self.shard_uris.clone(),
+            root: self.default_table_path.clone(),
+        }
+    }
+
     /// Authorize a request against a required permission.
     fn check_perm<T>(&self, req: &Request<T>, perm: super::auth::Permission) -> Result<(), Status> {
         if let Some(a) = &self.auth {
@@ -533,17 +542,35 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("on_columns required for upsert"));
         }
 
-        // Per-shard routing (same rationale as delete_rows above).
+        // Hash-partition the incoming rows by `on_columns` so each row lands
+        // on exactly ONE shard. Before this, every shard ran merge_insert over
+        // the whole batch; non-matching rows got inserted once per shard
+        // (N× duplication). Post-partition, each row's upsert targets only
+        // its owning shard — within that shard, Lance's merge_insert gives
+        // the usual update-or-insert semantics.
+        //
+        // Consistency caveat: Add currently routes round-robin (not by PK),
+        // so an existing row may live on a different shard than the hash
+        // would assign. Fixing that requires hash-based Add routing (future).
+        // For now, Upsert is internally consistent (no duplication) but may
+        // create a second copy on a new shard if the original Add landed
+        // elsewhere. Documented as a known limitation.
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
+        let input_batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::invalid_argument(format!("IPC decode: {e}")))?;
+        let partitions = partition_batch_by_hash(&input_batch, &req.on_columns, routing.len())
+            .map_err(|e| Status::invalid_argument(format!("partition: {e}")))?;
 
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
         let mut errors = Vec::new();
 
-        for (shard_name, primary, secondary) in &routing {
+        for (shard_idx, partition_batch) in partitions.iter().enumerate() {
+            if partition_batch.num_rows() == 0 { continue; }
+            let (shard_name, primary, secondary) = &routing[shard_idx];
             let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
                 Some(primary.clone())
             } else if let Some(s) = secondary {
@@ -554,11 +581,13 @@ impl LanceSchedulerService for CoordinatorService {
                 Some(w) => w,
                 None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
             };
+            let partition_ipc = lance_distributed_common::ipc::record_batch_to_ipc(partition_batch)
+                .map_err(|e| Status::internal(format!("IPC encode: {e}")))?;
             if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
                 let local_req = pb::LocalWriteRequest {
                     write_type: 2, // Upsert
                     table_name: req.table_name.clone(),
-                    arrow_ipc_data: req.arrow_ipc_data.clone(),
+                    arrow_ipc_data: partition_ipc,
                     filter: String::new(),
                     on_columns: req.on_columns.clone(),
                     target_shard: shard_name.clone(),
@@ -1158,6 +1187,88 @@ impl LanceSchedulerService for CoordinatorService {
 
 const MAX_K: u32 = 100_000;
 
+/// Handles needed by the orphan GC loop. Exposed as a separate struct so
+/// the loop does not hold a CoordinatorService reference (avoids ownership
+/// conflicts with the gRPC server taking `service` by value).
+#[derive(Clone)]
+pub struct OrphanGcHandle {
+    pub shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    pub root: Option<String>,
+}
+
+/// Orphan-dataset GC loop.
+///
+/// Periodically lists `.lance` directories under `default_table_path` and
+/// deletes those not referenced by any registered shard URI AND older than
+/// `min_age_secs`. Local filesystem only for now; object-store GC would
+/// need a list operation we don't wire up here.
+pub async fn orphan_gc_loop(
+    handle: OrphanGcHandle,
+    cfg: lance_distributed_common::config::OrphanGcConfig,
+) {
+    let interval = std::time::Duration::from_secs(cfg.interval_secs);
+    let mut tick = tokio::time::interval(interval);
+    tick.tick().await; // skip immediate first tick
+    loop {
+        tick.tick().await;
+        let root = match handle.root.as_ref() {
+            Some(r) => r.clone(),
+            None => continue,
+        };
+        // Only support local fs (object-store listing is a follow-up).
+        if root.starts_with("s3://") || root.starts_with("gs://") || root.starts_with("az://") {
+            log::debug!("orphan_gc: skipping object-store root {} (not yet supported)", root);
+            continue;
+        }
+        let entries = match tokio::fs::read_dir(&root).await {
+            Ok(e) => e,
+            Err(e) => { log::debug!("orphan_gc: read_dir {}: {}", root, e); continue; }
+        };
+        let registered: std::collections::HashSet<String> =
+            handle.shard_uris.read().await.values().cloned().collect();
+        let now = std::time::SystemTime::now();
+        let min_age = std::time::Duration::from_secs(cfg.min_age_secs);
+        let mut purged = 0u64;
+        let mut entries = entries;
+        loop {
+            let ent = match entries.next_entry().await {
+                Ok(Some(e)) => e,
+                _ => break,
+            };
+            let path = ent.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !name.ends_with(".lance") { continue; }
+            let full = path.to_string_lossy().to_string();
+            // Registered URIs may or may not end with ".lance" — compare stems.
+            let stem = name.strip_suffix(".lance").unwrap_or(&name);
+            let referenced = registered.iter().any(|u|
+                u == &full
+                || u.ends_with(&format!("/{}", name))
+                || u.ends_with(&format!("/{}", stem)));
+            if referenced { continue; }
+
+            // Age check
+            let meta = match tokio::fs::metadata(&path).await { Ok(m) => m, Err(_) => continue };
+            let modified = meta.modified().ok();
+            if let Some(mt) = modified {
+                if let Ok(age) = now.duration_since(mt) {
+                    if age < min_age { continue; }
+                }
+            }
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => { log::info!("orphan_gc: purged {}", full); purged += 1; }
+                Err(e) => log::warn!("orphan_gc: failed to purge {}: {}", full, e),
+            }
+        }
+        if purged > 0 {
+            log::info!("orphan_gc: cycle complete, purged {} dataset(s)", purged);
+        }
+    }
+}
+
 /// Delete a Lance dataset (the .lance directory) from local fs or object store.
 /// Missing datasets are a no-op. Used by DropTable to prevent storage leak.
 async fn delete_lance_dataset(
@@ -1185,6 +1296,62 @@ async fn delete_lance_dataset(
         return Err(Box::new(e));
     }
     Ok(())
+}
+
+/// Hash-partition a RecordBatch into N sub-batches by the values of `on_columns`.
+/// Returns a Vec of length N (may contain empty batches for shards with no rows).
+/// Used by upsert_rows so each row is sent to exactly one shard.
+fn partition_batch_by_hash(
+    batch: &arrow::array::RecordBatch,
+    on_columns: &[String],
+    num_shards: usize,
+) -> Result<Vec<arrow::array::RecordBatch>, String> {
+    use arrow::array::{Array, UInt64Array};
+    use arrow::compute::take;
+    use std::hash::{Hash, Hasher};
+
+    if num_shards == 0 { return Err("num_shards=0".into()); }
+    if num_shards == 1 { return Ok(vec![batch.clone()]); }
+
+    // Resolve key column indices
+    let schema = batch.schema();
+    let key_indices: Vec<usize> = on_columns.iter()
+        .map(|c| schema.index_of(c).map_err(|e| format!("column '{c}': {e}")))
+        .collect::<Result<_, _>>()?;
+
+    // Compute shard index for each row via a stable hash of the key values.
+    let nrows = batch.num_rows();
+    let mut buckets: Vec<Vec<u64>> = (0..num_shards).map(|_| Vec::new()).collect();
+    for row in 0..nrows {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &ci in &key_indices {
+            let col = batch.column(ci);
+            // Hash via string representation of scalar for type-agnostic stability.
+            // (Not the fastest path, but correct for any primitive/string/binary.)
+            let formatted = arrow::util::display::array_value_to_string(col, row)
+                .map_err(|e| format!("hash row {row}: {e}"))?;
+            formatted.hash(&mut hasher);
+        }
+        let shard = (hasher.finish() % num_shards as u64) as usize;
+        buckets[shard].push(row as u64);
+    }
+
+    // Materialize each bucket as a RecordBatch via `take`.
+    let mut out = Vec::with_capacity(num_shards);
+    for indices in buckets {
+        if indices.is_empty() {
+            out.push(batch.slice(0, 0));
+            continue;
+        }
+        let idx_arr = UInt64Array::from(indices);
+        let cols: Vec<std::sync::Arc<dyn Array>> = batch.columns().iter()
+            .map(|c| take(c.as_ref(), &idx_arr, None).map_err(|e| format!("take: {e}")))
+            .collect::<Result<_, _>>()?;
+        let rb = arrow::array::RecordBatch::try_new(schema.clone(), cols)
+            .map_err(|e| format!("RecordBatch::try_new: {e}"))?;
+        out.push(rb);
+    }
+    Ok(out)
 }
 
 /// Split a RecordBatch into N roughly-equal partitions for auto-sharding.

@@ -124,6 +124,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_handle = service.pool_shutdown_handle();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
+    // Start orphan GC loop (opt-in, disabled by default — destructive).
+    if config.orphan_gc.enabled {
+        info!("Orphan GC enabled (interval={}s, min_age={}s)",
+            config.orphan_gc.interval_secs, config.orphan_gc.min_age_secs);
+        let gc_handle = service.orphan_gc_handle();
+        let gc_cfg = config.orphan_gc.clone();
+        tokio::spawn(async move {
+            lance_distributed_coordinator::service::orphan_gc_loop(gc_handle, gc_cfg).await;
+        });
+    }
+
     // Start REST/metrics HTTP server on port+1
     let rest_port = port + 1;
     tokio::spawn(async move {

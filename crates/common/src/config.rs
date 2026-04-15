@@ -50,6 +50,9 @@ pub struct ClusterConfig {
     /// Worker-side periodic compaction.
     #[serde(default)]
     pub compaction: CompactionConfig,
+    /// Coordinator-side orphan storage GC.
+    #[serde(default)]
+    pub orphan_gc: OrphanGcConfig,
 }
 
 impl ClusterConfig {
@@ -117,6 +120,39 @@ impl Default for ServerConfig {
             max_response_bytes: Self::default_max_response_bytes(),
             max_k: Self::default_max_k(),
             slow_query_ms: Self::default_slow_query_ms(),
+        }
+    }
+}
+
+/// Orphan storage GC configuration (coordinator-side).
+/// Scans the configured `default_table_path` for `.lance` directories that
+/// are not referenced by any known shard and deletes them. Guards against
+/// leaked datasets from failed CreateTable / rebalance / DropTable calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanGcConfig {
+    #[serde(default = "OrphanGcConfig::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "OrphanGcConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Minimum age (in seconds) before an unreferenced dataset is eligible
+    /// for deletion. Protects datasets that are in the middle of being
+    /// created/registered. Default: 3600 (1h).
+    #[serde(default = "OrphanGcConfig::default_min_age_secs")]
+    pub min_age_secs: u64,
+}
+
+impl OrphanGcConfig {
+    fn default_enabled() -> bool { false }           // opt-in: destructive
+    fn default_interval_secs() -> u64 { 3600 }       // 1h
+    fn default_min_age_secs() -> u64 { 3600 }        // 1h
+}
+
+impl Default for OrphanGcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_secs: Self::default_interval_secs(),
+            min_age_secs: Self::default_min_age_secs(),
         }
     }
 }
