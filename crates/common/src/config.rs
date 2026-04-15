@@ -103,7 +103,7 @@ impl ServerConfig {
     fn default_concurrency_limit() -> usize { 256 }
     fn default_max_concurrent_queries() -> usize { 200 }
     fn default_oversample_factor() -> u32 { 2 }
-    fn default_max_response_bytes() -> usize { 64 * 1024 * 1024 }
+    fn default_max_response_bytes() -> usize { 256 * 1024 * 1024 }
     fn default_max_k() -> u32 { 10_000 }
     fn default_slow_query_ms() -> u64 { 1000 }
 }

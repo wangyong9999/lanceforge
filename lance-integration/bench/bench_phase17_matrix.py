@@ -56,6 +56,16 @@ MID_MATRIX = {
     'nprobes':     [10],
 }
 
+# Large-scale: 1M at dim 128, reduced shard/conc grid for time budget.
+LARGE_MATRIX = {
+    'scale':       [1_000_000],
+    'dim':         [128],
+    'shards':      [1, 2, 4],
+    'concurrency': [10, 50],
+    'k':           [10],
+    'nprobes':     [10],
+}
+
 SMOKE_MATRIX = {
     'scale':       [10_000],
     'dim':         [128],
@@ -120,10 +130,13 @@ def start_cluster(num_workers, base_dir):
 
 
 def make_stub():
+    # Raise both receive and send limits. Client default ~4 MB, server is
+    # configured via max_response_bytes + 16 MiB headroom. 512 MiB lets us
+    # ingest ~1M × 128d vectors in a single CreateTable call.
     return pbg.LanceSchedulerServiceStub(
         grpc.insecure_channel(f"127.0.0.1:{COORD_PORT}",
-            options=[("grpc.max_receive_message_length", 256 * 1024 * 1024),
-                     ("grpc.max_send_message_length", 256 * 1024 * 1024)]))
+            options=[("grpc.max_receive_message_length", 512 * 1024 * 1024),
+                     ("grpc.max_send_message_length", 512 * 1024 * 1024)]))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -146,18 +159,41 @@ def ipc_bytes(batch):
 def ev(v): return struct.pack(f"<{len(v)}f", *v.tolist() if hasattr(v, 'tolist') else v)
 
 
-def ingest(stub, table_name, vecs, dim):
-    """Create a table with the given vectors. Returns num rows inserted."""
+def _make_batch(ids_range, vecs, dim):
     n = len(vecs)
-    batch = pa.record_batch([
-        pa.array(range(n), type=pa.int64()),
-        pa.FixedSizeListArray.from_arrays(
-            pa.array(vecs.flatten()), list_size=dim),
+    return pa.record_batch([
+        pa.array(list(ids_range), type=pa.int64()),
+        pa.FixedSizeListArray.from_arrays(pa.array(vecs.flatten()), list_size=dim),
     ], names=['id', 'vector'])
+
+
+def ingest(stub, table_name, vecs, dim, chunk_rows=None):
+    if chunk_rows is None:
+        # ~64 MB per chunk to stay under default server 256 MB limit even
+        # with overhead. 64MB / (dim × 4B) rows.
+        chunk_rows = max(10_000, (64 * 1024 * 1024) // (dim * 4))
+    """Create a table and (if large) stream the rest via AddRows.
+    Returns total rows inserted. Chunked to stay under gRPC message limits
+    (≈256 MB payload ≈ 500K rows at 128d fp32)."""
+    n = len(vecs)
+    first = min(chunk_rows, n)
+    # CreateTable with the first chunk
     r = stub.CreateTable(pb.CreateTableRequest(
-        table_name=table_name, arrow_ipc_data=ipc_bytes(batch)))
+        table_name=table_name,
+        arrow_ipc_data=ipc_bytes(_make_batch(range(first), vecs[:first], dim))))
     if r.error: raise RuntimeError(f"CreateTable: {r.error}")
-    return r.num_rows
+    total = r.num_rows
+    # Stream the rest
+    off = first
+    while off < n:
+        end = min(off + chunk_rows, n)
+        br = _make_batch(range(off, end), vecs[off:end], dim)
+        ar = stub.AddRows(pb.AddRowsRequest(
+            table_name=table_name, arrow_ipc_data=ipc_bytes(br)))
+        if ar.error: raise RuntimeError(f"AddRows: {ar.error}")
+        total += ar.affected_rows
+        off = end
+    return total
 
 
 def brute_force_gt(train, query, k):
@@ -189,7 +225,12 @@ def run_single_query(stub, table, vec, dim, k, nprobes):
 
 def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids):
     """Run WARMUP + MEASURE queries at a given concurrency level.
-    Returns dict of metrics: p50, p95, p99, qps, recall, errors."""
+    Returns dict of metrics: p50, p95, p99, qps, recall, errors.
+
+    Each worker thread uses its OWN channel+stub. A single shared channel
+    serializes through one HTTP/2 connection (and its stream concurrency
+    limit), which Phase 17 profiling revealed as the conc=50 collapse cause.
+    """
     # Warmup (single-threaded)
     for i in range(WARMUP_QUERIES):
         run_single_query(stub, table, queries[i % len(queries)], dim, k, nprobes)
@@ -201,13 +242,15 @@ def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids):
     total = MEASURE_QUERIES
 
     def worker(tid):
+        # Per-thread channel + stub (avoids shared HTTP/2 serialization).
+        local_stub = make_stub()
         local_lat = []
         local_rec = []
         local_err = 0
         for i in range(total):
             q_idx = (tid * total + i) % len(queries)
             try:
-                dt, ids = run_single_query(stub, table, queries[q_idx], dim, k, nprobes)
+                dt, ids = run_single_query(local_stub, table, queries[q_idx], dim, k, nprobes)
                 local_lat.append(dt)
                 if q_idx < len(gt_ids):
                     hits = len(set(ids) & set(gt_ids[q_idx][:RECALL_K]))
@@ -260,11 +303,16 @@ def run_matrix(matrix, smoke):
     for scale in matrix['scale']:
         for dim in matrix['dim']:
             # Generate data ONCE per (scale, dim) — reused across shard counts
-            print(f"[data] synthesizing {scale} × {dim}")
+            print(f"[data] synthesizing {scale} × {dim}", flush=True)
             train = synthesize(scale, dim, seed=42)
-            test = synthesize(min(GROUND_TRUTH_N, 100), dim, seed=7)
-            print(f"[data] computing ground truth for {len(test)} queries (brute force)")
+            # Scale ground-truth query count with dataset size (big datasets →
+            # brute-force GT is expensive, so use fewer queries).
+            gt_n = 50 if scale <= 100_000 else 20
+            test = synthesize(gt_n, dim, seed=7)
+            print(f"[data] computing ground truth for {len(test)} queries (brute force)", flush=True)
+            t_gt = time.perf_counter()
             gt = [brute_force_gt(train, q, RECALL_K) for q in test]
+            print(f"[data] GT done in {time.perf_counter()-t_gt:.1f}s", flush=True)
 
             for shards in matrix['shards']:
                 # Start cluster with `shards` workers
@@ -366,10 +414,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--smoke', action='store_true', help='Small matrix (~5 min)')
     ap.add_argument('--mid', action='store_true', help='Mid matrix: 100K × shards 1/2/4 × conc 1/10/50')
+    ap.add_argument('--large', action='store_true', help='Large matrix: 1M × 128d × shards 1/2/4 × conc 10/50')
     ap.add_argument('--scale', type=int, help='Override: single scale only')
     args = ap.parse_args()
 
-    matrix = SMOKE_MATRIX if args.smoke else (MID_MATRIX if args.mid else FULL_MATRIX)
+    if args.smoke: matrix = SMOKE_MATRIX
+    elif args.mid: matrix = MID_MATRIX
+    elif args.large: matrix = LARGE_MATRIX
+    else: matrix = FULL_MATRIX
     if args.scale:
         matrix['scale'] = [args.scale]
 

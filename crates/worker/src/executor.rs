@@ -118,17 +118,24 @@ impl LanceTableRegistry {
         }
         validate_descriptor(descriptor)?;
 
-        let tables = self.tables.read().await;
-
-        // Get table version for cache key
-        let dataset_version = {
-            let targets = resolve_tables_inner(&tables, &descriptor.table_name)?;
-            let mut max_v = 0u64;
-            for (_, t) in &targets {
-                max_v = max_v.max(t.version().await.unwrap_or(0));
-            }
-            max_v
+        // Snapshot the matching tables under the read lock, then release the lock
+        // immediately. Previously the read lock was held across every async I/O
+        // call (table.version, execute_on_table, cache I/O), which caused severe
+        // contention at high concurrency (Phase 17 benchmark: conc=50 → QPS
+        // collapsed from ~2000 to ~200). By snapshotting Arc-like handles we
+        // give each request its own working set and reduce the read lock to
+        // O(num_shards) time.
+        let target_tables: Vec<(String, lancedb::Table)> = {
+            let tables = self.tables.read().await;
+            let matched = resolve_tables_inner(&tables, &descriptor.table_name)?;
+            matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
         };
+
+        // Get table version for cache key (I/O done without holding the lock).
+        let mut dataset_version = 0u64;
+        for (_, t) in &target_tables {
+            dataset_version = dataset_version.max(t.version().await.unwrap_or(0));
+        }
 
         // Check cache
         let cache_key = crate::cache::QueryCacheKey::from_descriptor_with_version(descriptor, dataset_version);
@@ -137,9 +144,7 @@ impl LanceTableRegistry {
             return Ok(cached);
         }
 
-        let target_tables = resolve_tables_inner(&tables, &descriptor.table_name)?;
         let mut all_batches: Vec<RecordBatch> = Vec::new();
-
         for (name, table) in &target_tables {
             debug!("Executing query on shard: {}", name);
             let batch = execute_on_table(table, descriptor).await?;
@@ -147,7 +152,6 @@ impl LanceTableRegistry {
                 all_batches.push(batch);
             }
         }
-        drop(tables); // Release read lock before cache write
 
         if all_batches.is_empty() {
             return Ok(RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())));
