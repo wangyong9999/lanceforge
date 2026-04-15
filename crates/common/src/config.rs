@@ -188,8 +188,22 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub tls_ca_cert: Option<String>,
     /// API keys for client authentication (empty = no auth required).
+    /// Legacy format: all keys grant Admin role.
     #[serde(default)]
     pub api_keys: Vec<String>,
+    /// Role-based API keys: each entry binds a key to a role (read/write/admin).
+    /// When non-empty, overrides `api_keys`. Keys listed here gain only the
+    /// stated role; missing keys are rejected.
+    #[serde(default)]
+    pub api_keys_rbac: Vec<ApiKeyEntry>,
+}
+
+/// Single role-bound API key entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyEntry {
+    pub key: String,
+    /// "read", "write", or "admin" (case-insensitive).
+    pub role: String,
 }
 
 impl SecurityConfig {
@@ -203,7 +217,7 @@ impl SecurityConfig {
     }
     /// Whether API key authentication is required.
     pub fn auth_enabled(&self) -> bool {
-        !self.api_keys.is_empty()
+        !self.api_keys.is_empty() || !self.api_keys_rbac.is_empty()
     }
 }
 

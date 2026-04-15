@@ -111,13 +111,26 @@ impl FileMetaStore {
         if let Some(parent) = Path::new(&self.path).parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
-        // Atomic write: write to temp file then rename
+        // Durable atomic write: write temp → fsync file → rename → fsync parent dir
         let tmp = format!("{}.tmp", self.path);
-        tokio::fs::write(&tmp, &json).await
-            .map_err(|e| MetaError::StorageError(format!("write {tmp}: {e}")))?;
+        {
+            let mut f = tokio::fs::File::create(&tmp).await
+                .map_err(|e| MetaError::StorageError(format!("create {tmp}: {e}")))?;
+            use tokio::io::AsyncWriteExt;
+            f.write_all(json.as_bytes()).await
+                .map_err(|e| MetaError::StorageError(format!("write {tmp}: {e}")))?;
+            f.sync_all().await
+                .map_err(|e| MetaError::StorageError(format!("fsync {tmp}: {e}")))?;
+        }
         tokio::fs::rename(&tmp, &self.path).await
             .map_err(|e| MetaError::StorageError(format!("rename: {e}")))?;
-        debug!("FileMetaStore: persisted to {}", self.path);
+        // fsync parent dir to persist the rename itself
+        if let Some(parent) = Path::new(&self.path).parent() {
+            if let Ok(dir) = tokio::fs::File::open(parent).await {
+                let _ = dir.sync_all().await;
+            }
+        }
+        debug!("FileMetaStore: persisted to {} (fsync'd)", self.path);
         Ok(())
     }
 }

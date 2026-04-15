@@ -44,6 +44,8 @@ pub struct CoordinatorService {
     max_concurrent_queries: usize,
     /// Shard name → URI registry for LoadShard RPCs during rebalance.
     shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Auth + RBAC interceptor (None = no auth).
+    auth: Option<Arc<super::auth::ApiKeyInterceptor>>,
 }
 
 impl CoordinatorService {
@@ -176,7 +178,22 @@ impl CoordinatorService {
             write_counter: std::sync::atomic::AtomicUsize::new(0),
             max_concurrent_queries: max_queries,
             shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
+            auth: None,
         }
+    }
+
+    /// Attach an auth interceptor for RBAC enforcement at method level.
+    pub fn with_auth(mut self, auth: Arc<super::auth::ApiKeyInterceptor>) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Authorize a request against a required permission.
+    fn check_perm<T>(&self, req: &Request<T>, perm: super::auth::Permission) -> Result<(), Status> {
+        if let Some(a) = &self.auth {
+            a.authorize(req, perm)?;
+        }
+        Ok(())
     }
 }
 
@@ -186,6 +203,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<AnnSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!(
                 "Too many concurrent queries (max {})", self.max_concurrent_queries
@@ -241,6 +259,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<FtsSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -270,6 +289,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<HybridSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -301,8 +321,9 @@ impl LanceSchedulerService for CoordinatorService {
 
     async fn get_cluster_status(
         &self,
-        _request: Request<pb::ClusterStatusRequest>,
+        request: Request<pb::ClusterStatusRequest>,
     ) -> Result<Response<pb::ClusterStatusResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let statuses = self.pool.worker_statuses().await;
         let mut total_shards = 0u32;
         let mut total_rows = 0u64;
@@ -331,6 +352,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::AddRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Write)?;
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -386,6 +408,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::DeleteRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Write)?;
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -446,6 +469,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::UpsertRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Write)?;
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -509,6 +533,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::CreateTableRequest>,
     ) -> Result<Response<pb::CreateTableResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -577,21 +602,45 @@ impl LanceSchedulerService for CoordinatorService {
             mapping.insert(shard_name.clone(), vec![worker_id.clone()]);
         }
 
-        // Gather results
+        // Gather results; on ANY failure, saga-rollback all successfully created shards.
+        let mut created_ok: Vec<(String, String)> = Vec::new(); // (shard_name, worker_id)
+        let mut first_err: Option<String> = None;
         for handle in handles {
             match handle.await {
-                Ok((shard_name, _wid, Ok(resp))) => {
+                Ok((shard_name, wid, Ok(resp))) => {
                     let r = resp.into_inner();
                     if r.error.is_empty() {
                         total_created += r.num_rows;
-                        shard_uris_new.push((shard_name, r.uri));
-                    } else {
-                        return Err(Status::internal(format!("CreateLocalShard failed: {}", r.error)));
+                        shard_uris_new.push((shard_name.clone(), r.uri));
+                        created_ok.push((shard_name, wid));
+                    } else if first_err.is_none() {
+                        first_err = Some(format!("CreateLocalShard failed: {}", r.error));
                     }
                 }
-                Ok((_, _, Err(e))) => return Err(Status::internal(format!("CreateLocalShard RPC: {e}"))),
-                Err(e) => return Err(Status::internal(format!("Spawn error: {e}"))),
+                Ok((_, _, Err(e))) => {
+                    if first_err.is_none() {
+                        first_err = Some(format!("CreateLocalShard RPC: {e}"));
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(format!("Spawn error: {e}"));
+                    }
+                }
             }
+        }
+        if let Some(err) = first_err {
+            // Saga compensate: unload every successfully created shard
+            warn!("CreateTable '{}' failed ({}), rolling back {} shard(s)",
+                req.table_name, err, created_ok.len());
+            for (shard_name, wid) in &created_ok {
+                if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
+                    let _ = client.unload_shard(Request::new(pb::UnloadShardRequest {
+                        shard_name: shard_name.clone(),
+                    })).await;
+                }
+            }
+            return Err(Status::internal(err));
         }
 
         // Register all shards in shard state
@@ -615,8 +664,9 @@ impl LanceSchedulerService for CoordinatorService {
 
     async fn list_tables(
         &self,
-        _request: Request<pb::ListTablesRequest>,
+        request: Request<pb::ListTablesRequest>,
     ) -> Result<Response<pb::ListTablesResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let tables = self.shard_state.all_tables().await;
         Ok(Response::new(pb::ListTablesResponse {
             table_names: tables,
@@ -628,6 +678,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::DropTableRequest>,
     ) -> Result<Response<pb::DropTableResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -652,6 +703,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::CreateIndexRequest>,
     ) -> Result<Response<pb::CreateIndexResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
         let req = request.into_inner();
         if req.table_name.is_empty() || req.column.is_empty() {
             return Err(Status::invalid_argument("table_name and column required"));
@@ -693,6 +745,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::GetSchemaRequest>,
     ) -> Result<Response<pb::GetSchemaResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let req = request.into_inner();
         let executors = self.shard_state.executors_for_table(&req.table_name).await;
         if executors.is_empty() {
@@ -720,6 +773,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::CountRowsRequest>,
     ) -> Result<Response<pb::CountRowsResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
         let req = request.into_inner();
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
@@ -753,8 +807,9 @@ impl LanceSchedulerService for CoordinatorService {
 
     async fn rebalance(
         &self,
-        _request: Request<pb::RebalanceRequest>,
+        request: Request<pb::RebalanceRequest>,
     ) -> Result<Response<pb::RebalanceResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
         use lance_distributed_meta::shard_manager::{assign_shards, compute_diff, ShardPolicy};
 
         // Only consider healthy executors for rebalance (skip dead workers)
@@ -904,6 +959,7 @@ impl LanceSchedulerService for CoordinatorService {
         &self,
         request: Request<pb::RegisterWorkerRequest>,
     ) -> Result<Response<pb::RegisterWorkerResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
         let req = request.into_inner();
         if req.worker_id.is_empty() {
             return Err(Status::invalid_argument("worker_id required"));

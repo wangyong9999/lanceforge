@@ -8,7 +8,7 @@ use lance_distributed_coordinator::auth::ApiKeyInterceptor;
 use lance_distributed_coordinator::ha::HaConfig;
 use lance_distributed_coordinator::service::CoordinatorService;
 use lance_distributed_proto::lance_scheduler_service_server::LanceSchedulerServiceServer;
-use log::info;
+use log::{info, warn};
 use tokio::signal;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -91,11 +91,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("API key authentication enabled ({} keys configured)", config.security.api_keys.len());
     }
 
-    let service = if let Some(ref metadata_path) = config.metadata_path {
+    let mut service = if let Some(ref metadata_path) = config.metadata_path {
         CoordinatorService::with_meta_state(&config, query_timeout, metadata_path).await?
     } else {
         CoordinatorService::new(&config, query_timeout)
     };
+
+    // Build RBAC interceptor: prefer `api_keys_rbac`, fall back to legacy `api_keys`.
+    use lance_distributed_coordinator::auth::Role;
+    use std::collections::HashMap as StdMap;
+    let mut role_map: StdMap<String, Role> = StdMap::new();
+    for e in &config.security.api_keys_rbac {
+        if let Some(r) = Role::parse(&e.role) {
+            role_map.insert(e.key.clone(), r);
+        } else {
+            warn!("Ignoring api_keys_rbac entry with invalid role: {}", e.role);
+        }
+    }
+    for k in &config.security.api_keys {
+        role_map.entry(k.clone()).or_insert(Role::Admin);
+    }
+    let auth_arc = std::sync::Arc::new(
+        if role_map.is_empty() {
+            ApiKeyInterceptor::new(vec![])
+        } else {
+            ApiKeyInterceptor::with_roles(role_map.clone())
+        }
+    );
+    service = service.with_auth(auth_arc.clone());
     let metrics = service.metrics();
     // Keep a handle for graceful shutdown
     let shutdown_handle = service.pool_shutdown_handle();
@@ -107,8 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         lance_distributed_coordinator::rest::start_rest_server(metrics, rest_port).await;
     });
 
-    let auth = ApiKeyInterceptor::new(config.security.api_keys.clone());
-    let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth.check(req));
+    // Outer interceptor still enforces authentication (presence + valid key).
+    // Method-level authorize() inside the service enforces per-role permissions.
+    let auth_outer = auth_arc.clone();
+    let svc = LanceSchedulerServiceServer::with_interceptor(service, move |req| auth_outer.check(req));
 
     let mut server = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(keepalive_interval))
