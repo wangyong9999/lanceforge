@@ -178,9 +178,11 @@ impl CoordinatorService {
                 Err(e) => warn!("Failed to read TLS CA cert {}: {}", ca_path, e),
             }
         }
+        let shard_uris_arc = Arc::new(tokio::sync::RwLock::new(shard_uris));
+        let pool = pool.with_shard_uris(shard_uris_arc.clone());
         let pool = Arc::new(pool);
 
-        info!("CoordinatorService: {} executors, {} shard URIs", config.executors.len(), shard_uris.len());
+        info!("CoordinatorService: {} executors", config.executors.len());
 
         // Start connection pool with ShardState integration
         pool.start_background(Some(shard_state.clone()));
@@ -212,7 +214,7 @@ impl CoordinatorService {
             replica_factor: config.replica_factor,
             write_counter: std::sync::atomic::AtomicUsize::new(0),
             max_concurrent_queries: max_queries,
-            shard_uris: Arc::new(tokio::sync::RwLock::new(shard_uris)),
+            shard_uris: shard_uris_arc,
             auth: None,
             max_response_bytes: config.server.max_response_bytes,
             max_k: config.server.max_k,

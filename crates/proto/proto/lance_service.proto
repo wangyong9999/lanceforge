@@ -107,6 +107,7 @@ message HealthCheckResponse {
   bool healthy = 1;
   uint32 loaded_shards = 2;
   uint64 total_rows = 3;
+  repeated string shard_names = 4;   // names of all loaded shards (for recovery)
 }
 
 message ClusterStatusRequest {}

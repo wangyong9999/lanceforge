@@ -258,10 +258,12 @@ impl LanceExecutorService for WorkerService {
         _request: Request<pb::HealthCheckRequest>,
     ) -> Result<Response<pb::HealthCheckResponse>, Status> {
         let (loaded_shards, total_rows) = self.registry.status().await;
+        let shard_names = self.registry.shard_names().await;
         Ok(Response::new(pb::HealthCheckResponse {
             healthy: true,
             loaded_shards,
             total_rows,
+            shard_names,
         }))
     }
 }

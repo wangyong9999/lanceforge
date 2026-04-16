@@ -82,7 +82,7 @@ pub struct CompactResponse {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthCheckRequest {}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HealthCheckResponse {
     #[prost(bool, tag = "1")]
     pub healthy: bool,
@@ -90,6 +90,9 @@ pub struct HealthCheckResponse {
     pub loaded_shards: u32,
     #[prost(uint64, tag = "3")]
     pub total_rows: u64,
+    /// names of all loaded shards (for recovery)
+    #[prost(string, repeated, tag = "4")]
+    pub shard_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClusterStatusRequest {}

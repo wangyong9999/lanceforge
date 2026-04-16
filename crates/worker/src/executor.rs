@@ -465,6 +465,11 @@ impl LanceTableRegistry {
         Ok(())
     }
 
+    /// Get names of all loaded shards (for health check reporting).
+    pub async fn shard_names(&self) -> Vec<String> {
+        self.shard_row_counts.read().await.keys().cloned().collect()
+    }
+
     /// Get worker status: (loaded_shard_count, total_rows).
     /// Uses cached row counts (updated by writes/load/create) to avoid
     /// N S3 round-trips per health check. The version poller background

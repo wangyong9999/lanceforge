@@ -20,7 +20,7 @@ enum HealthCheckResult {
         host: String,
         port: u16,
     },
-    Healthy { loaded_shards: u32, total_rows: u64 },
+    Healthy { loaded_shards: u32, total_rows: u64, shard_names: Vec<String> },
     Failed,
 }
 
@@ -57,6 +57,8 @@ pub struct ConnectionPool {
     keepalive_interval_secs: u64,
     /// HTTP/2 keepalive timeout in seconds.
     keepalive_timeout_secs: u64,
+    /// Shard URI registry (shared with CoordinatorService for recovery).
+    shard_uris: Option<Arc<tokio::sync::RwLock<HashMap<String, String>>>>,
 }
 
 impl ConnectionPool {
@@ -79,12 +81,26 @@ impl ConnectionPool {
             ping_timeout_secs: health_config.ping_timeout_secs,
             keepalive_interval_secs: server_config.keepalive_interval_secs,
             keepalive_timeout_secs: server_config.keepalive_timeout_secs,
+            shard_uris: None,
         }
     }
 
     /// Signal the health check loop to stop.
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
+    }
+
+    /// Attach shard URI registry for automatic shard recovery.
+    pub fn with_shard_uris(mut self, uris: Arc<tokio::sync::RwLock<HashMap<String, String>>>) -> Self {
+        self.shard_uris = Some(uris);
+        self
+    }
+
+    /// Look up a shard URI for recovery LoadShard.
+    async fn get_shard_uri(&self, shard_name: &str) -> Option<String> {
+        if let Some(ref uris) = self.shard_uris {
+            uris.read().await.get(shard_name).cloned()
+        } else { None }
     }
 
     /// Enable TLS for worker connections using a CA certificate.
@@ -242,6 +258,7 @@ impl ConnectionPool {
                             results.push((wid.clone(), HealthCheckResult::Healthy {
                                 loaded_shards: r.loaded_shards,
                                 total_rows: r.total_rows,
+                                shard_names: r.shard_names,
                             }));
                         }
                         _ => {
@@ -265,7 +282,7 @@ impl ConnectionPool {
                             ss.register_executor(&wid, &host, port).await;
                         }
                     }
-                    HealthCheckResult::Healthy { loaded_shards, total_rows } => {
+                    HealthCheckResult::Healthy { loaded_shards, total_rows, shard_names } => {
                         let mut workers = self.workers.write().await;
                         if let Some(ws) = workers.get_mut(&wid) {
                             ws.healthy = true;
@@ -273,6 +290,32 @@ impl ConnectionPool {
                             ws.consecutive_failures = 0;
                             ws.loaded_shards = loaded_shards;
                             ws.total_rows = total_rows;
+                        }
+                        // Shard recovery: check if worker is missing expected shards
+                        if let Some(ref ss) = shard_state {
+                            let actual: std::collections::HashSet<String> = shard_names.into_iter().collect();
+                            // Find shards assigned to this worker that it doesn't have loaded
+                            for table in ss.all_tables().await {
+                                let routing = ss.get_shard_routing(&table).await;
+                                for (shard, primary, secondary) in &routing {
+                                    let assigned = primary == &wid
+                                        || secondary.as_ref().is_some_and(|s| s == &wid);
+                                    if assigned && !actual.contains(shard) {
+                                        // Shard missing — attempt recovery via LoadShard
+                                        if let Ok(mut client) = self.get_healthy_client(&wid).await {
+                                            let uri = self.get_shard_uri(shard).await;
+                                            if let Some(uri) = uri {
+                                                info!("Shard recovery: loading {} on {} (missing after restart)", shard, wid);
+                                                let _ = client.load_shard(Request::new(pb::LoadShardRequest {
+                                                    shard_name: shard.clone(),
+                                                    uri,
+                                                    storage_options: std::collections::HashMap::new(),
+                                                })).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     HealthCheckResult::Failed => {
