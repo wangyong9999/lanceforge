@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sdk', 'python'
 
 from test_helpers import wait_for_grpc
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_rag_validation"
 COORD_PORT = 53000
 DIM = 384  # all-MiniLM-L6-v2 dimension

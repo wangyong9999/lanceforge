@@ -22,7 +22,7 @@ from recall_benchmark import (
     ev, BASE
 )
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 DATASET_DIR = os.path.join(os.path.dirname(__file__), 'datasets')
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), 'results')
 

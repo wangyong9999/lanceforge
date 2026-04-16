@@ -28,7 +28,7 @@ import grpc, yaml
 import lance_service_pb2 as pb
 import lance_service_pb2_grpc as pbg
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 OUTDIR = os.path.join(os.path.dirname(__file__), 'results', 'phase17')
 os.makedirs(OUTDIR, exist_ok=True)
 

@@ -33,7 +33,7 @@ DIM = 32
 ROWS_PER_SHARD = 10000
 NUM_SHARDS = 3
 SCHEDULER_ADDR = "127.0.0.1:50850"
-BIN_DIR = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN_DIR = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 CFG_PATH = "/tmp/lance_minio_test/cluster_config.yaml"
 
 processes = []

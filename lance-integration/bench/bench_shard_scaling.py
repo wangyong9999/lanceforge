@@ -17,7 +17,7 @@ from recall_benchmark import (
     generate_synthetic_dataset, compute_recall, create_sharded_lance, ev, BASE
 )
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 DIM = 128
 N_VECTORS = 500000
 N_QUERIES = 100

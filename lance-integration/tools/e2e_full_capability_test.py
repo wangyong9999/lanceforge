@@ -37,7 +37,7 @@ import lance_service_pb2 as pb
 import lance_service_pb2_grpc as pb_grpc
 from test_helpers import wait_for_grpc, wait_for_process
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_capability_test"
 COORD_PORT = 54000
 REST_PORT = COORD_PORT + 1

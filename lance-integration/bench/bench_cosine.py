@@ -97,7 +97,7 @@ def distributed_search_metric(queries, dim, k, nprobes, metric_type,
 
 def run_cosine_bench():
     import yaml, subprocess
-    BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+    BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 
     print("=" * 60)
     print("  Cosine / Inner Product Distance Benchmark")

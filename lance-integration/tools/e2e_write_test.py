@@ -30,7 +30,7 @@ import lance_service_pb2_grpc
 DIM = 32
 ROWS_PER_SHARD = 5000
 NUM_SHARDS = 2
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_write_test"
 
 processes = []

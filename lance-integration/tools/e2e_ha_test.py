@@ -23,7 +23,7 @@ import pyarrow as pa
 import lance
 import yaml
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_ha_test"
 DIM = 32
 COORD_PORT = 56000

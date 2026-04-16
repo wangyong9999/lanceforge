@@ -22,7 +22,7 @@ import lance
 import grpc
 import yaml
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_compact_test"
 DIM = 16
 COORD_PORT = 57500

@@ -22,7 +22,7 @@ ROWS_PER_SHARD = 10000
 NUM_SHARDS = 3
 BASE_DIR = "/tmp/lance_new_crates_test"
 # New binary names from crates/
-BIN_DIR = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN_DIR = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 COORDINATOR_BIN = f"{BIN_DIR}/lance-coordinator"
 WORKER_BIN = f"{BIN_DIR}/lance-worker"
 

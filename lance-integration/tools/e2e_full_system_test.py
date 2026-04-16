@@ -23,7 +23,7 @@ import lance_service_pb2_grpc
 DIM = 64
 ROWS_PER_SHARD = 50000  # 150K total
 NUM_SHARDS = 3
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lance_full_system_test"
 MINIO_OPTS = {
     'aws_access_key_id': 'lanceadmin',

@@ -884,6 +884,8 @@ impl LanceSchedulerService for CoordinatorService {
         let empty: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         self.shard_state.register_table(&req.table_name, empty).await;
         self.metrics.remove_table(&req.table_name);
+        // Clean up DDL lock to prevent leak
+        self.ddl_locks.write().await.remove(&req.table_name);
         info!("Dropped table '{}' (purged {} shard(s) from storage)", req.table_name, shard_uris.len());
         Ok(Response::new(pb::DropTableResponse { error: String::new() }))
     }
@@ -1259,6 +1261,9 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::GetByIdsRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
+        })?;
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -1353,6 +1358,9 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::QueryRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
+        })?;
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -1449,6 +1457,9 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::BatchSearchRequest>,
     ) -> Result<Response<pb::BatchSearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        let _permit = self.query_semaphore.try_acquire().map_err(|_| {
+            Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
+        })?;
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));

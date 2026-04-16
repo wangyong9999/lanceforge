@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
 
 DIM = 128
 BASE_DIR = "/tmp/lanceforge_recall_bench"
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 
 def generate_filterable_dataset(n=200000, dim=128, n_queries=200, n_categories=10, seed=42):
     """Generate dataset with category column for filter benchmarks."""

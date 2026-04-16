@@ -239,7 +239,7 @@ def distributed_search(queries, dim, k, nprobes, coordinator_addr="127.0.0.1:512
 
 # ── Cluster Management ──
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_recall_bench"
 
 processes = []

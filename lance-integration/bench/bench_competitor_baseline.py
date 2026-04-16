@@ -197,7 +197,7 @@ service:
 def bench_lanceforge(base, queries, categories, gt_unfiltered, gt_filtered):
     import lance, pyarrow as pa, yaml
 
-    BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+    BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
     base_dir = "/tmp/lanceforge_competitor_bench"
     os.makedirs(base_dir, exist_ok=True)
 

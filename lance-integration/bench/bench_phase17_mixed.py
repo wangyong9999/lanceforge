@@ -21,7 +21,7 @@ import grpc, yaml
 import lance_service_pb2 as pb
 import lance_service_pb2_grpc as pbg
 
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = '/tmp/lanceforge_bench17_mixed'
 COORD_PORT = 59950
 WORKER_PORTS = [59900, 59901]

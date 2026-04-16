@@ -31,7 +31,7 @@ import grpc
 import yaml
 
 DIM = 32
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_enterprise_test"
 COORD_PORT = 52000
 REST_PORT = COORD_PORT + 1

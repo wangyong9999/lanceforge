@@ -15,7 +15,7 @@ import lance_service_pb2 as pb
 import lance_service_pb2_grpc as pbg
 
 DIM = 8
-BIN = os.path.expanduser("~/cc/lance-ballista/target/release")
+BIN = os.environ.get("LANCEFORGE_BIN", os.path.join(os.path.dirname(__file__), "..", "..", "target", "release"))
 BASE = "/tmp/lanceforge_phase15_test"
 COORD_PORT = 56950
 WORKER_PORTS = [56900, 56901]
