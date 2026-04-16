@@ -409,6 +409,25 @@ class LanceForgeClient:
             raise RuntimeError(f"CountRows failed: {resp.error}")
         return resp.count
 
+    def get_by_ids(self, table, ids, id_column="id", columns=None):
+        """Point lookup: get rows by primary key IDs.
+
+        Args:
+            table: Table name
+            ids: List of integer IDs to look up
+            id_column: Name of the primary key column (default "id")
+            columns: Optional list of columns to return
+
+        Returns:
+            pyarrow.Table with matching rows
+        """
+        req = pb.GetByIdsRequest(
+            table_name=table, ids=list(ids), id_column=id_column or "id")
+        if columns:
+            req.columns.extend(columns)
+        resp = self._call(self._stub.GetByIds, req)
+        return self._decode_response(resp)
+
     def get_schema(self, table):
         """Get schema columns for a table.
 

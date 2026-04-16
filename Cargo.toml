@@ -40,7 +40,7 @@ edition = "2024"
 rust-version = "1.88.0"
 
 [workspace.dependencies]
-arrow = { version = "57", features = ["ipc_compression"] }
+arrow = { version = "57", features = ["ipc_compression", "json"] }
 arrow-flight = { version = "57", features = ["flight-sql-experimental"] }
 clap = { version = "4.5", features = ["derive", "cargo"] }
 datafusion = "52"

@@ -115,6 +115,11 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.MoveShardRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.MoveShardResponse.FromString,
                 _registered_method=True)
+        self.GetByIds = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/GetByIds',
+                request_serializer=lance__service__pb2.GetByIdsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.SearchResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -220,6 +225,13 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetByIds(self, request, context):
+        """Point lookup
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -302,6 +314,11 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.MoveShard,
                     request_deserializer=lance__service__pb2.MoveShardRequest.FromString,
                     response_serializer=lance__service__pb2.MoveShardResponse.SerializeToString,
+            ),
+            'GetByIds': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetByIds,
+                    request_deserializer=lance__service__pb2.GetByIdsRequest.FromString,
+                    response_serializer=lance__service__pb2.SearchResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -747,6 +764,33 @@ class LanceSchedulerService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def GetByIds(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/GetByIds',
+            lance__service__pb2.GetByIdsRequest.SerializeToString,
+            lance__service__pb2.SearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class LanceExecutorServiceStub(object):
     """Service running on each Executor for receiving queries from Scheduler.
@@ -797,6 +841,11 @@ class LanceExecutorServiceStub(object):
                 '/lance.distributed.LanceExecutorService/CreateLocalShard',
                 request_serializer=lance__service__pb2.CreateLocalShardRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.CreateLocalShardResponse.FromString,
+                _registered_method=True)
+        self.LocalGetByIds = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/LocalGetByIds',
+                request_serializer=lance__service__pb2.GetByIdsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.LocalSearchResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
@@ -857,6 +906,12 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def LocalGetByIds(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -906,6 +961,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.CreateLocalShard,
                     request_deserializer=lance__service__pb2.CreateLocalShardRequest.FromString,
                     response_serializer=lance__service__pb2.CreateLocalShardResponse.SerializeToString,
+            ),
+            'LocalGetByIds': grpc.unary_unary_rpc_method_handler(
+                    servicer.LocalGetByIds,
+                    request_deserializer=lance__service__pb2.GetByIdsRequest.FromString,
+                    response_serializer=lance__service__pb2.LocalSearchResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -1130,6 +1190,33 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/CreateLocalShard',
             lance__service__pb2.CreateLocalShardRequest.SerializeToString,
             lance__service__pb2.CreateLocalShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LocalGetByIds(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/LocalGetByIds',
+            lance__service__pb2.GetByIdsRequest.SerializeToString,
+            lance__service__pb2.LocalSearchResponse.FromString,
             options,
             channel_credentials,
             insecure,

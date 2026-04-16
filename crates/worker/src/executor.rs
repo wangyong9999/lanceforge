@@ -356,6 +356,46 @@ impl LanceTableRegistry {
         info!("Unloaded shard: {}", shard_name);
     }
 
+    /// Point lookup: get rows by primary key IDs.
+    pub async fn get_by_ids(
+        &self,
+        table_name: &str,
+        ids: &[i64],
+        id_column: &str,
+        columns: &[String],
+    ) -> Result<RecordBatch> {
+        use lancedb::query::{ExecutableQuery, QueryBase};
+        let targets: Vec<(String, lancedb::Table)> = {
+            let tables = self.tables.read().await;
+            let matched = resolve_tables_inner(&tables, table_name)?;
+            matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
+        };
+
+        let id_list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
+        let filter = format!("{} IN ({})", id_column, id_list);
+
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        for (_, table) in &targets {
+            let mut builder = table.query().only_if(filter.clone());
+            if !columns.is_empty() {
+                builder = builder.select(lancedb::query::Select::Columns(
+                    columns.iter().map(|c| c.as_str().into()).collect()
+                ));
+            }
+            let stream = builder.execute().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let batch: Vec<RecordBatch> = stream.try_collect().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            all_batches.extend(batch.into_iter().filter(|b| b.num_rows() > 0));
+        }
+
+        if all_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())));
+        }
+        arrow::compute::concat_batches(&all_batches[0].schema(), &all_batches)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+    }
+
     /// Create an index on a table's column.
     pub async fn create_index_on_table(
         &self,

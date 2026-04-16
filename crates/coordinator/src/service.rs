@@ -1251,6 +1251,100 @@ impl LanceSchedulerService for CoordinatorService {
             error: String::new(),
         }))
     }
+
+    async fn get_by_ids(
+        &self,
+        request: Request<pb::GetByIdsRequest>,
+    ) -> Result<Response<pb::SearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        if req.ids.is_empty() {
+            return Ok(Response::new(pb::SearchResponse {
+                arrow_ipc_data: vec![], num_rows: 0, error: String::new(),
+                truncated: false, next_offset: 0, latency_ms: 0,
+            }));
+        }
+
+        let t0 = std::time::Instant::now();
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
+        }
+
+        // Fan out GetByIds to all workers (IDs may be on any shard)
+        let mut handles = Vec::new();
+        let statuses = self.pool.worker_statuses().await;
+        let healthy: std::collections::HashSet<String> = statuses.iter()
+            .filter(|(_, _, _, h, _, _, _)| *h)
+            .map(|(id, _, _, _, _, _, _)| id.clone())
+            .collect();
+
+        // Deduplicate worker IDs
+        let mut worker_ids = std::collections::HashSet::new();
+        for (_, primary, secondary) in &routing {
+            if healthy.contains(primary) {
+                worker_ids.insert(primary.clone());
+            } else if let Some(sec) = secondary
+                && healthy.contains(sec) {
+                    worker_ids.insert(sec.clone());
+                }
+        }
+
+        let shared_req = std::sync::Arc::new(req);
+        for wid in &worker_ids {
+            if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
+                let r = pb::GetByIdsRequest {
+                    table_name: shared_req.table_name.clone(),
+                    ids: shared_req.ids.clone(),
+                    id_column: shared_req.id_column.clone(),
+                    columns: shared_req.columns.clone(),
+                };
+                let worker_id = wid.clone();
+                let timeout = self.query_timeout;
+                handles.push(tokio::spawn(async move {
+                    let result = tokio::time::timeout(timeout,
+                        client.local_get_by_ids(Request::new(r))).await;
+                    (worker_id, result)
+                }));
+            }
+        }
+
+        // Gather results
+        let mut batches = Vec::new();
+        for handle in handles {
+            if let Ok((_, Ok(Ok(resp)))) = handle.await {
+                let r = resp.into_inner();
+                if r.num_rows > 0 && r.error.is_empty()
+                    && let Ok(batch) = lance_distributed_common::ipc::ipc_to_record_batch(&r.arrow_ipc_data) {
+                        batches.push(batch);
+                    }
+            }
+        }
+
+        let latency_ms = t0.elapsed().as_millis() as u64;
+
+        if batches.is_empty() {
+            return Ok(Response::new(pb::SearchResponse {
+                arrow_ipc_data: vec![], num_rows: 0, error: String::new(),
+                truncated: false, next_offset: 0, latency_ms,
+            }));
+        }
+
+        let merged = arrow::compute::concat_batches(&batches[0].schema(), &batches)
+            .map_err(|e| Status::internal(format!("merge: {e}")))?;
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&merged)
+            .map_err(|e| Status::internal(format!("IPC: {e}")))?;
+
+        Ok(Response::new(pb::SearchResponse {
+            num_rows: merged.num_rows() as u32,
+            arrow_ipc_data: ipc,
+            error: String::new(),
+            truncated: false, next_offset: 0, latency_ms,
+        }))
+    }
 }
 
 const MAX_K: u32 = 100_000;

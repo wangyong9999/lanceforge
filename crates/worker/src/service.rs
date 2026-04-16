@@ -202,6 +202,29 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn local_get_by_ids(
+        &self,
+        request: Request<pb::GetByIdsRequest>,
+    ) -> Result<Response<pb::LocalSearchResponse>, Status> {
+        let req = request.into_inner();
+        let id_col = if req.id_column.is_empty() { "id" } else { &req.id_column };
+        let columns: Vec<String> = req.columns.into_iter().collect();
+        match self.registry.get_by_ids(&req.table_name, &req.ids, id_col, &columns).await {
+            Ok(batch) => {
+                let ipc_data = record_batch_to_ipc(&batch)
+                    .map_err(|e| Status::internal(format!("IPC: {e}")))?;
+                Ok(Response::new(pb::LocalSearchResponse {
+                    arrow_ipc_data: ipc_data,
+                    num_rows: batch.num_rows() as u32,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(pb::LocalSearchResponse {
+                arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(),
+            })),
+        }
+    }
+
     async fn health_check(
         &self,
         _request: Request<pb::HealthCheckRequest>,

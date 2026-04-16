@@ -195,6 +195,20 @@ pub struct HybridSearchRequest {
     pub offset: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetByIdsRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    /// primary key values to look up
+    #[prost(int64, repeated, tag = "2")]
+    pub ids: ::prost::alloc::vec::Vec<i64>,
+    /// column name for the primary key (default: "id")
+    #[prost(string, tag = "3")]
+    pub id_column: ::prost::alloc::string::String,
+    /// columns to return (empty = all)
+    #[prost(string, repeated, tag = "4")]
+    pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SearchResponse {
     /// Arrow IPC StreamWriter bytes
     #[prost(bytes = "vec", tag = "1")]
@@ -1000,6 +1014,33 @@ pub mod lance_scheduler_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Point lookup
+        pub async fn get_by_ids(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetByIdsRequest>,
+        ) -> std::result::Result<tonic::Response<super::SearchResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/GetByIds",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "GetByIds",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1112,6 +1153,11 @@ pub mod lance_scheduler_service_server {
             tonic::Response<super::MoveShardResponse>,
             tonic::Status,
         >;
+        /// Point lookup
+        async fn get_by_ids(
+            &self,
+            request: tonic::Request<super::GetByIdsRequest>,
+        ) -> std::result::Result<tonic::Response<super::SearchResponse>, tonic::Status>;
     }
     /// Service running on the Scheduler for clients to submit Lance queries.
     #[derive(Debug)]
@@ -1933,6 +1979,52 @@ pub mod lance_scheduler_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/lance.distributed.LanceSchedulerService/GetByIds" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetByIdsSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::GetByIdsRequest>
+                    for GetByIdsSvc<T> {
+                        type Response = super::SearchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetByIdsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::get_by_ids(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetByIdsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -2297,6 +2389,35 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn local_get_by_ids(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetByIdsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LocalSearchResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/LocalGetByIds",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "LocalGetByIds",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Health check (Scheduler periodically pings Executors)
         pub async fn health_check(
             &mut self,
@@ -2393,6 +2514,13 @@ pub mod lance_executor_service_server {
             request: tonic::Request<super::CreateLocalShardRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CreateLocalShardResponse>,
+            tonic::Status,
+        >;
+        async fn local_get_by_ids(
+            &self,
+            request: tonic::Request<super::GetByIdsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LocalSearchResponse>,
             tonic::Status,
         >;
         /// Health check (Scheduler periodically pings Executors)
@@ -2847,6 +2975,55 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CreateLocalShardSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/LocalGetByIds" => {
+                    #[allow(non_camel_case_types)]
+                    struct LocalGetByIdsSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::GetByIdsRequest>
+                    for LocalGetByIdsSvc<T> {
+                        type Response = super::LocalSearchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetByIdsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::local_get_by_ids(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LocalGetByIdsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
