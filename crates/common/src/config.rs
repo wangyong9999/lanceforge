@@ -622,4 +622,57 @@ security:
         assert!(config.security.tls_enabled());
         assert!(!config.security.auth_enabled());
     }
+
+    #[test]
+    fn test_validate_ok() {
+        let yaml = r#"
+tables:
+  - name: t1
+    shards:
+      - {name: s0, uri: "s3://b/s0.lance", executors: ["w0"]}
+executors:
+  - {id: w0, host: "127.0.0.1", port: 50100}
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_duplicate_executor() {
+        let yaml = r#"
+tables: []
+executors:
+  - {id: w0, host: "127.0.0.1", port: 50100}
+  - {id: w0, host: "127.0.0.1", port: 50101}
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("duplicate"), "expected duplicate error: {}", err);
+    }
+
+    #[test]
+    fn test_validate_bad_executor_ref() {
+        let yaml = r#"
+tables:
+  - name: t1
+    shards:
+      - {name: s0, uri: "x.lance", executors: ["w_missing"]}
+executors:
+  - {id: w0, host: "127.0.0.1", port: 50100}
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("unknown executor"), "expected ref error: {}", err);
+    }
+
+    #[test]
+    fn test_validate_zero_port() {
+        let yaml = r#"
+tables: []
+executors:
+  - {id: w0, host: "127.0.0.1", port: 0}
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_err());
+    }
 }

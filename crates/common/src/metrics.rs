@@ -262,4 +262,60 @@ mod tests {
         assert!(output.contains("lance_query_total 0"));
         assert!(output.contains("lance_query_latency_avg_ms 0.00"));
     }
+
+    #[test]
+    fn test_histogram_buckets() {
+        let m = Metrics::new();
+        m.record_query(500, true);    // 0.5ms → bucket le=1
+        m.record_query(5000, true);   // 5ms → bucket le=5
+        m.record_query(50000, true);  // 50ms → bucket le=50
+        m.record_query(500000, true); // 500ms → bucket le=500
+
+        let output = m.to_prometheus();
+        assert!(output.contains("lance_query_latency_ms_bucket{le=\"1\"} 1"));
+        assert!(output.contains("lance_query_latency_ms_bucket{le=\"5\"} 2"));
+        assert!(output.contains("lance_query_latency_ms_count 4"));
+    }
+
+    #[test]
+    fn test_per_table_metrics() {
+        let m = Metrics::new();
+        m.record_table_query("table_a", 10, true);
+        m.record_table_query("table_a", 5, false);
+        m.record_table_query("table_b", 20, true);
+
+        let output = m.to_prometheus();
+        assert!(output.contains("lance_table_query_total{table=\"table_a\"} 2"));
+        assert!(output.contains("lance_table_query_total{table=\"table_b\"} 1"));
+    }
+
+    #[test]
+    fn test_remove_table() {
+        let m = Metrics::new();
+        m.record_table_query("ephemeral", 10, true);
+        let output1 = m.to_prometheus();
+        assert!(output1.contains("ephemeral"));
+
+        m.remove_table("ephemeral");
+        let output2 = m.to_prometheus();
+        assert!(!output2.contains("ephemeral"));
+    }
+
+    #[test]
+    fn test_executor_health() {
+        let m = Metrics::new();
+        m.set_executor_health(3, 5);
+        let output = m.to_prometheus();
+        assert!(output.contains("lance_executors_healthy 3"));
+        assert!(output.contains("lance_executors_total 5"));
+    }
+
+    #[test]
+    fn test_slow_query() {
+        let m = Metrics::new();
+        m.record_slow_query();
+        m.record_slow_query();
+        let output = m.to_prometheus();
+        assert!(output.contains("lance_slow_query_total 2"));
+    }
 }
