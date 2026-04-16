@@ -210,6 +210,9 @@ pub struct SearchResponse {
     /// Suggested offset for the next page (0 if no more)
     #[prost(uint32, tag = "5")]
     pub next_offset: u32,
+    /// Server-side latency in milliseconds (scatter-gather wall time)
+    #[prost(uint64, tag = "6")]
+    pub latency_ms: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalSearchRequest {

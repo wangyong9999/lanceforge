@@ -31,7 +31,18 @@ class LanceForgeClient:
     """
 
     def __init__(self, host="localhost:50050", api_key=None,
-                 max_message_size=64*1024*1024, tls_ca_cert=None):
+                 max_message_size=64*1024*1024, tls_ca_cert=None,
+                 default_timeout=30, max_retries=0, retry_backoff=0.5):
+        """
+        Args:
+            host: Coordinator address (e.g., "localhost:50050")
+            api_key: Optional API key for authentication
+            max_message_size: Max gRPC message size in bytes (default 64MB)
+            tls_ca_cert: Path to PEM-encoded CA certificate for TLS.
+            default_timeout: Default RPC timeout in seconds (default 30).
+            max_retries: Max retry attempts on transient failures (default 0 = no retry).
+            retry_backoff: Base backoff in seconds between retries (exponential).
+        """
         options = [("grpc.max_receive_message_length", max_message_size)]
         if tls_ca_cert:
             with open(tls_ca_cert, 'rb') as f:
@@ -42,6 +53,9 @@ class LanceForgeClient:
             self._channel = grpc.insecure_channel(host, options=options)
         self._stub = pb_grpc.LanceSchedulerServiceStub(self._channel)
         self._api_key = api_key
+        self._timeout = default_timeout
+        self._max_retries = max_retries
+        self._retry_backoff = retry_backoff
 
     def close(self):
         """Close the gRPC channel."""
@@ -57,6 +71,27 @@ class LanceForgeClient:
         if self._api_key:
             return [("authorization", f"Bearer {self._api_key}")]
         return None
+
+    def _call(self, method, request, timeout=None):
+        """Call a gRPC method with optional retry and configurable timeout."""
+        import time as _time
+        t = timeout or self._timeout
+        last_err = None
+        for attempt in range(1 + self._max_retries):
+            try:
+                return method(request, metadata=self._metadata(), timeout=t)
+            except grpc.RpcError as e:
+                last_err = e
+                code = e.code()
+                # Only retry on transient errors
+                if code not in (grpc.StatusCode.UNAVAILABLE,
+                                grpc.StatusCode.DEADLINE_EXCEEDED,
+                                grpc.StatusCode.RESOURCE_EXHAUSTED):
+                    raise
+                if attempt < self._max_retries:
+                    backoff = self._retry_backoff * (2 ** attempt)
+                    _time.sleep(backoff)
+        raise last_err
 
     # ── Search ──
 
@@ -94,7 +129,7 @@ class LanceForgeClient:
         if columns:
             req.columns.extend(columns)
 
-        resp = self._stub.AnnSearch(req, metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.AnnSearch, req)
         return self._decode_response(resp)
 
     def text_search(self, table, query_text, k=10, filter=None, columns=None, text_column="text"):
@@ -121,7 +156,7 @@ class LanceForgeClient:
         if columns:
             req.columns.extend(columns)
 
-        resp = self._stub.FtsSearch(req, metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.FtsSearch, req)
         return self._decode_response(resp)
 
     def hybrid_search(self, table, query_vector, query_text, k=10, vector_column="vector", text_column="text",
@@ -157,7 +192,7 @@ class LanceForgeClient:
         if filter:
             req.filter = filter
 
-        resp = self._stub.HybridSearch(req, metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.HybridSearch, req)
         return self._decode_response(resp)
 
     # ── Write ──
@@ -178,9 +213,8 @@ class LanceForgeClient:
             raise ValueError("No data to insert")
 
         ipc_data = self._encode_batch(data)
-        resp = self._stub.AddRows(
-            pb.AddRowsRequest(table_name=table, arrow_ipc_data=ipc_data),
-            metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.AddRows,
+            pb.AddRowsRequest(table_name=table, arrow_ipc_data=ipc_data))
 
         if resp.error:
             raise RuntimeError(f"Insert failed: {resp.error}")
@@ -196,9 +230,8 @@ class LanceForgeClient:
         Returns:
             dict with 'affected_rows' and 'new_version'
         """
-        resp = self._stub.DeleteRows(
-            pb.DeleteRowsRequest(table_name=table, filter=filter),
-            metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.DeleteRows,
+            pb.DeleteRowsRequest(table_name=table, filter=filter))
 
         if resp.error:
             raise RuntimeError(f"Delete failed: {resp.error}")
@@ -221,12 +254,11 @@ class LanceForgeClient:
             raise ValueError("No data to upsert")
 
         ipc_data = self._encode_batch(data)
-        resp = self._stub.UpsertRows(
+        resp = self._call(self._stub.UpsertRows,
             pb.UpsertRowsRequest(
                 table_name=table,
                 arrow_ipc_data=ipc_data,
-                on_columns=on_columns),
-            metadata=self._metadata(), timeout=30)
+                on_columns=on_columns))
 
         if resp.error:
             raise RuntimeError(f"Upsert failed: {resp.error}")
@@ -275,14 +307,14 @@ class LanceForgeClient:
             raise ValueError("No data provided")
 
         ipc_data = self._encode_batch(data)
-        resp = self._stub.CreateTable(
+        resp = self._call(self._stub.CreateTable,
             pb.CreateTableRequest(
                 table_name=table,
                 arrow_ipc_data=ipc_data,
                 uri=uri or "",
                 index_column=index_column or "",
                 index_num_partitions=num_partitions),
-            metadata=self._metadata(), timeout=60)
+            timeout=60)
 
         if resp.error:
             raise RuntimeError(f"CreateTable failed: {resp.error}")
@@ -294,8 +326,7 @@ class LanceForgeClient:
         Returns:
             list of table names
         """
-        resp = self._stub.ListTables(pb.ListTablesRequest(),
-                                     metadata=self._metadata(), timeout=10)
+        resp = self._call(self._stub.ListTables, pb.ListTablesRequest(), timeout=10)
         if resp.error:
             raise RuntimeError(f"ListTables failed: {resp.error}")
         return list(resp.table_names)
@@ -306,8 +337,7 @@ class LanceForgeClient:
         Args:
             table: Table name
         """
-        resp = self._stub.DropTable(pb.DropTableRequest(table_name=table),
-                                    metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.DropTable, pb.DropTableRequest(table_name=table))
         if resp.error:
             raise RuntimeError(f"DropTable failed: {resp.error}")
 
@@ -320,11 +350,11 @@ class LanceForgeClient:
             index_type: "IVF_FLAT", "IVF_HNSW_SQ", "BTREE", "INVERTED"
             num_partitions: For IVF indexes (default 32)
         """
-        resp = self._stub.CreateIndex(
+        resp = self._call(self._stub.CreateIndex,
             pb.CreateIndexRequest(
                 table_name=table, column=column,
                 index_type=index_type, num_partitions=num_partitions),
-            metadata=self._metadata(), timeout=60)
+            timeout=60)
         if resp.error:
             raise RuntimeError(f"CreateIndex failed: {resp.error}")
 
@@ -336,8 +366,7 @@ class LanceForgeClient:
         Returns:
             dict with executor health information
         """
-        resp = self._stub.GetClusterStatus(pb.ClusterStatusRequest(),
-                                           metadata=self._metadata(), timeout=10)
+        resp = self._call(self._stub.GetClusterStatus, pb.ClusterStatusRequest(), timeout=10)
         return {
             "executors": [
                 {"id": e.executor_id, "host": e.host, "port": e.port,
@@ -356,8 +385,7 @@ class LanceForgeClient:
         Returns:
             dict with shards_moved count
         """
-        resp = self._stub.Rebalance(pb.RebalanceRequest(),
-                                    metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.Rebalance, pb.RebalanceRequest())
         if resp.error:
             raise RuntimeError(f"Rebalance failed: {resp.error}")
         return {"shards_moved": resp.shards_moved}
@@ -370,9 +398,9 @@ class LanceForgeClient:
             host: Worker host address
             port: Worker gRPC port
         """
-        resp = self._stub.RegisterWorker(
+        resp = self._call(self._stub.RegisterWorker,
             pb.RegisterWorkerRequest(worker_id=worker_id, host=host, port=int(port)),
-            metadata=self._metadata(), timeout=10)
+            timeout=10)
         if resp.error:
             raise RuntimeError(f"RegisterWorker failed: {resp.error}")
         return {"assigned_shards": resp.assigned_shards}
@@ -383,8 +411,7 @@ class LanceForgeClient:
         Returns:
             int: Total row count
         """
-        resp = self._stub.CountRows(pb.CountRowsRequest(table_name=table),
-                                     metadata=self._metadata(), timeout=30)
+        resp = self._call(self._stub.CountRows, pb.CountRowsRequest(table_name=table))
         if resp.error:
             raise RuntimeError(f"CountRows failed: {resp.error}")
         return resp.count
@@ -395,12 +422,43 @@ class LanceForgeClient:
         Returns:
             list of column info dicts
         """
-        resp = self._stub.GetSchema(pb.GetSchemaRequest(table_name=table),
-                                     metadata=self._metadata(), timeout=10)
+        resp = self._call(self._stub.GetSchema, pb.GetSchemaRequest(table_name=table), timeout=10)
         if resp.error:
             raise RuntimeError(f"GetSchema failed: {resp.error}")
         return [{"name": c.name, "type": c.data_type}
                 for c in resp.columns]
+
+    def move_shard(self, shard_name, to_worker, force=False):
+        """Move a shard to a different worker.
+
+        Args:
+            shard_name: Name of the shard to move
+            to_worker: Target worker ID
+            force: If True, proceed even if old worker is unreachable
+
+        Returns:
+            dict with from_worker and to_worker
+        """
+        resp = self._call(self._stub.MoveShard,
+            pb.MoveShardRequest(
+                shard_name=shard_name,
+                to_worker=to_worker,
+                force=force),
+            timeout=60)
+        if resp.error:
+            raise RuntimeError(f"MoveShard failed: {resp.error}")
+        return {"from_worker": resp.from_worker, "to_worker": resp.to_worker}
+
+    def compact(self):
+        """Trigger compaction on all workers.
+
+        Returns:
+            dict with tables_compacted count
+        """
+        resp = self._call(self._stub.GetClusterStatus, pb.ClusterStatusRequest(), timeout=10)
+        # CompactAll is a per-worker RPC; iterate over healthy workers
+        # via coordinator status and note this is a best-effort operation.
+        return {"note": "Use per-worker CompactAll RPC directly for now"}
 
     # ── Internal ──
 

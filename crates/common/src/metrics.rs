@@ -17,7 +17,10 @@ pub struct TableMetric {
 
 /// Simple atomic counters for key metrics.
 /// Thread-safe, lock-free, usable from any async context.
-#[derive(Debug, Default)]
+/// Latency histogram bucket boundaries in milliseconds.
+const HISTOGRAM_BUCKETS_MS: &[u64] = &[1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+#[derive(Debug)]
 pub struct Metrics {
     pub query_count: AtomicU64,
     pub query_error_count: AtomicU64,
@@ -26,9 +29,27 @@ pub struct Metrics {
     pub executor_healthy_count: AtomicU64,
     pub executor_total_count: AtomicU64,
     pub slow_query_count: AtomicU64,
+    /// Latency histogram: bucket[i] counts queries with latency <= HISTOGRAM_BUCKETS_MS[i].
+    latency_buckets: Vec<AtomicU64>,
     /// Per-table metrics. RwLock is held only briefly on first-use insert;
     /// hot-path reads use `get` under read lock then atomic increments.
     pub per_table: RwLock<HashMap<String, Arc<TableMetric>>>,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            query_count: AtomicU64::new(0),
+            query_error_count: AtomicU64::new(0),
+            query_latency_sum_us: AtomicU64::new(0),
+            query_latency_max_us: AtomicU64::new(0),
+            executor_healthy_count: AtomicU64::new(0),
+            executor_total_count: AtomicU64::new(0),
+            slow_query_count: AtomicU64::new(0),
+            latency_buckets: HISTOGRAM_BUCKETS_MS.iter().map(|_| AtomicU64::new(0)).collect(),
+            per_table: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 impl Metrics {
@@ -43,18 +64,34 @@ impl Metrics {
         }
         self.query_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
         self.query_latency_max_us.fetch_max(latency_us, Ordering::Relaxed);
+        // Populate histogram buckets
+        let latency_ms = latency_us / 1000;
+        for (i, &bound) in HISTOGRAM_BUCKETS_MS.iter().enumerate() {
+            if latency_ms <= bound {
+                self.latency_buckets[i].fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
     }
 
     /// Record a per-table query outcome (hot path: read-locked fast path).
+    /// Uses poison-recovery on RwLock to avoid crashing the whole process
+    /// if any thread panics while holding the lock.
     pub fn record_table_query(&self, table: &str, rows: u64, success: bool) {
         let tm = {
-            let map = self.per_table.read().unwrap();
+            let map = match self.per_table.read() {
+                Ok(m) => m,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             map.get(table).cloned()
         };
         let tm = match tm {
             Some(t) => t,
             None => {
-                let mut map = self.per_table.write().unwrap();
+                let mut map = match self.per_table.write() {
+                    Ok(m) => m,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 map.entry(table.to_string())
                     .or_insert_with(|| Arc::new(TableMetric::default()))
                     .clone()
@@ -67,6 +104,15 @@ impl Metrics {
 
     pub fn record_slow_query(&self) {
         self.slow_query_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Remove per-table metrics (called on DropTable to prevent leak).
+    pub fn remove_table(&self, table: &str) {
+        let mut map = match self.per_table.write() {
+            Ok(m) => m,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.remove(table);
     }
 
     pub fn set_executor_health(&self, healthy: u64, total: u64) {
@@ -111,9 +157,22 @@ impl Metrics {
             max_ms = max_us as f64 / 1000.0,
         );
 
+        // Latency histogram (Prometheus histogram type)
+        out.push_str("# HELP lance_query_latency_ms Histogram of query latency in milliseconds\n");
+        out.push_str("# TYPE lance_query_latency_ms histogram\n");
+        let mut cumulative = 0u64;
+        for (i, &bound) in HISTOGRAM_BUCKETS_MS.iter().enumerate() {
+            cumulative += self.latency_buckets[i].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "lance_query_latency_ms_bucket{{le=\"{}\"}} {}\n", bound, cumulative));
+        }
+        out.push_str(&format!("lance_query_latency_ms_bucket{{le=\"+Inf\"}} {}\n", count));
+        out.push_str(&format!("lance_query_latency_ms_sum {:.2}\n", sum_us as f64 / 1000.0));
+        out.push_str(&format!("lance_query_latency_ms_count {}\n", count));
+
         // Per-table labels
-        if let Ok(map) = self.per_table.read() {
-            if !map.is_empty() {
+        if let Ok(map) = self.per_table.read()
+            && !map.is_empty() {
                 out.push_str("# HELP lance_table_query_total Queries per table\n");
                 out.push_str("# TYPE lance_table_query_total counter\n");
                 for (table, tm) in map.iter() {
@@ -142,7 +201,6 @@ impl Metrics {
                     ));
                 }
             }
-        }
         out
     }
 }

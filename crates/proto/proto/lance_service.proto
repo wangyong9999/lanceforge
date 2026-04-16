@@ -168,6 +168,7 @@ message SearchResponse {
   string error = 3;            // empty if success
   bool truncated = 4;          // true if response was capped by max_response_bytes
   uint32 next_offset = 5;      // Suggested offset for the next page (0 if no more)
+  uint64 latency_ms = 6;       // Server-side latency in milliseconds (scatter-gather wall time)
 }
 
 // ============ Scheduler → Executor ============

@@ -195,6 +195,10 @@ pub struct CacheConfig {
     /// Maximum number of cached entries.
     #[serde(default = "CacheConfig::default_max_entries")]
     pub max_entries: usize,
+    /// Maximum total cache memory in bytes. Prevents OOM from large RecordBatch
+    /// caching. Default: 512 MB. Set to 0 to disable byte-level cap.
+    #[serde(default = "CacheConfig::default_max_cache_bytes")]
+    pub max_cache_bytes: usize,
     /// Lance dataset read consistency interval in seconds (worker-side).
     #[serde(default = "CacheConfig::default_read_consistency_secs")]
     pub read_consistency_secs: u64,
@@ -203,6 +207,7 @@ pub struct CacheConfig {
 impl CacheConfig {
     fn default_ttl_secs() -> u64 { 5 }
     fn default_max_entries() -> usize { 1000 }
+    fn default_max_cache_bytes() -> usize { 512 * 1024 * 1024 } // 512 MB
     fn default_read_consistency_secs() -> u64 { 3 }
 }
 
@@ -211,6 +216,7 @@ impl Default for CacheConfig {
         Self {
             ttl_secs: Self::default_ttl_secs(),
             max_entries: Self::default_max_entries(),
+            max_cache_bytes: Self::default_max_cache_bytes(),
             read_consistency_secs: Self::default_read_consistency_secs(),
         }
     }
@@ -381,6 +387,56 @@ impl ClusterConfig {
             routing.insert(table.name.clone(), shard_routes);
         }
         routing
+    }
+
+    /// Validate configuration for common errors. Returns list of problems.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        // Executor ID uniqueness
+        let mut seen_ids = std::collections::HashSet::new();
+        for e in &self.executors {
+            if e.id.is_empty() {
+                errors.push("executor id must not be empty".to_string());
+            }
+            if !seen_ids.insert(&e.id) {
+                errors.push(format!("duplicate executor id: {}", e.id));
+            }
+            if e.port == 0 {
+                errors.push(format!("executor '{}': port must be > 0", e.id));
+            }
+        }
+        // Table name uniqueness + shard executor references
+        let executor_ids: std::collections::HashSet<&str> = self.executors.iter().map(|e| e.id.as_str()).collect();
+        let mut seen_tables = std::collections::HashSet::new();
+        for table in &self.tables {
+            if table.name.is_empty() {
+                errors.push("table name must not be empty".to_string());
+            }
+            if !seen_tables.insert(&table.name) {
+                errors.push(format!("duplicate table name: {}", table.name));
+            }
+            for shard in &table.shards {
+                for eid in &shard.executors {
+                    if !executor_ids.contains(eid.as_str()) {
+                        errors.push(format!(
+                            "shard '{}' references unknown executor '{}'", shard.name, eid
+                        ));
+                    }
+                }
+            }
+        }
+        // Server config sanity
+        if self.server.query_timeout_secs == 0 {
+            errors.push("server.query_timeout_secs must be > 0".to_string());
+        }
+        if self.server.max_k == 0 {
+            errors.push("server.max_k must be > 0".to_string());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 
     /// Get all shards assigned to a specific executor.

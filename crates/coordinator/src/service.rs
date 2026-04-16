@@ -52,6 +52,12 @@ pub struct CoordinatorService {
     max_k: u32,
     /// Slow-query threshold (ms). 0 disables slow-query logging.
     slow_query_ms: u64,
+    /// Shutdown signal for background tasks (reconciliation loop, etc.).
+    bg_shutdown: Arc<tokio::sync::Notify>,
+    /// MetaStore-backed state for shard URI persistence (None = static/no persistence).
+    meta_state: Option<Arc<lance_distributed_meta::state::MetaShardState>>,
+    /// Per-table DDL mutex: prevents concurrent CreateTable/DropTable on same table name.
+    ddl_locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl CoordinatorService {
@@ -68,6 +74,12 @@ impl CoordinatorService {
     /// Call this before moving `service` into the gRPC server.
     pub fn pool_shutdown_handle(&self) -> Arc<ConnectionPool> {
         self.pool.clone()
+    }
+
+    /// Get the background task shutdown signal.
+    /// Call `notify_waiters()` to stop reconciliation loop, orphan GC, etc.
+    pub fn bg_shutdown(&self) -> Arc<tokio::sync::Notify> {
+        self.bg_shutdown.clone()
     }
 
     /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
@@ -110,9 +122,24 @@ impl CoordinatorService {
             }
         }
 
-        info!("Using MetaStore at {} ({} tables)", metadata_path,
-            meta_state.all_tables().await.len());
-        Ok(Self::with_shard_state(config, query_timeout, Arc::new(meta_state)))
+        // Recover persisted shard URIs from MetaStore (survives restarts)
+        let persisted_uris = meta_state.get_shard_uris().await;
+        let recovered_count = persisted_uris.len();
+
+        let meta_arc = Arc::new(meta_state);
+        info!("Using MetaStore at {} ({} tables, {} shard URIs recovered)",
+            metadata_path, meta_arc.all_tables().await.len(), recovered_count);
+
+        let mut svc = Self::with_shard_state(config, query_timeout, meta_arc.clone() as Arc<dyn ShardState>);
+        // Merge persisted URIs into the in-memory map (YAML URIs already loaded)
+        {
+            let mut uris = svc.shard_uris.write().await;
+            for (k, v) in persisted_uris {
+                uris.entry(k).or_insert(v);
+            }
+        }
+        svc.meta_state = Some(meta_arc);
+        Ok(svc)
     }
 
     pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
@@ -158,11 +185,13 @@ impl CoordinatorService {
         // Start connection pool with ShardState integration
         pool.start_background(Some(shard_state.clone()));
 
-        // Start reconciliation loop
+        // Start reconciliation loop with shutdown signal
+        let bg_shutdown = Arc::new(tokio::sync::Notify::new());
         let recon_state = shard_state.clone();
         let recon_interval = Duration::from_secs(config.health_check.reconciliation_interval_secs);
+        let recon_stop = bg_shutdown.clone();
         tokio::spawn(async move {
-            reconciliation_loop(recon_state, recon_interval).await;
+            reconciliation_loop(recon_state, recon_interval, recon_stop).await;
         });
 
         let metrics = lance_distributed_common::metrics::Metrics::new();
@@ -188,6 +217,9 @@ impl CoordinatorService {
             max_response_bytes: config.server.max_response_bytes,
             max_k: config.server.max_k,
             slow_query_ms: config.server.slow_query_ms,
+            bg_shutdown,
+            meta_state: None,
+            ddl_locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -223,8 +255,20 @@ impl CoordinatorService {
         info!("audit op={} principal={} target={} details={}", op, principal, target, details);
     }
 
+    /// Acquire a per-table DDL mutex. Prevents concurrent CreateTable/DropTable
+    /// on the same table name from racing and creating duplicate shards.
+    async fn ddl_lock(&self, table_name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.ddl_locks.write().await;
+            locks.entry(table_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
     /// Emit a structured slow-query warn log if elapsed exceeds threshold.
-    fn maybe_slow<'a>(&self, op: &str, table: &str, k: u32, elapsed_us: u64, num_rows: u32) {
+    fn maybe_slow(&self, op: &str, table: &str, k: u32, elapsed_us: u64, num_rows: u32) {
         if self.slow_query_ms == 0 { return; }
         if elapsed_us / 1000 >= self.slow_query_ms {
             warn!("slow_query op={} table={} k={} rows={} elapsed_ms={}",
@@ -290,7 +334,8 @@ impl LanceSchedulerService for CoordinatorService {
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        let mut paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        paged.latency_ms = latency_us / 1000;
         self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
         self.maybe_slow("ann_search", &req.table_name, req.k, latency_us, paged.num_rows);
         Ok(Response::new(paged))
@@ -324,7 +369,8 @@ impl LanceSchedulerService for CoordinatorService {
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        let mut paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        paged.latency_ms = latency_us / 1000;
         self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
         self.maybe_slow("fts_search", &req.table_name, req.k, latency_us, paged.num_rows);
         Ok(Response::new(paged))
@@ -362,7 +408,8 @@ impl LanceSchedulerService for CoordinatorService {
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
-        let paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        let mut paged = apply_pagination_and_cap(resp, req.offset, req.k, self.max_response_bytes);
+        paged.latency_ms = latency_us / 1000;
         self.metrics.record_table_query(&req.table_name, paged.num_rows as u64, paged.error.is_empty());
         self.maybe_slow("hybrid_search", &req.table_name, req.k, latency_us, paged.num_rows);
         Ok(Response::new(paged))
@@ -423,7 +470,8 @@ impl LanceSchedulerService for CoordinatorService {
         let worker_id = if self.pool.get_healthy_client(primary).await.is_ok() {
             primary
         } else if let Some(sec) = secondary {
-            sec
+            if self.pool.get_healthy_client(sec).await.is_ok() { sec }
+            else { return Err(Status::unavailable(format!("No healthy worker for shard {}", shard_name))); }
         } else {
             return Err(Status::unavailable(format!("No healthy worker for shard {}", shard_name)));
         };
@@ -629,6 +677,12 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
+        // DDL serialization: prevent concurrent CreateTable on same name
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        // Check if table already exists
+        if !self.shard_state.get_shard_routing(&req.table_name).await.is_empty() {
+            return Err(Status::already_exists(format!("Table '{}' already exists", req.table_name)));
+        }
         if req.arrow_ipc_data.is_empty() {
             return Err(Status::invalid_argument("arrow_ipc_data required (initial data defines schema)"));
         }
@@ -737,10 +791,18 @@ impl LanceSchedulerService for CoordinatorService {
         // Register all shards in shard state
         self.shard_state.register_table(&req.table_name, mapping).await;
 
-        // Register shard URIs for rebalance
-        let mut uris = self.shard_uris.write().await;
-        for (shard_name, uri) in &shard_uris_new {
-            uris.insert(shard_name.clone(), uri.clone());
+        // Register shard URIs for rebalance (in-memory)
+        {
+            let mut uris = self.shard_uris.write().await;
+            for (shard_name, uri) in &shard_uris_new {
+                uris.insert(shard_name.clone(), uri.clone());
+            }
+        }
+        // Persist shard URIs to MetaStore (survives coordinator restart)
+        if let Some(ref ms) = self.meta_state {
+            let uri_map: std::collections::HashMap<String, String> =
+                shard_uris_new.iter().cloned().collect();
+            ms.put_shard_uris(&uri_map).await;
         }
 
         info!("Created table '{}' ({} rows across {} shards on {} workers)",
@@ -775,6 +837,7 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
         // Tell all workers (primary + secondary) to unload shards for this table
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         for (shard_name, primary, secondary) in &routing {
@@ -802,14 +865,19 @@ impl LanceSchedulerService for CoordinatorService {
                 Err(e) => warn!("Failed to delete shard storage {} ({}): {}", shard_name, uri, e),
             }
         }
-        // Drop from URI registry
+        // Drop from URI registry (in-memory + MetaStore)
+        let dropped_names: Vec<String> = routing.iter().map(|(sn, _, _)| sn.clone()).collect();
         {
             let mut uris = self.shard_uris.write().await;
-            for (sn, _, _) in &routing { uris.remove(sn); }
+            for sn in &dropped_names { uris.remove(sn); }
+        }
+        if let Some(ref ms) = self.meta_state {
+            ms.remove_shard_uris(&dropped_names).await;
         }
         // Remove from shard state (set empty mapping)
         let empty: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         self.shard_state.register_table(&req.table_name, empty).await;
+        self.metrics.remove_table(&req.table_name);
         info!("Dropped table '{}' (purged {} shard(s) from storage)", req.table_name, shard_uris.len());
         Ok(Response::new(pb::DropTableResponse { error: String::new() }))
     }
@@ -870,8 +938,8 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
         // Ask first worker for table info
-        if let Ok(mut client) = self.pool.get_healthy_client(&executors[0]).await {
-            if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+        if let Ok(mut client) = self.pool.get_healthy_client(&executors[0]).await
+            && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
                 table_name: req.table_name.clone(),
             })).await {
                 let r = resp.into_inner();
@@ -880,7 +948,6 @@ impl LanceSchedulerService for CoordinatorService {
                     error: r.error,
                 }));
             }
-        }
         Ok(Response::new(pb::GetSchemaResponse {
             columns: vec![],
             error: "Failed to get schema from workers".to_string(),
@@ -909,13 +976,12 @@ impl LanceSchedulerService for CoordinatorService {
             } else {
                 continue;
             };
-            if let Ok(mut client) = self.pool.get_healthy_client(worker).await {
-                if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+            if let Ok(mut client) = self.pool.get_healthy_client(worker).await
+                && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
                     table_name: shard_name.clone(), // query by shard name for exact count
                 })).await {
                     total += resp.into_inner().num_rows;
                 }
-            }
         }
         Ok(Response::new(pb::CountRowsResponse {
             count: total,
@@ -929,7 +995,7 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<pb::RebalanceResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
         self.audit(&request, "Rebalance", "*", "");
-        use lance_distributed_meta::shard_manager::{assign_shards, compute_diff, ShardPolicy};
+        use lance_distributed_meta::shard_manager::{compute_diff, ShardPolicy};
 
         // Only consider healthy executors for rebalance (skip dead workers)
         let statuses = self.pool.worker_statuses().await;
@@ -979,15 +1045,13 @@ impl LanceSchedulerService for CoordinatorService {
                 } else {
                     secondary.as_ref().map(|s| s.as_str())
                 };
-                if let Some(wid) = worker {
-                    if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
-                        if let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+                if let Some(wid) = worker
+                    && let Ok(mut client) = self.pool.get_healthy_client(wid).await
+                        && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
                             table_name: shard_name.clone(),
                         })).await {
                             shard_sizes.insert(shard_name.clone(), resp.into_inner().num_rows);
                         }
-                    }
-                }
             }
 
             // Compute new assignment with size-aware ShardManager
@@ -1140,7 +1204,7 @@ impl LanceSchedulerService for CoordinatorService {
             .map(|(sname, primary, sec)| {
                 if sname == req.shard_name {
                     let mut new_list = vec![req.to_worker.clone()];
-                    if let Some(s) = sec { if s != req.to_worker { new_list.push(s); } }
+                    if let Some(s) = sec && s != req.to_worker { new_list.push(s); }
                     (sname, new_list)
                 } else {
                     let mut v = vec![primary];
@@ -1205,12 +1269,19 @@ pub struct OrphanGcHandle {
 pub async fn orphan_gc_loop(
     handle: OrphanGcHandle,
     cfg: lance_distributed_common::config::OrphanGcConfig,
+    shutdown: Arc<tokio::sync::Notify>,
 ) {
     let interval = std::time::Duration::from_secs(cfg.interval_secs);
     let mut tick = tokio::time::interval(interval);
     tick.tick().await; // skip immediate first tick
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.notified() => {
+                log::info!("orphan_gc loop stopping (shutdown)");
+                return;
+            }
+        }
         let root = match handle.root.as_ref() {
             Some(r) => r.clone(),
             None => continue,
@@ -1253,11 +1324,9 @@ pub async fn orphan_gc_loop(
             // Age check
             let meta = match tokio::fs::metadata(&path).await { Ok(m) => m, Err(_) => continue };
             let modified = meta.modified().ok();
-            if let Some(mt) = modified {
-                if let Ok(age) = now.duration_since(mt) {
-                    if age < min_age { continue; }
-                }
-            }
+            if let Some(mt) = modified
+                && let Ok(age) = now.duration_since(mt)
+                    && age < min_age { continue; }
             match tokio::fs::remove_dir_all(&path).await {
                 Ok(()) => { log::info!("orphan_gc: purged {}", full); purged += 1; }
                 Err(e) => log::warn!("orphan_gc: failed to purge {}: {}", full, e),
@@ -1360,7 +1429,7 @@ fn split_batch(batch: &arrow::array::RecordBatch, n: usize) -> Vec<arrow::array:
         return vec![batch.clone()];
     }
     let total = batch.num_rows();
-    let chunk_size = (total + n - 1) / n;
+    let chunk_size = total.div_ceil(n);
     (0..n)
         .map(|i| {
             let start = i * chunk_size;
@@ -1399,7 +1468,7 @@ fn validate_offset_k(offset: u32, k: u32, max_k: u32, oversample_factor: u32) ->
         )));
     }
     total.checked_mul(oversample_factor).ok_or_else(||
-        Status::invalid_argument(format!("(offset+k)*oversample overflow")))?;
+        Status::invalid_argument("(offset+k)*oversample overflow".to_string()))?;
     Ok((total, total * oversample_factor))
 }
 
@@ -1425,7 +1494,7 @@ fn apply_pagination_and_cap(
     if off >= total_rows {
         return pb::SearchResponse {
             arrow_ipc_data: vec![], num_rows: 0, error: String::new(),
-            truncated: false, next_offset: 0,
+            truncated: false, next_offset: 0, latency_ms: 0,
         };
     }
     let want = (k as usize).min(total_rows - off);
@@ -1442,13 +1511,12 @@ fn apply_pagination_and_cap(
         // Halve until under cap (binary shrink)
         let mut rows = sliced.num_rows();
         while rows > 1 {
-            rows = (rows + 1) / 2;
+            rows = rows.div_ceil(2);
             let trial = sliced.slice(0, rows);
-            if let Ok(buf) = lance_distributed_common::ipc::record_batch_to_ipc(&trial) {
-                if buf.len() <= max_bytes {
+            if let Ok(buf) = lance_distributed_common::ipc::record_batch_to_ipc(&trial)
+                && buf.len() <= max_bytes {
                     sliced = trial; ipc = buf; truncated = true; break;
                 }
-            }
         }
     }
     pb::SearchResponse {
@@ -1457,6 +1525,7 @@ fn apply_pagination_and_cap(
         error: String::new(),
         truncated,
         next_offset: if truncated { (off + sliced.num_rows()) as u32 } else { next_offset },
+        latency_ms: 0, // populated by caller after apply_pagination_and_cap
     }
 }
 

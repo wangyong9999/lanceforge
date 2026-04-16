@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 
 /// Versioned value stored in MetaStore.
@@ -125,11 +125,10 @@ impl FileMetaStore {
         tokio::fs::rename(&tmp, &self.path).await
             .map_err(|e| MetaError::StorageError(format!("rename: {e}")))?;
         // fsync parent dir to persist the rename itself
-        if let Some(parent) = Path::new(&self.path).parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
+        if let Some(parent) = Path::new(&self.path).parent()
+            && let Ok(dir) = tokio::fs::File::open(parent).await {
                 let _ = dir.sync_all().await;
             }
-        }
         debug!("FileMetaStore: persisted to {} (fsync'd)", self.path);
         Ok(())
     }
@@ -284,7 +283,7 @@ impl S3MetaStore {
         // application level via version checks in put().
         let result = match self.store.put_opts(&self.path, bytes.clone(), put_opts).await {
             Ok(r) => r,
-            Err(object_store::Error::NotImplemented { .. }) |
+            Err(object_store::Error::NotImplemented) |
             Err(object_store::Error::NotSupported { .. }) => {
                 // Fallback: unconditional overwrite
                 self.store.put(&self.path, bytes).await

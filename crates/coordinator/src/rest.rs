@@ -5,7 +5,6 @@
 // Uses raw tokio TCP (no framework dependency) for minimal footprint.
 
 use std::sync::Arc;
-use std::collections::HashMap;
 
 use log::info;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

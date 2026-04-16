@@ -10,7 +10,7 @@ use std::sync::Arc;
 use log::info;
 
 use lance_distributed_common::shard_state::{ShardMapping, ShardState, TargetState};
-use super::store::{MetaStore, MetaError};
+use super::store::MetaStore;
 
 /// ShardState implementation backed by MetaStore (file, S3, or etcd).
 /// All mutations are persisted with CAS versioning.
@@ -178,6 +178,45 @@ impl MetaShardState {
             Ok(Some(v)) => serde_json::from_str(&v.value).unwrap_or_default(),
             _ => vec![],
         }
+    }
+
+    // ── Shard URI persistence (survives coordinator restarts) ──
+
+    fn shard_uris_key(&self) -> String {
+        format!("{}/shard_uris", self.prefix)
+    }
+
+    /// Load all persisted shard URIs.
+    pub async fn get_shard_uris(&self) -> HashMap<String, String> {
+        let key = self.shard_uris_key();
+        match self.store.get(&key).await {
+            Ok(Some(v)) => serde_json::from_str(&v.value).unwrap_or_default(),
+            _ => HashMap::new(),
+        }
+    }
+
+    /// Persist a batch of shard URI updates (merge into existing).
+    pub async fn put_shard_uris(&self, uris: &HashMap<String, String>) {
+        let key = self.shard_uris_key();
+        let mut current = self.get_shard_uris().await;
+        for (k, v) in uris {
+            current.insert(k.clone(), v.clone());
+        }
+        let value = serde_json::to_string(&current).unwrap_or_default();
+        let version = self.store.get(&key).await.ok().flatten().map(|v| v.version).unwrap_or(0);
+        let _ = self.store.put(&key, &value, version).await;
+    }
+
+    /// Remove shard URIs for dropped shards.
+    pub async fn remove_shard_uris(&self, shard_names: &[String]) {
+        let key = self.shard_uris_key();
+        let mut current = self.get_shard_uris().await;
+        for name in shard_names {
+            current.remove(name);
+        }
+        let value = serde_json::to_string(&current).unwrap_or_default();
+        let version = self.store.get(&key).await.ok().flatten().map(|v| v.version).unwrap_or(0);
+        let _ = self.store.put(&key, &value, version).await;
     }
 }
 

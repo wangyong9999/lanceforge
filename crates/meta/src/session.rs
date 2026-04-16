@@ -108,12 +108,10 @@ impl SessionManager {
 
             // Persist heartbeat to store
             let key = format!("{}/sessions/{}", self.prefix, worker_id);
-            let value = serde_json::to_string(&session)
+            let _value = serde_json::to_string(&session)
                 .map_err(|e| MetaError::StorageError(format!("serialize: {e}")))?;
             // Best-effort persist (don't fail heartbeat on store error)
-            if let Err(e) = self.store.get(&key).await.and_then(|v| {
-                Ok(v.map(|v| v.version).unwrap_or(0))
-            }) {
+            if let Err(e) = self.store.get(&key).await.map(|v| v.map(|v| v.version).unwrap_or(0)) {
                 warn!("Heartbeat persist skipped for {}: {}", worker_id, e);
             }
         }
@@ -159,7 +157,7 @@ impl SessionManager {
         let entries = self.store.get_prefix(&prefix).await?;
         let mut sessions = self.sessions.write().await;
 
-        for (key, versioned) in entries {
+        for (_key, versioned) in entries {
             if let Ok(session) = serde_json::from_str::<WorkerSession>(&versioned.value) {
                 sessions.insert(session.worker_id.clone(), (session, Instant::now()));
             }

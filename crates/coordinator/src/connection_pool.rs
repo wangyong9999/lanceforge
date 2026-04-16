@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{debug, info, warn};
+use log::{info, warn};
 use tokio::sync::RwLock;
 use tonic::Request;
 
@@ -276,7 +276,7 @@ impl ConnectionPool {
                         }
                     }
                     HealthCheckResult::Failed => {
-                        let (should_remove, consecutive) = {
+                        let (should_remove, _consecutive) = {
                             let mut workers = self.workers.write().await;
                             if let Some(ws) = workers.get_mut(&wid) {
                                 ws.consecutive_failures += 1;

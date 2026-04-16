@@ -1,6 +1,7 @@
 // Licensed under the Apache License, Version 2.0.
 // Lance Distributed — re-exports from split crates.
 // Integration tests import from `lanceforge::*` — this facade maps to new crates.
+#![allow(clippy::too_many_arguments)]
 
 // ── Common ──
 pub use lance_distributed_common::config;

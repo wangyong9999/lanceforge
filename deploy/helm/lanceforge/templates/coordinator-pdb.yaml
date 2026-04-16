@@ -1,0 +1,15 @@
+{{- if .Values.pdb.coordinator.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lanceforge.fullname" . }}-coordinator
+  labels:
+    {{- include "lanceforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  minAvailable: {{ .Values.pdb.coordinator.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "lanceforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: coordinator
+{{- end }}

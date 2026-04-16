@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config = ClusterConfig::from_file(&args[1])?;
+    config.validate().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let worker_id = &args[2];
     let port: u16 = args.get(3).and_then(|p| p.parse().ok()).unwrap_or(50100);
 
@@ -58,15 +59,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Spawn periodic auto-compaction loop (Phase 13: prevents fragment accumulation).
+    let compact_shutdown = Arc::new(tokio::sync::Notify::new());
     if config.compaction.enabled {
         let reg = registry.clone();
         let interval = Duration::from_secs(config.compaction.interval_secs);
+        let stop = compact_shutdown.clone();
         info!("Auto-compaction enabled (interval={}s)", config.compaction.interval_secs);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
             tick.tick().await; // skip immediate first tick
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = stop.notified() => {
+                        log::info!("Auto-compaction loop stopping (shutdown)");
+                        return;
+                    }
+                }
                 match reg.compact_all().await {
                     Ok(n) => info!("Auto-compaction: {} table(s) optimized", n),
                     Err(e) => log::warn!("Auto-compaction failed: {}", e),
@@ -79,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cap). Keep it generous: 4× coord's cap. Worker truncates only when a
     // single shard's output alone would dwarf the intended global response.
     let worker_cap = config.server.max_response_bytes.saturating_mul(4).max(64 * 1024 * 1024);
+    let registry_shutdown = registry.clone(); // keep handle for graceful shutdown
     let service = WorkerService::with_max_response_bytes(registry, worker_cap);
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
@@ -112,6 +122,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    info!("Worker stopped — all in-flight requests completed");
+    // Stop all background tasks (version poller, compaction loop)
+    registry_shutdown.shutdown();
+    compact_shutdown.notify_waiters();
+    info!("Worker stopped — all background tasks signalled, in-flight requests completed");
     Ok(())
 }

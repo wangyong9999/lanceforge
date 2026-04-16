@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Standard mode: load config from YAML
         ClusterConfig::from_file(&args[1])?
     };
+    config.validate().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let port: u16 = args.iter()
         .skip(2)
@@ -120,8 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     service = service.with_auth(auth_arc.clone());
     let metrics = service.metrics();
-    // Keep a handle for graceful shutdown
+    // Keep handles for graceful shutdown
     let shutdown_handle = service.pool_shutdown_handle();
+    let bg_shutdown = service.bg_shutdown();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     // Start orphan GC loop (opt-in, disabled by default — destructive).
@@ -130,8 +132,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.orphan_gc.interval_secs, config.orphan_gc.min_age_secs);
         let gc_handle = service.orphan_gc_handle();
         let gc_cfg = config.orphan_gc.clone();
+        let gc_stop = bg_shutdown.clone();
         tokio::spawn(async move {
-            lance_distributed_coordinator::service::orphan_gc_loop(gc_handle, gc_cfg).await;
+            lance_distributed_coordinator::service::orphan_gc_loop(gc_handle, gc_cfg, gc_stop).await;
         });
     }
 
@@ -180,8 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    // Stop background tasks (health check loop)
+    // Stop all background tasks (health check loop, reconciliation, orphan GC)
     shutdown_handle.shutdown();
-    info!("Server stopped — all in-flight requests completed");
+    bg_shutdown.notify_waiters();
+    info!("Server stopped — all background tasks signalled, in-flight requests completed");
     Ok(())
 }

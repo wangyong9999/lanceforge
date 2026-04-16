@@ -53,13 +53,12 @@ impl LanceExecutorService for WorkerService {
                 if self.max_response_bytes > 0 && ipc_data.len() > self.max_response_bytes {
                     let mut rows = batch.num_rows();
                     while rows > 1 {
-                        rows = (rows + 1) / 2;
+                        rows = rows.div_ceil(2);
                         let trial = batch.slice(0, rows);
-                        if let Ok(buf) = record_batch_to_ipc(&trial) {
-                            if buf.len() <= self.max_response_bytes {
+                        if let Ok(buf) = record_batch_to_ipc(&trial)
+                            && buf.len() <= self.max_response_bytes {
                                 batch = trial; ipc_data = buf; break;
                             }
-                        }
                     }
                     warn!("Worker response capped to {} rows ({} bytes) by max_response_bytes={}",
                         batch.num_rows(), ipc_data.len(), self.max_response_bytes);

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use log::{debug, warn};
 use tonic::Request;
 
 use lance_distributed_common::ipc::ipc_to_record_batch;
@@ -18,6 +18,7 @@ use super::connection_pool::ConnectionPool;
 
 /// Extract shard-to-worker grouping logic for testability.
 /// Load-balances across all healthy executors per shard.
+#[allow(dead_code)]
 pub(crate) fn group_shards_by_worker(
     shard_routing: &[(String, String, Option<String>)],
     healthy_workers: &std::collections::HashSet<String>,
@@ -32,11 +33,10 @@ pub(crate) fn group_shards_by_worker(
         if healthy_workers.contains(primary) {
             healthy.push(primary.clone());
         }
-        if let Some(sec) = secondary {
-            if healthy_workers.contains(sec) {
+        if let Some(sec) = secondary
+            && healthy_workers.contains(sec) {
                 healthy.push(sec.clone());
             }
-        }
 
         if healthy.is_empty() {
             skipped += 1;
@@ -54,6 +54,7 @@ pub(crate) fn group_shards_by_worker(
 }
 
 /// Check failure threshold: >50% failures = error.
+#[allow(dead_code)]
 pub(crate) fn check_failure_threshold(failures: usize, total: usize) -> Result<(), String> {
     if failures == total && total > 0 {
         return Err(format!("All {} workers failed", total));
@@ -110,28 +111,33 @@ async fn scatter_gather_inner(
     };
 
     if shard_routing.is_empty() {
-        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0 });
+        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0, latency_ms: 0 });
     }
 
-    // Group shards by target worker.
-    // Read replicas: if a shard has multiple executors, load-balance reads
-    // across all healthy ones (round-robin via atomic counter).
+    // Snapshot healthy worker set ONCE (avoids 2N serial RwLock acquisitions
+    // in the routing loop — was the biggest hot-path bottleneck).
+    let healthy_set: std::collections::HashSet<String> = {
+        let statuses = pool.worker_statuses().await;
+        statuses.into_iter()
+            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
+            .map(|(id, _, _, _, _, _, _)| id)
+            .collect()
+    };
+
     static READ_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     let mut worker_shards: HashMap<String, Vec<String>> = HashMap::new();
     let mut skipped = 0;
 
     for (shard, primary, secondary) in &shard_routing {
-        // Collect all healthy executors for this shard
         let mut healthy_executors = Vec::new();
-        if pool.get_healthy_client(primary).await.is_ok() {
+        if healthy_set.contains(primary) {
             healthy_executors.push(primary.clone());
         }
-        if let Some(sec) = secondary {
-            if pool.get_healthy_client(sec).await.is_ok() {
+        if let Some(sec) = secondary
+            && healthy_set.contains(sec) {
                 healthy_executors.push(sec.clone());
             }
-        }
 
         if healthy_executors.is_empty() {
             skipped += 1;
@@ -139,10 +145,8 @@ async fn scatter_gather_inner(
             continue;
         }
 
-        // Load-balance across healthy executors
         let idx = READ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % healthy_executors.len();
-        let chosen = &healthy_executors[idx];
-        worker_shards.entry(chosen.clone()).or_default().push(shard.clone());
+        worker_shards.entry(healthy_executors[idx].clone()).or_default().push(shard.clone());
     }
 
     if worker_shards.is_empty() {
@@ -151,11 +155,13 @@ async fn scatter_gather_inner(
 
     debug!("Scatter: {} shards → {} workers ({} skipped)", shard_routing.len() - skipped, worker_shards.len(), skipped);
 
-    // Scatter: parallel gRPC
+    // Scatter: parallel gRPC. Wrap request in Arc to avoid cloning the
+    // query vector (up to 6KB for 1536d) for each worker.
+    let shared_req = Arc::new(local_req);
     let mut handles = Vec::new();
-    for (wid, _) in &worker_shards {
+    for wid in worker_shards.keys() {
         if let Ok(mut client) = pool.get_healthy_client(wid).await {
-            let req = local_req.clone();
+            let req = (*shared_req).clone();
             let worker_id = wid.clone();
             let timeout = query_timeout;
             handles.push(tokio::spawn(async move {
@@ -180,13 +186,13 @@ async fn scatter_gather_inner(
                 } else if resp.num_rows > 0 {
                     match ipc_to_record_batch(&resp.arrow_ipc_data) {
                         Ok(batch) => batches.push(batch),
-                        Err(e) => { failures += 1; failure_details.push(format!("{}: IPC err", wid)); }
+                        Err(_e) => { failures += 1; failure_details.push(format!("{}: IPC err", wid)); }
                     }
                 }
             }
             Ok((wid, Ok(Err(status)))) => { failures += 1; failure_details.push(format!("{}: {}", wid, status.code())); }
             Ok((wid, Err(_))) => { failures += 1; failure_details.push(format!("{}: timeout", wid)); }
-            Err(e) => { failures += 1; }
+            Err(_e) => { failures += 1; }
         }
     }
 
@@ -198,7 +204,7 @@ async fn scatter_gather_inner(
     }
 
     if batches.is_empty() {
-        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0 });
+        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0, latency_ms: 0 });
     }
 
     // Merge
@@ -212,9 +218,9 @@ async fn scatter_gather_inner(
         Ok(batch) => {
             let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch)
                 .map_err(|e| tonic::Status::internal(format!("IPC error: {e}")))?;
-            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: String::new(), truncated: false, next_offset: 0 })
+            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: String::new(), truncated: false, next_offset: 0, latency_ms: 0 })
         }
-        Err(e) => Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(), truncated: false, next_offset: 0 }),
+        Err(e) => Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(), truncated: false, next_offset: 0, latency_ms: 0 }),
     }
 }
 

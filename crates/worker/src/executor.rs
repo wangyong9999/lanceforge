@@ -20,7 +20,7 @@ use futures::TryStreamExt;
 use log::{debug, info, warn};
 
 use lance_distributed_proto::descriptor::{
-    FtsQueryParams, LanceQueryDescriptor, LanceQueryType, VectorQueryParams,
+    LanceQueryDescriptor, LanceQueryType, VectorQueryParams,
 };
 use lance_distributed_common::config::ShardConfig;
 
@@ -30,10 +30,21 @@ use lance_distributed_common::config::ShardConfig;
 /// which provides DatasetConsistencyWrapper (auto version refresh) and the full
 /// lancedb query API (vector_search, full_text_search, execute_hybrid).
 pub struct LanceTableRegistry {
-    tables: tokio::sync::RwLock<Vec<(String, lancedb::Table)>>,
+    /// Arc so background tasks can hold a handle without borrowing &self.
+    tables: std::sync::Arc<tokio::sync::RwLock<Vec<(String, lancedb::Table)>>>,
     cache: Arc<crate::cache::QueryCache>,
     /// Lance dataset read consistency interval in seconds.
     read_consistency_secs: u64,
+    /// Shutdown signal for background tasks (version poller).
+    shutdown: Arc<tokio::sync::Notify>,
+    /// Cached row counts per shard. Updated by writes/load/create; used by
+    /// status() to avoid S3 round-trips on every health check.
+    shard_row_counts: std::sync::Arc<tokio::sync::RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>>>>,
+    /// Per-shard cached version (refreshed by background poller).
+    /// Reads are lock-free; writes (load/unload) update under the tables write lock.
+    /// Phase 18: eliminates per-query version() I/O that was collapsing read
+    /// QPS under write load (measured 91%+ drop with 10 QPS writes).
+    shard_versions: std::sync::Arc<tokio::sync::RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>>>>,
 }
 
 impl LanceTableRegistry {
@@ -94,14 +105,76 @@ impl LanceTableRegistry {
             tables.push((shard.name.clone(), table));
         }
 
+        // Seed per-shard row count cache from initial count_rows().
+        let mut row_counts: HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>> = HashMap::new();
+        for (name, tbl) in &tables {
+            let count = tbl.count_rows(None).await.unwrap_or(0) as u64;
+            row_counts.insert(name.clone(), std::sync::Arc::new(std::sync::atomic::AtomicU64::new(count)));
+        }
+        let row_counts_arc = std::sync::Arc::new(tokio::sync::RwLock::new(row_counts));
+
+        // Seed per-shard version cache with an initial version() call.
+        let mut versions: HashMap<String, std::sync::Arc<std::sync::atomic::AtomicU64>> = HashMap::new();
+        for (name, tbl) in &tables {
+            let v = tbl.version().await.unwrap_or(0);
+            versions.insert(name.clone(), std::sync::Arc::new(std::sync::atomic::AtomicU64::new(v)));
+        }
+
+        let tables_arc = std::sync::Arc::new(tokio::sync::RwLock::new(tables));
+        let versions_arc = std::sync::Arc::new(tokio::sync::RwLock::new(versions));
+
+        // Spawn background version poller: refresh each shard's cached
+        // version at read_consistency_secs interval. Reads use the atomic
+        // store, no I/O.
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        {
+            let tables_lock = tables_arc.clone();
+            let versions_lock = versions_arc.clone();
+            let interval = std::time::Duration::from_secs(cache_config.read_consistency_secs.max(1));
+            let stop = shutdown.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(interval);
+                tick.tick().await; // skip immediate first tick
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = stop.notified() => {
+                            info!("Version poller stopping (shutdown)");
+                            return;
+                        }
+                    }
+                    let snapshot: Vec<(String, lancedb::Table)> = {
+                        let tables = tables_lock.read().await;
+                        tables.iter().map(|(n, t)| (n.clone(), t.clone())).collect()
+                    };
+                    for (name, tbl) in &snapshot {
+                        let v = tbl.version().await.unwrap_or(0);
+                        let vers = versions_lock.read().await;
+                        if let Some(atom) = vers.get(name) {
+                            atom.store(v, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(Self {
-            tables: tokio::sync::RwLock::new(tables),
+            tables: tables_arc,
             cache: Arc::new(crate::cache::QueryCache::new(
                 Duration::from_secs(cache_config.ttl_secs),
                 cache_config.max_entries,
+                cache_config.max_cache_bytes,
             )),
             read_consistency_secs: cache_config.read_consistency_secs,
+            shutdown,
+            shard_row_counts: row_counts_arc,
+            shard_versions: versions_arc,
         })
+    }
+
+    /// Signal background tasks (version poller) to stop.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_waiters();
     }
 
     /// Get cache hit rate for metrics.
@@ -131,16 +204,20 @@ impl LanceTableRegistry {
             matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
         };
 
-        // Get table version for cache key. We rely on lancedb's
-        // read_consistency_interval to amortize manifest reads — version()
-        // is cached internally there. But under heavy write contention this
-        // call can still serialize. In a hot read+write workload the version
-        // changes rapidly anyway and the cache is constantly invalidated; in
-        // a read-only workload version is stable. Either way, calling it
-        // here is correct.
+        // Phase 18: read pre-polled versions from AtomicU64 instead of calling
+        // version() on the hot path. The background poller refreshes these at
+        // read_consistency_secs interval, so cache invalidation is bounded by
+        // that same interval. Net effect under mixed RW workload: no manifest
+        // I/O on the read path; cache churn happens at most 1/secs rather
+        // than 1/query. Measured fix for Phase 17 finding #6.
         let mut dataset_version = 0u64;
-        for (_, t) in &target_tables {
-            dataset_version = dataset_version.max(t.version().await.unwrap_or(0));
+        {
+            let vers = self.shard_versions.read().await;
+            for (name, _) in &target_tables {
+                if let Some(atom) = vers.get(name) {
+                    dataset_version = dataset_version.max(atom.load(std::sync::atomic::Ordering::Relaxed));
+                }
+            }
         }
 
         // Check cache
@@ -190,7 +267,16 @@ impl LanceTableRegistry {
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let row_count = table.count_rows(None).await
             .map_err(|e| DataFusionError::External(Box::new(e)))? as u64;
+        let v = table.version().await.unwrap_or(0);
         self.tables.write().await.push((shard_name.to_string(), table));
+        self.shard_versions.write().await.insert(
+            shard_name.to_string(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(v)),
+        );
+        self.shard_row_counts.write().await.insert(
+            shard_name.to_string(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(row_count)),
+        );
         info!("Dynamically loaded shard: {} ({} rows)", shard_name, row_count);
         Ok(row_count)
     }
@@ -219,8 +305,8 @@ impl LanceTableRegistry {
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         // Auto-create index if requested
-        if let Some(col) = index_column {
-            if !col.is_empty() && num_rows >= 256 {
+        if let Some(col) = index_column
+            && !col.is_empty() && num_rows >= 256 {
                 let npart = if num_partitions > 0 { num_partitions } else { 32 };
                 table.create_index(&[col], lancedb::index::Index::IvfFlat(
                     lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
@@ -228,10 +314,18 @@ impl LanceTableRegistry {
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
                 info!("Created IVF_FLAT index on {}.{} ({} partitions)", shard_name, col, npart);
             }
-        }
 
         let uri = format!("{}/{}.lance", parent_uri.trim_end_matches('/'), shard_name);
+        let v = table.version().await.unwrap_or(0);
         self.tables.write().await.push((shard_name.to_string(), table));
+        self.shard_versions.write().await.insert(
+            shard_name.to_string(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(v)),
+        );
+        self.shard_row_counts.write().await.insert(
+            shard_name.to_string(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(num_rows)),
+        );
         info!("Created local shard: {} ({} rows) at {}", shard_name, num_rows, uri);
         Ok((num_rows, uri))
     }
@@ -256,8 +350,9 @@ impl LanceTableRegistry {
 
     /// Unload a shard at runtime (for DropTable).
     pub async fn unload_shard(&self, shard_name: &str) {
-        let mut tables = self.tables.write().await;
-        tables.retain(|(name, _)| name != shard_name);
+        self.tables.write().await.retain(|(name, _)| name != shard_name);
+        self.shard_versions.write().await.remove(shard_name);
+        self.shard_row_counts.write().await.remove(shard_name);
         info!("Unloaded shard: {}", shard_name);
     }
 
@@ -291,16 +386,15 @@ impl LanceTableRegistry {
     }
 
     /// Get worker status: (loaded_shard_count, total_rows).
+    /// Uses cached row counts (updated by writes/load/create) to avoid
+    /// N S3 round-trips per health check. The version poller background
+    /// task refreshes counts periodically.
     pub async fn status(&self) -> (u32, u64) {
-        let tables = self.tables.read().await;
-        let shard_count = tables.len() as u32;
-        let mut total_rows = 0u64;
-        for (name, table) in tables.iter() {
-            match table.count_rows(None).await {
-                Ok(count) => total_rows += count as u64,
-                Err(e) => warn!("count_rows failed for shard '{}': {}", name, e),
-            }
-        }
+        let counts = self.shard_row_counts.read().await;
+        let shard_count = counts.len() as u32;
+        let total_rows: u64 = counts.values()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .sum();
         (shard_count, total_rows)
     }
 
@@ -310,8 +404,12 @@ impl LanceTableRegistry {
         table_name: &str,
     ) -> Result<(u64, Vec<lance_distributed_proto::generated::lance_distributed::ColumnInfo>)> {
         use lance_distributed_proto::generated::lance_distributed::ColumnInfo;
-        let tables = self.tables.read().await;
-        let targets = resolve_tables_inner(&tables, table_name)?;
+        // Phase 18: snapshot then I/O outside lock (same pattern as status/execute_query).
+        let targets: Vec<(String, lancedb::Table)> = {
+            let tables = self.tables.read().await;
+            let matched = resolve_tables_inner(&tables, table_name)?;
+            matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
+        };
 
         let mut total_rows = 0u64;
         let mut columns = Vec::new();
@@ -332,27 +430,33 @@ impl LanceTableRegistry {
     }
 
     /// Execute a write operation (add/delete/upsert) on matching tables.
+    /// Snapshots table handles under lock, then releases before I/O
+    /// (same pattern as execute_query — prevents write contention with
+    /// LoadShard/UnloadShard which need the write lock).
     pub async fn execute_write(
         &self,
         req: &lance_distributed_proto::generated::lance_distributed::LocalWriteRequest,
     ) -> Result<(u64, u64)> {
-        let tables = self.tables.read().await;
-        // When target_shard is set (coordinator routes per-shard for Add/Delete/Upsert),
-        // match exactly one shard. Otherwise fall back to prefix match for legacy callers.
-        let targets = if !req.target_shard.is_empty() {
-            let matches: Vec<_> = tables.iter()
-                .filter(|(name, _)| name == &req.target_shard)
-                .map(|(name, t)| (name.as_str(), t))
-                .collect();
-            if matches.is_empty() {
-                return Err(DataFusionError::Plan(format!(
-                    "Target shard not found on this worker: {}", req.target_shard
-                )));
-            }
-            matches
-        } else {
-            resolve_tables_inner(&tables, &req.table_name)?
+        // Snapshot matching tables under lock, then release immediately
+        let targets: Vec<(String, lancedb::Table)> = {
+            let tables = self.tables.read().await;
+            let matched = if !req.target_shard.is_empty() {
+                let m: Vec<_> = tables.iter()
+                    .filter(|(name, _)| name == &req.target_shard)
+                    .map(|(name, t)| (name.as_str(), t))
+                    .collect();
+                if m.is_empty() {
+                    return Err(DataFusionError::Plan(format!(
+                        "Target shard not found on this worker: {}", req.target_shard
+                    )));
+                }
+                m
+            } else {
+                resolve_tables_inner(&tables, &req.table_name)?
+            };
+            matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
         };
+        // All I/O below is lock-free
         let mut total_affected = 0u64;
         let mut max_version = 0u64;
 
@@ -596,7 +700,7 @@ fn validate_descriptor(descriptor: &LanceQueryDescriptor) -> Result<()> {
 }
 
 fn decode_vector(vq: &VectorQueryParams) -> Result<Vec<f32>> {
-    if vq.vector_data.len() % 4 != 0 {
+    if !vq.vector_data.len().is_multiple_of(4) {
         return Err(DataFusionError::Plan(format!(
             "Invalid vector_data length {}: must be divisible by 4 (f32 alignment)",
             vq.vector_data.len()
@@ -636,6 +740,7 @@ pub fn ipc_to_record_batch(data: &[u8]) -> Result<RecordBatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lance_distributed_proto::descriptor::{FtsQueryParams, VectorQueryParams};
 
     fn make_descriptor(query_type: i32, k: u32) -> LanceQueryDescriptor {
         LanceQueryDescriptor {

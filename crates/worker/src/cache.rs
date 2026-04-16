@@ -51,24 +51,31 @@ impl QueryCacheKey {
 
 struct CacheEntry {
     batch: RecordBatch,
+    size_bytes: usize,
     inserted_at: Instant,
 }
 
-/// LRU-ish cache with TTL expiry. Thread-safe via RwLock.
+/// LRU-ish cache with TTL expiry and byte-level memory cap.
+/// Thread-safe via RwLock.
 pub struct QueryCache {
     entries: RwLock<HashMap<QueryCacheKey, CacheEntry>>,
     ttl: Duration,
     max_entries: usize,
+    /// Hard cap on total cached bytes (prevents OOM from large RecordBatches).
+    max_bytes: usize,
+    current_bytes: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
 impl QueryCache {
-    pub fn new(ttl: Duration, max_entries: usize) -> Self {
+    pub fn new(ttl: Duration, max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
             ttl,
             max_entries,
+            max_bytes,
+            current_bytes: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -76,11 +83,16 @@ impl QueryCache {
 
     /// Disabled cache (always miss).
     pub fn disabled() -> Self {
-        Self::new(Duration::ZERO, 0)
+        Self::new(Duration::ZERO, 0, 0)
     }
 
     pub fn is_enabled(&self) -> bool {
         self.ttl > Duration::ZERO && self.max_entries > 0
+    }
+
+    /// Current cache memory usage in bytes.
+    pub fn current_bytes(&self) -> u64 {
+        self.current_bytes.load(Ordering::Relaxed)
     }
 
     /// Try to get a cached result.
@@ -91,12 +103,11 @@ impl QueryCache {
         }
 
         let entries = self.entries.read().await;
-        if let Some(entry) = entries.get(key) {
-            if entry.inserted_at.elapsed() < self.ttl {
+        if let Some(entry) = entries.get(key)
+            && entry.inserted_at.elapsed() < self.ttl {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return Some(entry.batch.clone());
             }
-        }
         self.misses.fetch_add(1, Ordering::Relaxed);
         None
     }
@@ -107,26 +118,52 @@ impl QueryCache {
             return;
         }
 
-        let mut entries = self.entries.write().await;
+        let entry_bytes = batch.get_array_memory_size();
 
-        // Evict expired entries if at capacity
-        if entries.len() >= self.max_entries {
-            let now = Instant::now();
-            entries.retain(|_, v| now.duration_since(v.inserted_at) < self.ttl);
+        // Skip caching entries larger than 25% of max_bytes (single huge result
+        // should not flush the whole cache).
+        if self.max_bytes > 0 && entry_bytes > self.max_bytes / 4 {
+            return;
         }
 
-        // If still at capacity after eviction, remove oldest
-        if entries.len() >= self.max_entries {
+        let mut entries = self.entries.write().await;
+
+        // Evict expired entries
+        {
+            let now = Instant::now();
+            let before_len = entries.len();
+            entries.retain(|_, v| {
+                if now.duration_since(v.inserted_at) >= self.ttl {
+                    self.current_bytes.fetch_sub(v.size_bytes as u64, Ordering::Relaxed);
+                    false
+                } else {
+                    true
+                }
+            });
+            let _ = before_len; // suppress unused
+        }
+
+        // Evict oldest until under both entry count and byte cap
+        while entries.len() >= self.max_entries
+            || (self.max_bytes > 0
+                && self.current_bytes.load(Ordering::Relaxed) + entry_bytes as u64 > self.max_bytes as u64)
+        {
             if let Some(oldest_key) = entries.iter()
                 .min_by_key(|(_, v)| v.inserted_at)
                 .map(|(k, _)| k.clone())
             {
-                entries.remove(&oldest_key);
+                if let Some(removed) = entries.remove(&oldest_key) {
+                    self.current_bytes.fetch_sub(removed.size_bytes as u64, Ordering::Relaxed);
+                }
+            } else {
+                break;
             }
         }
 
+        self.current_bytes.fetch_add(entry_bytes as u64, Ordering::Relaxed);
         entries.insert(key, CacheEntry {
             batch,
+            size_bytes: entry_bytes,
             inserted_at: Instant::now(),
         });
     }
@@ -167,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_hit_miss() {
-        let cache = QueryCache::new(Duration::from_secs(10), 100);
+        let cache = QueryCache::new(Duration::from_secs(10), 100, 0);
         let key = QueryCacheKey {
             table_name: "t".into(),
             query_type: 0,
@@ -192,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_ttl_expiry() {
-        let cache = QueryCache::new(Duration::from_millis(50), 100);
+        let cache = QueryCache::new(Duration::from_millis(50), 100, 0);
         let key = QueryCacheKey {
             table_name: "t".into(), query_type: 0, vector_hash: 1, filter: None, k: 5, nprobes: 0, metric_type: 0i32, dataset_version: 1,
         };
@@ -206,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_max_entries() {
-        let cache = QueryCache::new(Duration::from_secs(10), 2);
+        let cache = QueryCache::new(Duration::from_secs(10), 2, 0);
 
         for i in 0..3 {
             let key = QueryCacheKey {
@@ -232,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_hit_rate() {
-        let cache = QueryCache::new(Duration::from_secs(10), 100);
+        let cache = QueryCache::new(Duration::from_secs(10), 100, 0);
         let key = QueryCacheKey {
             table_name: "t".into(), query_type: 0, vector_hash: 0, filter: None, k: 5, nprobes: 0, metric_type: 0i32, dataset_version: 1,
         };

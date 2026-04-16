@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float32Array, StringArray};
+use arrow::array::{Array, Float32Array};
 use datafusion::error::{DataFusionError, Result};
 use log::debug;
 
@@ -105,14 +105,13 @@ async fn embed_sentence_transformers(text: &str, config: &EmbeddingConfig) -> Re
 #[allow(dead_code)] // Used when openai/sentence-transformers features enabled
 fn extract_vector_from_embedding(result: &Arc<dyn Array>) -> Result<Vec<f32>> {
     // The result is typically a FixedSizeListArray with one row
-    if let Some(list) = result.as_any().downcast_ref::<arrow::array::FixedSizeListArray>() {
-        if list.len() > 0 {
+    if let Some(list) = result.as_any().downcast_ref::<arrow::array::FixedSizeListArray>()
+        && list.len() > 0 {
             let values = list.value(0);
             if let Some(floats) = values.as_any().downcast_ref::<Float32Array>() {
                 return Ok(floats.values().to_vec());
             }
         }
-    }
     // Fallback: try as flat Float32Array
     if let Some(floats) = result.as_any().downcast_ref::<Float32Array>() {
         return Ok(floats.values().to_vec());

@@ -1,5 +1,6 @@
 // Licensed under the Apache License, Version 2.0.
 // Lance Distributed Coordinator — query routing, scatter-gather, merge.
+#![allow(unexpected_cfgs, clippy::too_many_arguments)]
 
 pub mod auth;
 pub mod connection_pool;

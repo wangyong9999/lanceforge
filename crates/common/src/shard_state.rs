@@ -79,10 +79,20 @@ pub trait ShardState: Send + Sync + 'static {
 /// Reconciliation loop: periodically checks NextTarget readiness and auto-promotes.
 /// Inspired by Milvus TargetObserver.check().
 /// Run this as a background tokio task alongside the Scheduler.
-pub async fn reconciliation_loop(state: Arc<dyn ShardState>, interval: Duration) {
+pub async fn reconciliation_loop(
+    state: Arc<dyn ShardState>,
+    interval: Duration,
+    shutdown: Arc<tokio::sync::Notify>,
+) {
     info!("Reconciliation loop started (interval: {:?})", interval);
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = shutdown.notified() => {
+                info!("Reconciliation loop stopping (shutdown)");
+                return;
+            }
+        }
 
         let tables = state.all_tables().await;
         for table in &tables {
@@ -208,11 +218,10 @@ impl StaticShardState {
                         .filter(|(id, _)| **id != primary)
                         .min_by_key(|(_, count)| *count)
                         .map(|(id, _)| id.clone());
-                    if let Some(sec) = secondary {
-                        if let Some(assigned) = new_mapping.get_mut(shard) {
+                    if let Some(sec) = secondary
+                        && let Some(assigned) = new_mapping.get_mut(shard) {
                             assigned.push(sec);
                         }
-                    }
                 }
             }
 

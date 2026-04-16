@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::{info, warn, debug};
+use log::{info, debug};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -216,12 +216,11 @@ impl ShardState for PersistentShardState {
             return Err("Next target not ready".to_string());
         }
         let mut s = self.state.write().await;
-        if let Some(target) = s.tables.get_mut(table_name) {
-            if let Some(next) = target.next.take() {
+        if let Some(target) = s.tables.get_mut(table_name)
+            && let Some(next) = target.next.take() {
                 target.current = next;
                 target.version += 1;
             }
-        }
         drop(s);
         self.save().await.map_err(|e| format!("persist failed: {e}"))?;
         Ok(())

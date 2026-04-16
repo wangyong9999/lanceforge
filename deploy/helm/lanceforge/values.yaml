@@ -84,6 +84,23 @@ security:
     certSecretName: ""
   apiKeys: []
 
+# --- Pod Disruption Budget ---
+pdb:
+  coordinator:
+    enabled: true
+    minAvailable: 1
+  worker:
+    enabled: true
+    # N-1 for rolling updates: at least one worker can go down
+    maxUnavailable: 1
+
+# --- Horizontal Pod Autoscaler (worker only) ---
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
 # --- ServiceAccount ---
 serviceAccount:
   create: true
