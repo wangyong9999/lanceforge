@@ -162,6 +162,7 @@ async fn test_distributed_speedup() {
         }).await.unwrap().into_inner();
         assert!(resp.error.is_empty());
         assert!(resp.num_rows > 0);
+        offset: 0,
     }
     let dist_elapsed = dist_start.elapsed();
     let dist_qps = num_queries as f64 / dist_elapsed.as_secs_f64();

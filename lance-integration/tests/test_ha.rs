@@ -115,6 +115,7 @@ async fn test_multi_coordinator_failover() {
         table_name: "ha".into(), vector_column: "vector".into(),
         query_vector: query_vec.clone(), dimension: dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
+            offset: 0,
         query_text: None,
     }).await.unwrap().into_inner();
     assert!(resp1.error.is_empty());
@@ -130,6 +131,7 @@ async fn test_multi_coordinator_failover() {
         table_name: "ha".into(), vector_column: "vector".into(),
         query_vector: query_vec.clone(), dimension: dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
+            offset: 0,
         query_text: None,
     }).await.unwrap().into_inner();
     assert!(resp2.error.is_empty());
@@ -151,6 +153,7 @@ async fn test_multi_coordinator_failover() {
             table_name: "ha".into(), vector_column: "vector".into(),
             query_vector: query_vec.clone(), dimension: dim as u32,
             k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
+            offset: 0,
             query_text: None,
         }).await.is_err(),
     };
@@ -162,6 +165,7 @@ async fn test_multi_coordinator_failover() {
         table_name: "ha".into(), vector_column: "vector".into(),
         query_vector: query_vec.clone(), dimension: dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
+            offset: 0,
         query_text: None,
     }).await.unwrap().into_inner();
     assert!(resp3.error.is_empty());

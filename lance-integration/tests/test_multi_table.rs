@@ -195,4 +195,5 @@ async fn test_multi_table_different_schemas() {
     println!("✓ Nonexistent table: NOT_FOUND");
 
     println!("\n=== Multi-table tests passed ===");
+    offset: 0,
 }
