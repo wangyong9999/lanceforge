@@ -588,7 +588,7 @@ impl LanceTableRegistry {
                     total_affected += pre_count.saturating_sub(post_count);
                 }
                 2 => {
-                    // Upsert via merge_insert
+                    // Upsert via merge_insert with OCC conflict retry
                     if req.arrow_ipc_data.is_empty() {
                         return Err(DataFusionError::Plan("Empty data for upsert".to_string()));
                     }
@@ -599,16 +599,30 @@ impl LanceTableRegistry {
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     let rows = batch.num_rows() as u64;
                     let on_cols: Vec<&str> = req.on_columns.iter().map(|s| s.as_str()).collect();
-                    let schema = table.schema().await
-                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                    let mut builder = table.merge_insert(&on_cols);
-                    builder.when_matched_update_all(None)
-                        .when_not_matched_insert_all();
-                    builder.execute(Box::new(arrow::record_batch::RecordBatchIterator::new(
-                            vec![Ok(batch)], schema,
-                        )))
-                        .await
-                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    let mut retries = 0u32;
+                    loop {
+                        let schema = table.schema().await
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                        let mut builder = table.merge_insert(&on_cols);
+                        builder.when_matched_update_all(None)
+                            .when_not_matched_insert_all();
+                        match builder.execute(Box::new(arrow::record_batch::RecordBatchIterator::new(
+                                vec![Ok(batch.clone())], schema,
+                            ))).await {
+                            Ok(_) => break,
+                            Err(e) => {
+                                let msg = e.to_string().to_lowercase();
+                                if (msg.contains("conflict") || msg.contains("version"))
+                                    && retries < 3 {
+                                    retries += 1;
+                                    warn!("Upsert conflict on {}, retry {}/3", name, retries);
+                                    tokio::time::sleep(Duration::from_millis(50 * retries as u64)).await;
+                                    continue;
+                                }
+                                return Err(DataFusionError::External(Box::new(e)));
+                            }
+                        }
+                    }
                     total_affected += rows;
                 }
                 _ => {

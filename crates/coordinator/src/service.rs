@@ -1102,7 +1102,17 @@ impl LanceSchedulerService for CoordinatorService {
                 }
             }
 
-            // Phase 2: Send UnloadShard RPCs to workers losing shards
+            let moved: usize = to_load.values().map(|v| v.len()).sum();
+            total_moved += moved as u32;
+
+            // Phase 2: Update routing metadata BEFORE unloading old shards.
+            // This ensures queries always have a valid target during the transition:
+            // - New workers already loaded the shards (Phase 1)
+            // - Routing now points to new workers
+            // - Even if crash happens here, both old and new workers have the data
+            self.shard_state.register_table(table_name, new_assignment).await;
+
+            // Phase 3: Unload from old workers (best-effort, after routing updated)
             for (worker_id, shards_to_unload) in &to_unload {
                 if let Ok(mut client) = self.pool.get_healthy_client(worker_id).await {
                     for shard_name in shards_to_unload {
@@ -1117,7 +1127,6 @@ impl LanceSchedulerService for CoordinatorService {
                                 info!("Rebalance: unloaded {} from {}", shard_name, worker_id);
                             }
                             Ok(Err(e)) => {
-                                // Non-fatal: worker may already have lost the shard
                                 warn!("Rebalance: unload {} from {} failed: {}", shard_name, worker_id, e);
                             }
                             Err(_) => {
@@ -1127,12 +1136,6 @@ impl LanceSchedulerService for CoordinatorService {
                     }
                 }
             }
-
-            let moved: usize = to_load.values().map(|v| v.len()).sum();
-            total_moved += moved as u32;
-
-            // Phase 3: Update shard_state metadata (after RPCs succeed)
-            self.shard_state.register_table(table_name, new_assignment).await;
         }
 
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
