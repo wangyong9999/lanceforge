@@ -227,6 +227,7 @@ async fn test_grpc_ann_search() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.expect("Filtered ANN search failed");
 
     let resp2 = response2.into_inner();
@@ -257,6 +258,7 @@ async fn test_grpc_ann_search() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.expect("Large K search failed");
 
     let resp3 = response3.into_inner();
@@ -320,6 +322,7 @@ async fn test_grpc_unknown_table() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await;
 
     // Should return gRPC NOT_FOUND error
@@ -395,6 +398,7 @@ async fn test_grpc_empty_result() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp.error.is_empty());

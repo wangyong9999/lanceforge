@@ -150,6 +150,7 @@ async fn test_shard_pruning_in_cluster() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp.error.is_empty(), "Error: {}", resp.error);
@@ -178,6 +179,7 @@ async fn test_shard_pruning_in_cluster() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp2.num_rows > 0, "Unfiltered should return results from both shards");
@@ -261,6 +263,7 @@ async fn test_secondary_failover() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+            offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp.error.is_empty(), "Failover should work: {}", resp.error);

@@ -149,6 +149,7 @@ async fn test_multi_table_different_schemas() {
         dimension: product_dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp1.error.is_empty(), "Products query error: {}", resp1.error);
@@ -170,6 +171,7 @@ async fn test_multi_table_different_schemas() {
         dimension: doc_dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp2.error.is_empty(), "Documents query error: {}", resp2.error);
@@ -190,6 +192,7 @@ async fn test_multi_table_different_schemas() {
         query_vector: vec![0; 32], dimension: 8,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        offset: 0,
     }).await;
     assert!(resp3.is_err());
     println!("✓ Nonexistent table: NOT_FOUND");

@@ -121,6 +121,7 @@ async fn test_text_query_with_mock_embedding() {
         columns: vec![],
         metric_type: 0,
         query_text: Some("find similar documents".into()),
+        offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp.error.is_empty(), "Text query error: {}", resp.error);
@@ -141,6 +142,7 @@ async fn test_text_query_with_mock_embedding() {
         columns: vec![],
         metric_type: 0,
         query_text: None,
+        offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp2.error.is_empty(), "Vector query error: {}", resp2.error);
@@ -159,6 +161,7 @@ async fn test_text_query_with_mock_embedding() {
         columns: vec![],
         metric_type: 0,
         query_text: Some("ignored because vector is provided".into()),
+        offset: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp3.error.is_empty());
@@ -177,6 +180,7 @@ async fn test_text_query_with_mock_embedding() {
         columns: vec![],
         metric_type: 0,
         query_text: None,  // both empty
+        offset: 0,
     }).await;
 
     assert!(resp4.is_err(), "Should fail with neither vector nor text");
@@ -239,6 +243,7 @@ async fn test_text_query_no_embedding_config() {
         dimension: 0,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: Some("hello".into()),
+        offset: 0,
     }).await;
 
     assert!(resp.is_err(), "Should fail without embedding config");

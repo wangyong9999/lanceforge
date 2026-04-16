@@ -159,6 +159,7 @@ async fn test_distributed_speedup() {
             columns: vec![],
             metric_type: 0,
             query_text: None,
+            offset: 0,
         }).await.unwrap().into_inner();
         assert!(resp.error.is_empty());
         assert!(resp.num_rows > 0);

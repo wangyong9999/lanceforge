@@ -129,6 +129,7 @@ async fn test_sustained_load() {
             columns: vec![],
             metric_type: 0,
             query_text: None,
+            offset: 0,
         }).await;
 
         match resp {
@@ -213,6 +214,7 @@ async fn test_concurrent_load() {
                 dimension: dim as u32,
                 k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             query_text: None,
+            offset: 0,
             }).await;
 
             if resp.is_ok() && resp.unwrap().get_ref().error.is_empty() {
