@@ -164,7 +164,11 @@ Each Worker uses the **lancedb Table API** directly -- vector search, FTS, hybri
 ## Python SDK
 
 ```bash
-pip install grpcio grpcio-tools pyarrow numpy
+# Install from GitHub (recommended)
+pip install git+https://github.com/wangyong9999/lanceforge.git#subdirectory=lance-integration/sdk/python
+
+# Or from local clone
+cd lance-integration/sdk/python && pip install .
 ```
 
 ```python

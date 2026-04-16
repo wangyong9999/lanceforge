@@ -11,11 +11,10 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
-# Add SDK and tools to path
+# Add SDK to path so `from lanceforge import ...` works in test
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tools'))
 
-import lance_service_pb2 as pb
+from lanceforge import lance_service_pb2 as pb
 
 
 class TestVectorEncoding(unittest.TestCase):

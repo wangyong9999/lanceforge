@@ -3,20 +3,13 @@ LanceForge gRPC client — thin wrapper over generated proto stubs.
 """
 
 import struct
-import sys
-import os
 
 import grpc
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
-# Add tools dir to path for generated proto stubs
-_tools_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tools')
-if _tools_dir not in sys.path:
-    sys.path.insert(0, os.path.abspath(_tools_dir))
-
-import lance_service_pb2 as pb
-import lance_service_pb2_grpc as pb_grpc
+from lanceforge import lance_service_pb2 as pb
+from lanceforge import lance_service_pb2_grpc as pb_grpc
 
 
 class LanceForgeClient:
