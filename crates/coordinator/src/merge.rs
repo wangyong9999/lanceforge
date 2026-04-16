@@ -27,7 +27,12 @@ pub fn global_top_k_by_score(batches: Vec<RecordBatch>, k: usize) -> Result<Reco
     global_top_k(batches, k, "_score", true)
 }
 
-/// Generic TopK merge with schema validation and NaN handling.
+/// Generic TopK merge with schema validation.
+///
+/// Memory optimization: each input batch (from a worker) is already sorted
+/// by the lancedb query engine. We truncate each to K rows BEFORE concat,
+/// reducing peak memory from N*oversample*K to N*K (where N = num workers).
+/// For top-10000 with 5 workers: 500K rows → 50K rows before sort.
 fn global_top_k(
     batches: Vec<RecordBatch>,
     k: usize,
@@ -40,7 +45,7 @@ fn global_top_k(
 
     let schema = batches[0].schema();
 
-    // Schema validation: all batches must have compatible schemas
+    // Schema validation
     for (i, batch) in batches.iter().enumerate().skip(1) {
         if batch.schema() != schema {
             return Err(DataFusionError::Plan(format!(
@@ -50,7 +55,20 @@ fn global_top_k(
         }
     }
 
-    let merged = arrow::compute::concat_batches(&schema, &batches)
+    // Memory optimization: truncate each batch to k rows before concat.
+    // Each worker returns results sorted by distance/score, so the first k
+    // rows from each are the best candidates. This bounds concat memory to
+    // num_workers * k instead of num_workers * oversample_k.
+    let truncated: Vec<RecordBatch> = batches.into_iter()
+        .map(|b| if b.num_rows() > k { b.slice(0, k) } else { b })
+        .filter(|b| b.num_rows() > 0)
+        .collect();
+
+    if truncated.is_empty() {
+        return Ok(RecordBatch::new_empty(schema));
+    }
+
+    let merged = arrow::compute::concat_batches(&schema, &truncated)
         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
     if merged.num_rows() == 0 {
@@ -59,7 +77,6 @@ fn global_top_k(
 
     // Find sort column
     let sort_idx = schema.index_of(sort_column).map_err(|_| {
-        // Try alternate column name for flexibility
         DataFusionError::Plan(format!(
             "Sort column '{}' not found in schema: {:?}",
             sort_column,

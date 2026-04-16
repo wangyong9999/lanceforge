@@ -196,15 +196,23 @@ async fn scatter_gather_inner(
         }
     }
 
-    if failures == total {
+    if failures == total && total > 0 {
         return Err(tonic::Status::internal(format!("All {} workers failed: {}", total, failure_details.join("; "))));
     }
-    if failures > 0 && failures * 2 > total {
-        return Err(tonic::Status::internal(format!("{}/{} workers failed: {}", failures, total, failure_details.join("; "))));
-    }
+
+    // Partial failure: return results from healthy workers with warning.
+    // Previous behavior: >50% failures = error. New: always return what we have,
+    // set error field as warning so client knows results may be incomplete.
+    let partial_warning = if failures > 0 {
+        let msg = format!("partial: {}/{} workers failed ({})", failures, total, failure_details.join("; "));
+        warn!("{}", msg);
+        msg
+    } else {
+        String::new()
+    };
 
     if batches.is_empty() {
-        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: String::new(), truncated: false, next_offset: 0, latency_ms: 0 });
+        return Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: partial_warning, truncated: false, next_offset: 0, latency_ms: 0 });
     }
 
     // Merge
@@ -218,7 +226,7 @@ async fn scatter_gather_inner(
         Ok(batch) => {
             let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch)
                 .map_err(|e| tonic::Status::internal(format!("IPC error: {e}")))?;
-            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: String::new(), truncated: false, next_offset: 0, latency_ms: 0 })
+            Ok(pb::SearchResponse { arrow_ipc_data: ipc, num_rows: batch.num_rows() as u32, error: partial_warning, truncated: false, next_offset: 0, latency_ms: 0 })
         }
         Err(e) => Ok(pb::SearchResponse { arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(), truncated: false, next_offset: 0, latency_ms: 0 }),
     }

@@ -549,17 +549,30 @@ impl LanceTableRegistry {
             debug!("Executing write on shard: {}", name);
             match req.write_type {
                 0 => {
-                    // Add rows
+                    // Add rows with OCC conflict retry
                     if req.arrow_ipc_data.is_empty() {
                         return Err(DataFusionError::Plan("Empty data for add".to_string()));
                     }
                     let batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     let rows = batch.num_rows() as u64;
-                    table.add(vec![batch])
-                        .execute()
-                        .await
-                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    let mut retries = 0u32;
+                    loop {
+                        match table.add(vec![batch.clone()]).execute().await {
+                            Ok(_) => break,
+                            Err(e) => {
+                                let msg = e.to_string().to_lowercase();
+                                if (msg.contains("conflict") || msg.contains("version"))
+                                    && retries < 3 {
+                                    retries += 1;
+                                    warn!("Write conflict on {}, retry {}/3", name, retries);
+                                    tokio::time::sleep(Duration::from_millis(50 * retries as u64)).await;
+                                    continue;
+                                }
+                                return Err(DataFusionError::External(Box::new(e)));
+                            }
+                        }
+                    }
                     total_affected += rows;
                 }
                 1 => {
