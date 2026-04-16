@@ -44,6 +44,10 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "semver=$SEMVER" >> $GITHUB_OUTPUT
 
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
       # ── Tests ──
       - name: Clippy (zero warnings)
         run: cargo clippy --workspace -- -W clippy::all

@@ -437,6 +437,10 @@ impl LanceSchedulerService for CoordinatorService {
                 }
             }).collect();
 
+        // Update Prometheus executor health counters
+        let healthy_count = executors.iter().filter(|e| e.healthy).count() as u64;
+        self.metrics.set_executor_health(healthy_count, executors.len() as u64);
+
         Ok(Response::new(pb::ClusterStatusResponse {
             executors,
             total_shards,

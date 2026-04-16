@@ -37,6 +37,11 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
 
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+          protoc --version
+
       - name: Build release binaries
         run: |
           cargo build --release \
