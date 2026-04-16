@@ -4184,6 +4184,7 @@ dependencies = [
  "lancedb",
  "log",
  "rustls",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tonic",

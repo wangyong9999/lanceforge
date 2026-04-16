@@ -120,6 +120,16 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.GetByIdsRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.SearchResponse.FromString,
                 _registered_method=True)
+        self.Query = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/Query',
+                request_serializer=lance__service__pb2.QueryRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.SearchResponse.FromString,
+                _registered_method=True)
+        self.BatchSearch = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/BatchSearch',
+                request_serializer=lance__service__pb2.BatchSearchRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.BatchSearchResponse.FromString,
+                _registered_method=True)
 
 
 class LanceSchedulerServiceServicer(object):
@@ -232,6 +242,20 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Query(self, request, context):
+        """Expression scan (SQL filter without vector)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BatchSearch(self, request, context):
+        """Batch vector search (multiple queries in one RPC)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceSchedulerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -319,6 +343,16 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.GetByIds,
                     request_deserializer=lance__service__pb2.GetByIdsRequest.FromString,
                     response_serializer=lance__service__pb2.SearchResponse.SerializeToString,
+            ),
+            'Query': grpc.unary_unary_rpc_method_handler(
+                    servicer.Query,
+                    request_deserializer=lance__service__pb2.QueryRequest.FromString,
+                    response_serializer=lance__service__pb2.SearchResponse.SerializeToString,
+            ),
+            'BatchSearch': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchSearch,
+                    request_deserializer=lance__service__pb2.BatchSearchRequest.FromString,
+                    response_serializer=lance__service__pb2.BatchSearchResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -791,6 +825,60 @@ class LanceSchedulerService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def Query(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/Query',
+            lance__service__pb2.QueryRequest.SerializeToString,
+            lance__service__pb2.SearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchSearch(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/BatchSearch',
+            lance__service__pb2.BatchSearchRequest.SerializeToString,
+            lance__service__pb2.BatchSearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class LanceExecutorServiceStub(object):
     """Service running on each Executor for receiving queries from Scheduler.
@@ -845,6 +933,11 @@ class LanceExecutorServiceStub(object):
         self.LocalGetByIds = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/LocalGetByIds',
                 request_serializer=lance__service__pb2.GetByIdsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.LocalSearchResponse.FromString,
+                _registered_method=True)
+        self.LocalQuery = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/LocalQuery',
+                request_serializer=lance__service__pb2.QueryRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.LocalSearchResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
@@ -912,6 +1005,12 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def LocalQuery(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -965,6 +1064,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
             'LocalGetByIds': grpc.unary_unary_rpc_method_handler(
                     servicer.LocalGetByIds,
                     request_deserializer=lance__service__pb2.GetByIdsRequest.FromString,
+                    response_serializer=lance__service__pb2.LocalSearchResponse.SerializeToString,
+            ),
+            'LocalQuery': grpc.unary_unary_rpc_method_handler(
+                    servicer.LocalQuery,
+                    request_deserializer=lance__service__pb2.QueryRequest.FromString,
                     response_serializer=lance__service__pb2.LocalSearchResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
@@ -1216,6 +1320,33 @@ class LanceExecutorService(object):
             target,
             '/lance.distributed.LanceExecutorService/LocalGetByIds',
             lance__service__pb2.GetByIdsRequest.SerializeToString,
+            lance__service__pb2.LocalSearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LocalQuery(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/LocalQuery',
+            lance__service__pb2.QueryRequest.SerializeToString,
             lance__service__pb2.LocalSearchResponse.FromString,
             options,
             channel_credentials,

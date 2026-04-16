@@ -409,6 +409,76 @@ class LanceForgeClient:
             raise RuntimeError(f"CountRows failed: {resp.error}")
         return resp.count
 
+    def query(self, table, filter, limit=100, offset=0, columns=None):
+        """Expression scan: filter rows without vector search.
+
+        Like SQL: SELECT [columns] FROM table WHERE filter LIMIT limit OFFSET offset
+
+        Args:
+            table: Table name
+            filter: SQL WHERE predicate (e.g., "category = 'tech'")
+            limit: Max rows to return (default 100)
+            offset: Skip first N rows
+            columns: Optional list of columns to return
+
+        Returns:
+            pyarrow.Table with matching rows
+        """
+        req = pb.QueryRequest(
+            table_name=table, filter=filter, limit=limit, offset=offset)
+        if columns:
+            req.columns.extend(columns)
+        resp = self._call(self._stub.Query, req)
+        return self._decode_response(resp)
+
+    def batch_search(self, table, query_vectors, k=10, nprobes=20,
+                     filter=None, columns=None, metric="l2",
+                     vector_column="vector"):
+        """Batch ANN search: multiple query vectors in one RPC.
+
+        Args:
+            table: Table name
+            query_vectors: List of vectors (each a list of floats)
+            k: Results per query
+            nprobes: IVF partitions to probe
+            filter: Optional SQL WHERE clause
+            columns: Optional columns to return
+            metric: Distance metric ("l2", "cosine", "dot")
+
+        Returns:
+            List of pyarrow.Table (one per query vector)
+        """
+        metric_type = {"l2": 0, "cosine": 1, "dot": 2}.get(metric, 0)
+        qvecs = [struct.pack(f"<{len(v)}f", *v) for v in query_vectors]
+        dim = len(query_vectors[0]) if query_vectors else 0
+
+        req = pb.BatchSearchRequest(
+            table_name=table,
+            query_vectors=qvecs,
+            vector_column=vector_column or "vector",
+            dimension=dim,
+            k=k,
+            nprobes=nprobes,
+            metric_type=metric_type,
+        )
+        if filter:
+            req.filter = filter
+        if columns:
+            req.columns.extend(columns)
+
+        resp = self._call(self._stub.BatchSearch, req)
+        if resp.error:
+            raise RuntimeError(f"BatchSearch failed: {resp.error}")
+        results = []
+        for sr in resp.results:
+            if sr.error:
+                raise RuntimeError(f"BatchSearch sub-query error: {sr.error}")
+            if sr.arrow_ipc_data:
+                results.append(ipc.open_stream(sr.arrow_ipc_data).read_all())
+            else:
+                results.append(pa.table({}))
+        return results
+
     def get_by_ids(self, table, ids, id_column="id", columns=None):
         """Point lookup: get rows by primary key IDs.
 

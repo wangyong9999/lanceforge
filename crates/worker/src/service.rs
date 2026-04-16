@@ -202,6 +202,34 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    async fn local_query(
+        &self,
+        request: Request<pb::QueryRequest>,
+    ) -> Result<Response<pb::LocalSearchResponse>, Status> {
+        let req = request.into_inner();
+        if req.filter.is_empty() {
+            return Err(Status::invalid_argument("filter required for query scan"));
+        }
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let columns: Vec<String> = req.columns.into_iter().collect();
+        match self.registry.scan_query(
+            &req.table_name, &req.filter, limit, req.offset as usize, &columns
+        ).await {
+            Ok(batch) => {
+                let ipc_data = record_batch_to_ipc(&batch)
+                    .map_err(|e| Status::internal(format!("IPC: {e}")))?;
+                Ok(Response::new(pb::LocalSearchResponse {
+                    arrow_ipc_data: ipc_data,
+                    num_rows: batch.num_rows() as u32,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(pb::LocalSearchResponse {
+                arrow_ipc_data: vec![], num_rows: 0, error: e.to_string(),
+            })),
+        }
+    }
+
     async fn local_get_by_ids(
         &self,
         request: Request<pb::GetByIdsRequest>,

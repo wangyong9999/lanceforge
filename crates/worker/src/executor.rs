@@ -396,6 +396,46 @@ impl LanceTableRegistry {
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
+    /// Expression scan: filter rows without vector search.
+    pub async fn scan_query(
+        &self,
+        table_name: &str,
+        filter: &str,
+        limit: usize,
+        offset: usize,
+        columns: &[String],
+    ) -> Result<RecordBatch> {
+        use lancedb::query::{ExecutableQuery, QueryBase};
+        let targets: Vec<(String, lancedb::Table)> = {
+            let tables = self.tables.read().await;
+            let matched = resolve_tables_inner(&tables, table_name)?;
+            matched.into_iter().map(|(n, t)| (n.to_string(), t.clone())).collect()
+        };
+
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        for (_, table) in &targets {
+            let mut builder = table.query().only_if(filter);
+            if !columns.is_empty() {
+                builder = builder.select(lancedb::query::Select::Columns(
+                    columns.iter().map(|c| c.as_str().into()).collect()
+                ));
+            }
+            // Request more than needed per shard so coordinator can merge+truncate
+            builder = builder.limit(limit + offset);
+            let stream = builder.execute().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let batches: Vec<RecordBatch> = stream.try_collect().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            all_batches.extend(batches.into_iter().filter(|b| b.num_rows() > 0));
+        }
+
+        if all_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())));
+        }
+        arrow::compute::concat_batches(&all_batches[0].schema(), &all_batches)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+    }
+
     /// Create an index on a table's column.
     pub async fn create_index_on_table(
         &self,

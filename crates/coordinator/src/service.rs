@@ -1345,6 +1345,167 @@ impl LanceSchedulerService for CoordinatorService {
             truncated: false, next_offset: 0, latency_ms,
         }))
     }
+
+    async fn query(
+        &self,
+        request: Request<pb::QueryRequest>,
+    ) -> Result<Response<pb::SearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        if req.filter.is_empty() {
+            return Err(Status::invalid_argument("filter required for query scan"));
+        }
+        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let t0 = std::time::Instant::now();
+
+        // Fan out to all workers
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
+        }
+        let statuses = self.pool.worker_statuses().await;
+        let healthy: std::collections::HashSet<String> = statuses.iter()
+            .filter(|(_, _, _, h, _, _, _)| *h)
+            .map(|(id, _, _, _, _, _, _)| id.clone())
+            .collect();
+
+        let mut worker_ids = std::collections::HashSet::new();
+        for (_, primary, secondary) in &routing {
+            if healthy.contains(primary) { worker_ids.insert(primary.clone()); }
+            else if let Some(sec) = secondary
+                && healthy.contains(sec) { worker_ids.insert(sec.clone()); }
+        }
+
+        let mut handles = Vec::new();
+        for wid in &worker_ids {
+            if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
+                let r = pb::QueryRequest {
+                    table_name: req.table_name.clone(),
+                    filter: req.filter.clone(),
+                    limit: (limit + req.offset as usize) as u32,
+                    offset: 0, // workers return all, coordinator truncates
+                    columns: req.columns.clone(),
+                };
+                let timeout = self.query_timeout;
+                handles.push(tokio::spawn(async move {
+                    tokio::time::timeout(timeout, client.local_query(Request::new(r))).await
+                }));
+            }
+        }
+
+        let mut batches = Vec::new();
+        for handle in handles {
+            if let Ok(Ok(Ok(resp))) = handle.await {
+                let r = resp.into_inner();
+                if r.num_rows > 0 && r.error.is_empty()
+                    && let Ok(batch) = lance_distributed_common::ipc::ipc_to_record_batch(&r.arrow_ipc_data) {
+                        batches.push(batch);
+                    }
+            }
+        }
+
+        let latency_ms = t0.elapsed().as_millis() as u64;
+        self.metrics.record_query(t0.elapsed().as_micros() as u64, true);
+
+        if batches.is_empty() {
+            return Ok(Response::new(pb::SearchResponse {
+                arrow_ipc_data: vec![], num_rows: 0, error: String::new(),
+                truncated: false, next_offset: 0, latency_ms,
+            }));
+        }
+
+        let merged = arrow::compute::concat_batches(&batches[0].schema(), &batches)
+            .map_err(|e| Status::internal(format!("merge: {e}")))?;
+
+        // Apply offset + limit
+        let off = req.offset as usize;
+        let total = merged.num_rows();
+        let sliced = if off >= total {
+            merged.slice(0, 0)
+        } else {
+            let len = limit.min(total - off);
+            merged.slice(off, len)
+        };
+
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&sliced)
+            .map_err(|e| Status::internal(format!("IPC: {e}")))?;
+        let next_off = if off + sliced.num_rows() < total { (off + sliced.num_rows()) as u32 } else { 0 };
+
+        Ok(Response::new(pb::SearchResponse {
+            num_rows: sliced.num_rows() as u32,
+            arrow_ipc_data: ipc,
+            error: String::new(),
+            truncated: false, next_offset: next_off, latency_ms,
+        }))
+    }
+
+    async fn batch_search(
+        &self,
+        request: Request<pb::BatchSearchRequest>,
+    ) -> Result<Response<pb::BatchSearchResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        if req.query_vectors.is_empty() {
+            return Ok(Response::new(pb::BatchSearchResponse { results: vec![], error: String::new() }));
+        }
+
+        let k = if req.k == 0 { 10 } else { req.k };
+        let oversample_k = k * self.oversample_factor;
+
+        // Execute each query in parallel
+        let mut handles = Vec::new();
+        for qv in &req.query_vectors {
+            let local_req = pb::LocalSearchRequest {
+                query_type: 0, // ANN
+                table_name: req.table_name.clone(),
+                vector_column: Some(if req.vector_column.is_empty() { "vector".to_string() } else { req.vector_column.clone() }),
+                query_vector: Some(qv.clone()),
+                dimension: Some(req.dimension),
+                nprobes: Some(if req.nprobes == 0 { 20 } else { req.nprobes }),
+                metric_type: Some(req.metric_type),
+                text_column: None, query_text: None,
+                k: oversample_k, filter: req.filter.clone(), columns: req.columns.clone(),
+            };
+
+            let pool = self.pool.clone();
+            let shard_state = self.shard_state.clone();
+            let pruner = self.pruner.clone();
+            let table = req.table_name.clone();
+            let timeout = self.query_timeout;
+            let merge_k = k;
+
+            handles.push(tokio::spawn(async move {
+                super::scatter_gather::scatter_gather(
+                    &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout,
+                ).await
+            }));
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(resp)) => results.push(resp),
+                Ok(Err(e)) => results.push(pb::SearchResponse {
+                    arrow_ipc_data: vec![], num_rows: 0,
+                    error: e.message().to_string(),
+                    truncated: false, next_offset: 0, latency_ms: 0,
+                }),
+                Err(e) => results.push(pb::SearchResponse {
+                    arrow_ipc_data: vec![], num_rows: 0,
+                    error: format!("spawn: {e}"),
+                    truncated: false, next_offset: 0, latency_ms: 0,
+                }),
+            }
+        }
+
+        Ok(Response::new(pb::BatchSearchResponse { results, error: String::new() }))
+    }
 }
 
 const MAX_K: u32 = 100_000;

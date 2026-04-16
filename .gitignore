@@ -115,3 +115,9 @@ __pycache__/
 .venv/
 *.egg-info/
 examples/rag_beir/datasets/
+
+# Release build artifacts (uploaded to GitHub Releases, not tracked in git)
+/dist/
+lance-integration/sdk/python/build/
+lance-integration/sdk/python/dist/
+lance-integration/sdk/python/*.egg-info/

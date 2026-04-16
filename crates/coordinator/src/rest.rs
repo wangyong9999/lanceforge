@@ -38,12 +38,32 @@ pub async fn start_rest_server(metrics: Arc<Metrics>, port: u16, grpc_port: u16)
             let metrics = metrics.clone();
             let gport = grpc_port;
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 65536]; // larger buffer for POST bodies
-                let n = match stream.read(&mut buf).await {
-                    Ok(n) if n > 0 => n,
-                    _ => return,
-                };
-                let request = String::from_utf8_lossy(&buf[..n]);
+                // Read HTTP request: may need multiple reads for large POST bodies
+                let mut buf = Vec::with_capacity(65536);
+                let mut tmp = vec![0u8; 65536];
+                loop {
+                    let n = match stream.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    buf.extend_from_slice(&tmp[..n]);
+                    // Check if we have complete headers + body
+                    let s = String::from_utf8_lossy(&buf);
+                    if let Some(hdr_end) = s.find("\r\n\r\n") {
+                        let headers = &s[..hdr_end];
+                        let content_len = headers.lines()
+                            .find(|l| l.to_lowercase().starts_with("content-length:"))
+                            .and_then(|l| l.split(':').nth(1))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let body_start = hdr_end + 4;
+                        if buf.len() >= body_start + content_len { break; }
+                    }
+                    if buf.len() > 1_000_000 { break; } // safety cap
+                }
+                if buf.is_empty() { return; }
+                let request = String::from_utf8_lossy(&buf);
                 let method = request.split_whitespace().next().unwrap_or("GET");
                 let path = extract_path(&request);
                 let body_str = extract_body(&request);
@@ -73,9 +93,18 @@ pub async fn start_rest_server(metrics: Arc<Metrics>, port: u16, grpc_port: u16)
                     ("POST", "/v1/tables") | ("GET", "/v1/tables") => {
                         handle_list_tables(gport).await
                     }
+                    ("POST", "/v1/query") => {
+                        handle_query(gport, body_str).await
+                    }
+                    ("POST", "/v1/batch_search") => {
+                        handle_batch_search(gport, body_str).await
+                    }
+                    ("POST", "/v1/drop_table") => {
+                        handle_drop_table(gport, body_str).await
+                    }
                     _ => {
                         ("404 Not Found", "application/json",
-                         r#"{"error":"not found","endpoints":["/healthz","/metrics","/v1/status","/v1/search","/v1/fts","/v1/count","/v1/tables"]}"#.to_string())
+                         r#"{"error":"not found","endpoints":["/healthz","/metrics","/v1/status","/v1/search","/v1/fts","/v1/query","/v1/batch_search","/v1/count","/v1/tables","/v1/drop_table"]}"#.to_string())
                     }
                 };
 
@@ -236,6 +265,122 @@ async fn handle_list_tables(grpc_port: u16) -> (&'static str, &'static str, Stri
         }
         Err(e) => ("503 Service Unavailable", "application/json",
             format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+/// POST /v1/query — Expression scan (filter without vector)
+/// Body: {"table":"t","filter":"category='tech'","limit":100}
+async fn handle_query(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v, Err(e) => return ("400 Bad Request", "application/json",
+            format!(r#"{{"error":"invalid JSON: {}"}}"#, e)),
+    };
+    let table = parsed["table"].as_str().unwrap_or("");
+    let filter = parsed["filter"].as_str().unwrap_or("");
+    let limit = parsed["limit"].as_u64().unwrap_or(100) as u32;
+    let offset = parsed["offset"].as_u64().unwrap_or(0) as u32;
+
+    if filter.is_empty() {
+        return ("400 Bad Request", "application/json", r#"{"error":"'filter' required"}"#.to_string());
+    }
+    match connect_grpc(grpc_port).await {
+        Ok(mut client) => {
+            match client.query(tonic::Request::new(pb::QueryRequest {
+                table_name: table.to_string(), filter: filter.to_string(),
+                limit, offset, columns: vec![],
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
+                        format!(r#"{{"error":"{}"}}"#, r.error)); }
+                    ("200 OK", "application/json", ipc_to_json(&r.arrow_ipc_data, r.num_rows, r.latency_ms))
+                }
+                Err(e) => ("500 Internal Server Error", "application/json",
+                    format!(r#"{{"error":"{}"}}"#, e.message())),
+            }
+        }
+        Err(e) => ("503 Service Unavailable", "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+/// POST /v1/batch_search — Multiple ANN queries in one call
+/// Body: {"table":"t","vectors":[[0.1,...],[0.2,...]],"k":10}
+async fn handle_batch_search(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v, Err(e) => return ("400 Bad Request", "application/json",
+            format!(r#"{{"error":"invalid JSON: {}"}}"#, e)),
+    };
+    let table = parsed["table"].as_str().unwrap_or("");
+    let k = parsed["k"].as_u64().unwrap_or(10) as u32;
+    let nprobes = parsed["nprobes"].as_u64().unwrap_or(20) as u32;
+
+    let vectors_raw = match parsed.get("vectors").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return ("400 Bad Request", "application/json",
+            r#"{"error":"'vectors' array of arrays required"}"#.to_string()),
+    };
+
+    let mut query_vectors = Vec::new();
+    let mut dimension = 0u32;
+    for vec_val in vectors_raw {
+        let floats: Vec<f32> = match vec_val.as_array() {
+            Some(arr) => arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect(),
+            None => return ("400 Bad Request", "application/json",
+                r#"{"error":"each vector must be array of floats"}"#.to_string()),
+        };
+        if dimension == 0 { dimension = floats.len() as u32; }
+        let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+        query_vectors.push(bytes);
+    }
+
+    match connect_grpc(grpc_port).await {
+        Ok(mut client) => {
+            match client.batch_search(tonic::Request::new(pb::BatchSearchRequest {
+                table_name: table.to_string(), query_vectors, vector_column: "vector".to_string(),
+                dimension, k, nprobes, filter: None, columns: vec![], metric_type: 0,
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
+                        format!(r#"{{"error":"{}"}}"#, r.error)); }
+                    let results_json: Vec<String> = r.results.iter()
+                        .map(|sr| ipc_to_json(&sr.arrow_ipc_data, sr.num_rows, sr.latency_ms))
+                        .collect();
+                    ("200 OK", "application/json",
+                        format!(r#"{{"count":{},"results":[{}]}}"#, results_json.len(), results_json.join(",")))
+                }
+                Err(e) => ("500 Internal Server Error", "application/json",
+                    format!(r#"{{"error":"{}"}}"#, e.message())),
+            }
+        }
+        Err(e) => ("503 Service Unavailable", "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+/// POST /v1/drop_table — Drop a table
+/// Body: {"table":"t"}
+async fn handle_drop_table(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v, Err(_) => return ("400 Bad Request", "application/json",
+            r#"{"error":"invalid JSON"}"#.to_string()),
+    };
+    let table = parsed["table"].as_str().unwrap_or("");
+    match connect_grpc(grpc_port).await {
+        Ok(mut client) => {
+            match client.drop_table(tonic::Request::new(pb::DropTableRequest {
+                table_name: table.to_string(),
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
+                        format!(r#"{{"error":"{}"}}"#, r.error)); }
+                    ("200 OK", "application/json", format!(r#"{{"dropped":"{}"}}"#, table))
+                }
+                Err(e) => ("500 Internal Server Error", "application/json",
+                    format!(r#"{{"error":"{}"}}"#, e.message())),
+            }
+        }
+        Err(e) => ("503 Service Unavailable", "application/json", format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
 
