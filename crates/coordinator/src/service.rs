@@ -1250,6 +1250,8 @@ impl LanceSchedulerService for CoordinatorService {
         }
         info!("Worker '{}' registering at {}:{}", req.worker_id, req.host, req.port);
         self.shard_state.register_executor(&req.worker_id, &req.host, req.port as u16).await;
+        // Add to connection pool so health check will discover and connect to it
+        self.pool.add_endpoint(&req.worker_id, &req.host, req.port as u16).await;
         Ok(Response::new(pb::RegisterWorkerResponse {
             assigned_shards: 0,
             error: String::new(),

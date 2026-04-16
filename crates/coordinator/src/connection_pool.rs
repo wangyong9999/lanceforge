@@ -39,7 +39,7 @@ pub struct WorkerState {
 /// Manages connections to all Worker nodes.
 pub struct ConnectionPool {
     workers: Arc<RwLock<HashMap<String, WorkerState>>>,
-    endpoints: HashMap<String, (String, u16)>,
+    endpoints: Arc<RwLock<HashMap<String, (String, u16)>>>,
     query_timeout: Duration,
     /// TLS config for client-side connection to workers.
     tls_config: Option<tonic::transport::ClientTlsConfig>,
@@ -70,7 +70,7 @@ impl ConnectionPool {
     ) -> Self {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
-            endpoints,
+            endpoints: Arc::new(RwLock::new(endpoints)),
             query_timeout,
             tls_config: None,
             shutdown: Arc::new(tokio::sync::Notify::new()),
@@ -88,6 +88,13 @@ impl ConnectionPool {
     /// Signal the health check loop to stop.
     pub fn shutdown(&self) {
         self.shutdown.notify_one();
+    }
+
+    /// Dynamically add a new worker endpoint (for RegisterWorker).
+    /// The next health check cycle will connect to it.
+    pub async fn add_endpoint(&self, worker_id: &str, host: &str, port: u16) {
+        self.endpoints.write().await.insert(worker_id.to_string(), (host.to_string(), port));
+        info!("Added endpoint for worker {} at {}:{}", worker_id, host, port);
     }
 
     /// Attach shard URI registry for automatic shard recovery.
@@ -161,7 +168,8 @@ impl ConnectionPool {
     }
 
     async fn connect_all(&self) {
-        for (wid, (host, port)) in &self.endpoints {
+        let endpoints = self.endpoints.read().await.clone();
+        for (wid, (host, port)) in &endpoints {
             let endpoint = match self.build_endpoint(host, *port) {
                 Ok(ep) => ep,
                 Err(e) => {
@@ -221,7 +229,8 @@ impl ConnectionPool {
             // Phase 1: Collect health check results WITHOUT holding locks during I/O
             let mut results: Vec<(String, HealthCheckResult)> = Vec::new();
 
-            for (wid, (host, port)) in &self.endpoints {
+            let endpoints_snapshot = self.endpoints.read().await.clone();
+            for (wid, (host, port)) in &endpoints_snapshot {
                 let needs_connect = !self.workers.read().await.contains_key(wid);
 
                 if needs_connect {
@@ -349,7 +358,8 @@ impl ConnectionPool {
     /// Get health status for all workers (for cluster status API).
     pub async fn worker_statuses(&self) -> Vec<(String, String, u16, bool, Instant, u32, u64)> {
         let workers = self.workers.read().await;
-        self.endpoints.iter().map(|(id, (host, port))| {
+        let endpoints = self.endpoints.read().await;
+        endpoints.iter().map(|(id, (host, port))| {
             let (healthy, last_check, loaded_shards, total_rows) = workers.get(id)
                 .map(|ws| (ws.healthy, ws.last_check, ws.loaded_shards, ws.total_rows))
                 .unwrap_or((false, Instant::now(), 0, 0));

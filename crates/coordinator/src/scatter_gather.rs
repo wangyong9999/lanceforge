@@ -155,30 +155,30 @@ async fn scatter_gather_inner(
 
     debug!("Scatter: {} shards → {} workers ({} skipped)", shard_routing.len() - skipped, worker_shards.len(), skipped);
 
-    // Scatter: parallel gRPC. Wrap request in Arc to avoid cloning the
-    // query vector (up to 6KB for 1536d) for each worker.
+    // Scatter: parallel gRPC via JoinSet (automatically aborts tasks when
+    // dropped — e.g., on client disconnect or timeout, preventing wasted compute).
     let shared_req = Arc::new(local_req);
-    let mut handles = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     for wid in worker_shards.keys() {
         if let Ok(mut client) = pool.get_healthy_client(wid).await {
             let req = (*shared_req).clone();
             let worker_id = wid.clone();
             let timeout = query_timeout;
-            handles.push(tokio::spawn(async move {
+            tasks.spawn(async move {
                 let result = tokio::time::timeout(timeout, client.execute_local_search(Request::new(req))).await;
                 (worker_id, result)
-            }));
+            });
         }
     }
 
     // Gather + failure tracking
     let mut batches = Vec::new();
-    let total = handles.len();
+    let total = tasks.len();
     let mut failures = 0;
     let mut failure_details = Vec::new();
 
-    for handle in handles {
-        match handle.await {
+    while let Some(handle) = tasks.join_next().await {
+        match handle {
             Ok((wid, Ok(Ok(response)))) => {
                 let resp = response.into_inner();
                 if !resp.error.is_empty() {
