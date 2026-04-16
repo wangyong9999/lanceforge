@@ -1,0 +1,239 @@
+name: Release
+
+# 触发条件: push v开头的 tag (e.g. v0.2.0)
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: write    # create release + upload assets
+  packages: write    # push Docker image to ghcr.io
+
+jobs:
+  # ╔══════════════════════════════════════╗
+  # ║  Job 1: Build all release artifacts  ║
+  # ╚══════════════════════════════════════╝
+  build:
+    name: Build Release Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Extract version
+        id: version
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          SEMVER=${TAG#v}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "semver=$SEMVER" >> $GITHUB_OUTPUT
+
+      # ── Tests ──
+      - name: Clippy (zero warnings)
+        run: cargo clippy --workspace -- -W clippy::all
+
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+      # ── Binary ──
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker
+
+      - name: Package tar.gz
+        run: |
+          mkdir -p dist
+          cp target/release/lance-coordinator dist/
+          cp target/release/lance-worker dist/
+          strip dist/lance-coordinator dist/lance-worker
+          tar czf dist/lanceforge-${{ steps.version.outputs.tag }}-linux-x86_64.tar.gz \
+            -C dist lance-coordinator lance-worker
+
+      # ── Python wheel ──
+      - name: Build Python wheel
+        run: |
+          pip install grpcio-tools
+          bash scripts/gen-proto-stubs.sh
+          sed -i 's/version="[^"]*"/version="${{ steps.version.outputs.semver }}"/' \
+            lance-integration/sdk/python/setup.py
+          cd lance-integration/sdk/python
+          python3 setup.py bdist_wheel -d ${{ github.workspace }}/dist
+
+      # ── .deb ──
+      - name: Build .deb package
+        run: |
+          DEB=dist/deb/lanceforge_${{ steps.version.outputs.semver }}_amd64
+          mkdir -p $DEB/DEBIAN $DEB/usr/bin $DEB/etc/lanceforge \
+                   $DEB/lib/systemd/system $DEB/usr/share/doc/lanceforge
+
+          cat > $DEB/DEBIAN/control <<EOF
+          Package: lanceforge
+          Version: ${{ steps.version.outputs.semver }}
+          Section: database
+          Priority: optional
+          Architecture: amd64
+          Depends: libssl3 (>= 3.0), ca-certificates
+          Maintainer: LanceForge Team <ws1084025704@gmail.com>
+          Homepage: https://github.com/wangyong9999/lanceforge
+          Description: Distributed multimodal retrieval engine for Lance tables
+          EOF
+          # Remove leading spaces (heredoc indentation)
+          sed -i 's/^          //' $DEB/DEBIAN/control
+
+          cp dist/lance-coordinator dist/lance-worker $DEB/usr/bin/
+
+          # Minimal config
+          cat > $DEB/etc/lanceforge/config.yaml <<'YAML'
+          executors: [{id: worker_0, host: 127.0.0.1, port: 50100}]
+          tables: []
+          default_table_path: /var/lib/lanceforge/tables
+          metadata_path: /var/lib/lanceforge/metadata.json
+          YAML
+          sed -i 's/^          //' $DEB/etc/lanceforge/config.yaml
+          echo "/etc/lanceforge/config.yaml" > $DEB/DEBIAN/conffiles
+
+          # systemd services
+          cp dist/deb/lanceforge_*/lib/systemd/system/*.service $DEB/lib/systemd/system/ 2>/dev/null || \
+          for svc in lance-coordinator "lance-worker@"; do
+            cat > $DEB/lib/systemd/system/${svc}.service <<SVC
+          [Unit]
+          Description=LanceForge ${svc}
+          After=network-online.target
+          [Service]
+          Type=simple
+          User=lanceforge
+          ExecStart=/usr/bin/${svc%@} /etc/lanceforge/config.yaml
+          Restart=on-failure
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+            sed -i 's/^          //' $DEB/lib/systemd/system/${svc}.service
+          done
+
+          # postinst
+          cat > $DEB/DEBIAN/postinst <<'SCRIPT'
+          #!/bin/bash
+          id -u lanceforge >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin lanceforge
+          mkdir -p /var/lib/lanceforge/tables && chown -R lanceforge:lanceforge /var/lib/lanceforge
+          systemctl daemon-reload
+          SCRIPT
+          sed -i 's/^          //' $DEB/DEBIAN/postinst
+          chmod 755 $DEB/DEBIAN/postinst
+
+          echo "Apache-2.0" > $DEB/usr/share/doc/lanceforge/copyright
+          dpkg-deb --build $DEB dist/lanceforge_${{ steps.version.outputs.semver }}_amd64.deb
+
+      # ── Helm chart ──
+      - name: Package Helm chart
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.semver }}/" deploy/helm/lanceforge/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.tag }}\"/" deploy/helm/lanceforge/Chart.yaml
+          tar czf dist/lanceforge-chart-${{ steps.version.outputs.semver }}.tgz -C deploy/helm lanceforge
+
+      # ── Checksums ──
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          rm -f lance-coordinator lance-worker  # remove loose binaries
+          rm -rf deb
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # ── Upload artifacts for next jobs ──
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+  # ╔══════════════════════════════════════╗
+  # ║  Job 2: Create GitHub Release        ║
+  # ╚══════════════════════════════════════╝
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+
+  # ╔══════════════════════════════════════╗
+  # ║  Job 3: Build + Push Docker Image    ║
+  # ╚══════════════════════════════════════╝
+  publish-docker:
+    name: Publish Docker Image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      - name: Fix binary permissions
+        run: chmod +x dist/lance-coordinator dist/lance-worker 2>/dev/null || true
+
+      # Rebuild binaries if not in artifact (tar.gz only has them inside)
+      - name: Extract binaries from tarball
+        run: |
+          if [ ! -f dist/lance-coordinator ]; then
+            tar xzf dist/lanceforge-*-linux-x86_64.tar.gz -C dist/
+          fi
+          chmod +x dist/lance-coordinator dist/lance-worker
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.release
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
