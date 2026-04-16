@@ -1,0 +1,25 @@
+# Lightweight release image — uses pre-built binaries (no Rust toolchain)
+# Build:  docker build -f Dockerfile.release -t lanceforge:v0.1.0 .
+# Usage:  docker run lanceforge:v0.1.0 lance-coordinator /config/config.yaml 50050
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r lance && useradd -r -g lance -d /home/lance -s /usr/sbin/nologin lance
+
+COPY dist/lance-coordinator /usr/local/bin/lance-coordinator
+COPY dist/lance-worker /usr/local/bin/lance-worker
+
+RUN chmod +x /usr/local/bin/lance-coordinator /usr/local/bin/lance-worker
+
+USER lance
+
+EXPOSE 50050 50051 50100
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:${HEALTH_PORT:-50051}/healthz || exit 1
+
+ENTRYPOINT []
