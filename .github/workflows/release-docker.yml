@@ -42,14 +42,18 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
           protoc --version
 
-      - name: Build release binaries
+      # Release-LTO profile (defined in Cargo.toml): single codegen unit,
+      # full LTO. ~5–15% runtime gain over plain release; ~3× compile time.
+      # Only used on tagged releases — ci.yml still uses plain release
+      # for push/PR speed.
+      - name: Build release-lto binaries
         run: |
-          cargo build --release \
+          cargo build --profile release-lto \
             -p lance-distributed-coordinator \
             -p lance-distributed-worker
           mkdir -p dist
-          cp target/release/lance-coordinator dist/
-          cp target/release/lance-worker dist/
+          cp target/release-lto/lance-coordinator dist/
+          cp target/release-lto/lance-worker dist/
           strip dist/lance-coordinator dist/lance-worker
 
       - name: Log in to Container Registry

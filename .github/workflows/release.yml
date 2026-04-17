@@ -48,25 +48,41 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
 
-      # ── Tests ──
-      - name: Clippy (zero warnings)
-        run: cargo clippy --workspace -- -W clippy::all
+      # ── Tests ── (mirrors the gates in ci.yml — deny warnings on our crates)
+      - name: Clippy (deny warnings)
+        run: |
+          cargo clippy --lib --tests \
+            -p lance-distributed-common \
+            -p lance-distributed-proto \
+            -p lance-distributed-meta \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker \
+            -p lanceforge \
+            -- -D warnings
 
       - name: Unit tests
-        run: cargo test --workspace --lib
-
-      # ── Binary ──
-      - name: Build release binaries
         run: |
-          cargo build --release \
+          cargo test --lib \
+            -p lance-distributed-common \
+            -p lance-distributed-proto \
+            -p lance-distributed-meta \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker
+
+      # ── Binary ── (release-LTO: ~5–15% faster than default release; costs
+      # ~3× compile time. Acceptable on tagged releases only; ci.yml still
+      # uses plain release for push/PR speed.)
+      - name: Build release-lto binaries
+        run: |
+          cargo build --profile release-lto \
             -p lance-distributed-coordinator \
             -p lance-distributed-worker
 
       - name: Package tar.gz
         run: |
           mkdir -p dist
-          cp target/release/lance-coordinator dist/
-          cp target/release/lance-worker dist/
+          cp target/release-lto/lance-coordinator dist/
+          cp target/release-lto/lance-worker dist/
           strip dist/lance-coordinator dist/lance-worker
           tar czf dist/lanceforge-${{ steps.version.outputs.tag }}-linux-x86_64.tar.gz \
             -C dist lance-coordinator lance-worker
