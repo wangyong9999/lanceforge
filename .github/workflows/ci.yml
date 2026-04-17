@@ -118,22 +118,26 @@ jobs:
     runs-on: ubuntu-latest
     needs: [crate-unit-tests, integration-tests]
     if: github.event_name == 'push'  # Only on push, not PR
-    services:
-      minio:
-        image: minio/minio:latest
-        ports:
-          - 9000:9000
-        env:
-          MINIO_ROOT_USER: lanceadmin
-          MINIO_ROOT_PASSWORD: lanceadmin123
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=lanceadmin \
+            -e MINIO_ROOT_PASSWORD=lanceadmin123 \
+            minio/minio:latest server /data --console-address ":9001"
+          # Wait for MinIO to become healthy
+          for i in {1..30}; do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "MinIO is ready"
+              break
+            fi
+            echo "Waiting for MinIO... ($i/30)"
+            sleep 2
+          done
+          curl -sf http://localhost:9000/minio/health/live || { docker logs minio; exit 1; }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -275,8 +275,14 @@ mod tests {
     }
 
     /// Performance regression: prune 100 shards in <1ms.
+    /// Skipped under sanitizers — instrumentation adds 5-10x slowdown.
+    /// Set SKIP_PERF_TESTS=1 to skip (CI sets this under sanitizer runs).
     #[test]
     fn test_pruning_performance_regression() {
+        if std::env::var("SKIP_PERF_TESTS").is_ok() {
+            eprintln!("SKIP_PERF_TESTS set — skipping under sanitizer");
+            return;
+        }
         let metadata: Vec<ShardMetadata> = (0..100).map(|i| {
             ShardMetadata {
                 shard_name: format!("shard_{:04}", i),

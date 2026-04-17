@@ -227,7 +227,8 @@ def t_delete():
 test("9. Delete rows by filter", t_delete)
 
 def t_search_after_delete():
-    time.sleep(1)
+    # Wait > read_consistency_secs=3 so cached dataset snapshot refreshes
+    time.sleep(5)
     r = client.search("docs", query_vector=np.zeros(DIM).tolist(), k=100,
                        filter="category = 'new'")
     if r.num_rows > 0:

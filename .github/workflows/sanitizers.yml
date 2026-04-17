@@ -39,6 +39,7 @@ jobs:
         env:
           RUSTFLAGS: "-Z sanitizer=address"
           RUSTDOCFLAGS: "-Z sanitizer=address"
+          SKIP_PERF_TESTS: "1"
         run: |
           cargo +nightly test -p lance-distributed-common --lib \
             --target x86_64-unknown-linux-gnu \
@@ -80,6 +81,7 @@ jobs:
           RUSTDOCFLAGS: "-Z sanitizer=thread"
           # TSan requires single-threaded test runner
           RUST_TEST_THREADS: "1"
+          SKIP_PERF_TESTS: "1"
         run: |
           cargo +nightly test -p lance-distributed-common --lib \
             --target x86_64-unknown-linux-gnu \

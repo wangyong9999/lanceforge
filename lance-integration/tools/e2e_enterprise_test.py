@@ -237,7 +237,8 @@ def t_delete_and_verify():
     # Delete the inserted rows
     result = client.delete("products", filter="category = 'cat_new'")
     assert not result.get("error"), f"Delete error: {result}"
-    time.sleep(1)
+    # Wait > read_consistency_secs=3 so cached dataset snapshot refreshes
+    time.sleep(5)
     # Verify deletion
     result2 = client.search("products", query_vector=np.zeros(DIM).tolist(), k=100,
                             filter="category = 'cat_new'")
