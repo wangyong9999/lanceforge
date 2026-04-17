@@ -37,17 +37,26 @@ command -v cargo   >/dev/null || fail "cargo not found"
 command -v python3 >/dev/null || fail "python3 not found"
 command -v strip   >/dev/null || fail "strip not found"
 command -v dpkg-deb >/dev/null || echo "  (dpkg-deb not found — skipping .deb)"
-cargo clippy --workspace -- -W clippy::all 2>&1 | grep -q "^warning:" && fail "clippy warnings found" || true
+# Mirror ci.yml gate: deny warnings on the 6 owned crates.
+cargo clippy --lib --tests \
+    -p lance-distributed-common -p lance-distributed-proto \
+    -p lance-distributed-meta -p lance-distributed-coordinator \
+    -p lance-distributed-worker -p lanceforge \
+    -- -D warnings >/dev/null 2>&1 || fail "clippy found warnings"
 ok "tools ready, clippy clean"
 
 # ── Tests ──
 step "2/8  Running tests"
-cargo test --workspace --lib 2>&1 | tail -1
+cargo test --lib \
+    -p lance-distributed-common -p lance-distributed-proto \
+    -p lance-distributed-meta -p lance-distributed-coordinator \
+    -p lance-distributed-worker 2>&1 | tail -1
 ok "all tests passed"
 
-# ── Build release binaries ──
-step "3/8  Building release binaries"
-cargo build --release -p lance-distributed-coordinator -p lance-distributed-worker 2>&1 | tail -1
+# ── Build release-lto binaries (matches release.yml on GitHub) ──
+step "3/8  Building release-lto binaries (LTO enabled — ~3× slower)"
+cargo build --profile release-lto \
+    -p lance-distributed-coordinator -p lance-distributed-worker 2>&1 | tail -1
 ok "binaries built"
 
 # ── Prepare dist/ ──
@@ -56,8 +65,8 @@ mkdir -p "$DIST"
 
 # ── tar.gz ──
 step "4/8  Packaging tar.gz"
-cp target/release/lance-coordinator "$DIST/"
-cp target/release/lance-worker "$DIST/"
+cp target/release-lto/lance-coordinator "$DIST/"
+cp target/release-lto/lance-worker "$DIST/"
 strip "$DIST/lance-coordinator" "$DIST/lance-worker"
 tar czf "$DIST/lanceforge-${TAG}-${OS}-${ARCH}.tar.gz" \
     -C "$DIST" lance-coordinator lance-worker
