@@ -33,8 +33,19 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Clippy (zero warnings)
-        run: cargo clippy --workspace -- -W clippy::all
+      # Hard gate: any clippy warning in our crates fails the build.
+      # Legacy ballista/* is intentionally excluded — we don't own its lint
+      # debt, and it has its own test suite that covers those crates.
+      - name: Clippy (deny warnings on lance-distributed-* + lanceforge)
+        run: |
+          cargo clippy --lib --tests \
+            -p lance-distributed-common \
+            -p lance-distributed-proto \
+            -p lance-distributed-meta \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker \
+            -p lanceforge \
+            -- -D warnings
 
       - name: Check (zero warnings)
         run: |
@@ -355,18 +366,36 @@ jobs:
           key: ${{ runner.os }}-cov-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cov-
 
-      # Scope to our crates. The legacy ballista/* crates are excluded to keep
-      # the report signal high — they aren't part of the LanceForge surface.
-      - name: Collect coverage (lance-distributed-* + lanceforge)
+      # Scope to our crates. Legacy ballista/* excluded; generated protobuf
+      # stubs (crates/proto/src/generated/**) and main.rs binary shims also
+      # excluded — they skew the denominator without being meaningfully
+      # testable at the unit level.
+      - name: Run tests under instrumentation (no report yet)
         run: |
-          cargo llvm-cov --lcov --output-path lcov.info \
+          cargo llvm-cov --no-report \
             -p lance-distributed-common \
             -p lance-distributed-proto \
             -p lance-distributed-meta \
             -p lance-distributed-coordinator \
             -p lance-distributed-worker \
             --lib
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+
+      - name: Emit lcov.info (for artifact)
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info \
+            --ignore-filename-regex 'generated|bin/main\.rs'
+
+      # Gate: line coverage must stay ≥ 55%.
+      # Baseline at the time this gate was introduced was 59.67% lines. The
+      # 55 floor allows ~4 points of drift (noise from one refactor) before
+      # failing CI. Raise this threshold deliberately when coverage
+      # ratchets up — treat it as a one-way ratchet, not a ceiling.
+      - name: Summary + threshold gate
+        run: |
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex 'generated|bin/main\.rs' \
+            --fail-under-lines 55 \
+            | tee coverage-summary.txt
 
       - name: Upload coverage report
         if: always()
