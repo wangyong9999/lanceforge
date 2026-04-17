@@ -324,6 +324,16 @@ pub struct AddRowsRequest {
     /// Arrow IPC StreamWriter bytes (the rows to add)
     #[prost(bytes = "vec", tag = "2")]
     pub arrow_ipc_data: ::prost::alloc::vec::Vec<u8>,
+    /// If set, rows are hash-partitioned by these column values (same hash as
+    /// UpsertRows uses) so the same key always lands on the same shard. Leave
+    /// empty for round-robin distribution (the historical behavior).
+    ///
+    /// Use this when you plan to mix AddRows and UpsertRows on the same table
+    /// with a stable primary key — otherwise the two code paths disagree on
+    /// which shard owns a given row, and mixed workloads duplicate rows on
+    /// different shards. See docs/LIMITATIONS.md §1.
+    #[prost(string, repeated, tag = "3")]
+    pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteRowsRequest {

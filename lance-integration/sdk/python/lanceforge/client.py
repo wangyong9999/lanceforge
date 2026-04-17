@@ -190,12 +190,19 @@ class LanceForgeClient:
 
     # ── Write ──
 
-    def insert(self, table, data):
+    def insert(self, table, data, on_columns=None):
         """Insert rows into a table.
 
         Args:
             table: Table name
             data: pyarrow.Table or pyarrow.RecordBatch
+            on_columns: Optional list of column names used as the primary
+                key. When set, rows are hash-partitioned by these columns
+                (same hash `upsert` uses), so mixing `insert` and `upsert`
+                on the same key won't create duplicates on different
+                shards. Leave as None to keep the historical round-robin
+                routing. Pass the SAME list of columns to every `insert`
+                and `upsert` call for the table, or rows can still disagree.
 
         Returns:
             dict with 'affected_rows' and 'new_version'
@@ -206,8 +213,10 @@ class LanceForgeClient:
             raise ValueError("No data to insert")
 
         ipc_data = self._encode_batch(data)
-        resp = self._call(self._stub.AddRows,
-            pb.AddRowsRequest(table_name=table, arrow_ipc_data=ipc_data))
+        req = pb.AddRowsRequest(table_name=table, arrow_ipc_data=ipc_data)
+        if on_columns:
+            req.on_columns.extend(on_columns)
+        resp = self._call(self._stub.AddRows, req)
 
         if resp.error:
             raise RuntimeError(f"Insert failed: {resp.error}")

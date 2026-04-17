@@ -243,6 +243,15 @@ message LocalSearchResponse {
 message AddRowsRequest {
   string table_name = 1;
   bytes arrow_ipc_data = 2;       // Arrow IPC StreamWriter bytes (the rows to add)
+  // If set, rows are hash-partitioned by these column values (same hash as
+  // UpsertRows uses) so the same key always lands on the same shard. Leave
+  // empty for round-robin distribution (the historical behavior).
+  //
+  // Use this when you plan to mix AddRows and UpsertRows on the same table
+  // with a stable primary key — otherwise the two code paths disagree on
+  // which shard owns a given row, and mixed workloads duplicate rows on
+  // different shards. See docs/LIMITATIONS.md §1.
+  repeated string on_columns = 3;
 }
 
 message DeleteRowsRequest {

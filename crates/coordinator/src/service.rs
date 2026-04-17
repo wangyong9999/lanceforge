@@ -278,6 +278,75 @@ impl CoordinatorService {
             self.metrics.record_slow_query();
         }
     }
+
+    /// Hash-partition AddRows path: mirrors upsert_rows so that mixed
+    /// Add+Upsert workloads with the same key always target the same shard.
+    /// LocalWriteRequest.on_columns stays empty — on_columns here only drives
+    /// partitioning, not Lance's merge semantics (which only Upsert uses).
+    async fn add_rows_hash_partitioned(
+        &self,
+        req: pb::AddRowsRequest,
+        routing: Vec<(String, String, Option<String>)>,
+    ) -> Result<Response<pb::WriteResponse>, Status> {
+        let input_batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::invalid_argument(format!("IPC decode: {e}")))?;
+        let partitions = partition_batch_by_hash(&input_batch, &req.on_columns, routing.len())
+            .map_err(|e| Status::invalid_argument(format!("partition: {e}")))?;
+
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+        let mut errors = Vec::new();
+
+        for (shard_idx, partition_batch) in partitions.iter().enumerate() {
+            if partition_batch.num_rows() == 0 { continue; }
+            let (shard_name, primary, secondary) = &routing[shard_idx];
+            let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { Some(s.clone()) } else { None }
+            } else { None };
+
+            let worker_id = match chosen {
+                Some(w) => w,
+                None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
+            };
+            let partition_ipc = lance_distributed_common::ipc::record_batch_to_ipc(partition_batch)
+                .map_err(|e| Status::internal(format!("IPC encode: {e}")))?;
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
+                let local_req = pb::LocalWriteRequest {
+                    write_type: 0, // Add — Lance does a plain append, ignoring on_columns
+                    table_name: req.table_name.clone(),
+                    arrow_ipc_data: partition_ipc,
+                    filter: String::new(),
+                    on_columns: vec![],
+                    target_shard: shard_name.clone(),
+                };
+                match tokio::time::timeout(
+                    self.query_timeout,
+                    client.execute_local_write(Request::new(local_req)),
+                ).await {
+                    Ok(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.error.is_empty() {
+                            total_affected += r.affected_rows;
+                            max_version = max_version.max(r.new_version);
+                        } else {
+                            errors.push(format!("{}: {}", shard_name, r.error));
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
+                    Err(_) => errors.push(format!("{}: timeout", shard_name)),
+                }
+            }
+        }
+
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        Ok(Response::new(pb::WriteResponse {
+            affected_rows: total_affected,
+            new_version: max_version,
+            error,
+        }))
+    }
 }
 
 #[tonic::async_trait]
@@ -463,11 +532,20 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("arrow_ipc_data is empty"));
         }
 
-        // Route Add via round-robin across SHARDS (not executors) to prevent
-        // duplication when a worker owns multiple shards of the same table.
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
+        }
+
+        // Two routing modes:
+        //   on_columns set  → hash-partition by key, fan out to matching shards.
+        //                     Same hash UpsertRows uses, so mixed Add/Upsert with
+        //                     the same key land on the same shard (no
+        //                     duplication). See LIMITATIONS.md §1.
+        //   on_columns empty → historical round-robin over shards (one call,
+        //                      one shard). Kept for backward compat.
+        if !req.on_columns.is_empty() {
+            return self.add_rows_hash_partitioned(req, routing).await;
         }
 
         let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % routing.len();
@@ -2002,6 +2080,33 @@ mod tests {
             assert_eq!(x.num_rows(), y.num_rows(),
                 "hash partitioning must be stable across calls");
         }
+    }
+
+    /// Core invariant that makes the Add/Upsert unification safe: for a given
+    /// (id, on_columns, num_shards), the row always lands in the same bucket
+    /// index regardless of what OTHER rows are in the batch. Without this,
+    /// an initial Add of 1000 rows and a later Upsert of 1 row for the same
+    /// id could still disagree on which shard owns that id.
+    #[test]
+    fn test_partition_batch_by_hash_single_key_stable_across_batch_sizes() {
+        // Bucket index for id=42 in the isolation batch.
+        let solo = make_i32_batch(vec![42]);
+        let solo_parts = partition_batch_by_hash(&solo, &["id".into()], 4).unwrap();
+        let id_42_shard = solo_parts.iter().position(|b| b.num_rows() == 1).unwrap();
+
+        // Now id=42 embedded in a larger batch — the shard index of id=42
+        // must match what we computed in isolation.
+        let mixed_ids: Vec<i32> = (0..200).map(|i| if i == 137 { 42 } else { i }).collect();
+        let mixed = make_i32_batch(mixed_ids);
+        let mixed_parts = partition_batch_by_hash(&mixed, &["id".into()], 4).unwrap();
+
+        use arrow::array::Int32Array;
+        let found_in = mixed_parts.iter().position(|p| {
+            let col = p.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+            (0..col.len()).any(|i| col.value(i) == 42)
+        }).unwrap();
+        assert_eq!(found_in, id_42_shard,
+            "id=42 must land in the same shard whether batch has 1 row or 200");
     }
 
     #[test]

@@ -291,6 +291,12 @@ jobs:
           pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
           PYTHONPATH=.:../sdk/python python e2e_phase16_test.py
 
+      - name: Add/Upsert routing consistency (LIMITATIONS.md §1 fix)
+        run: |
+          cd lance-integration/tools
+          pkill -9 -f 'lance-' 2>/dev/null || true; sleep 3
+          PYTHONPATH=.:../sdk/python python e2e_add_upsert_consistency_test.py
+
       - name: Phase 17 smoke benchmark (regression guard, ~2 min)
         run: |
           cd lance-integration/bench

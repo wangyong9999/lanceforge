@@ -2,19 +2,21 @@
 
 诚实文档：记录**架构层面的真实边界**和**已知但未修复的行为差异**，避免用户踩到后才发现。
 
-## 1. Upsert 一致性：与 Add 路由不对齐
+## 1. Upsert 一致性：与 Add 路由不对齐（已部分修复）
 
-**现象**：用 `on_columns=["id"]` 做 Upsert 时，行哈希到某个 shard；但如果同 id 的行原本是通过 `AddRows` 写入的（round-robin 路由），可能落在不同 shard。结果：
-- 一旦 Upsert 和 Add 混用，同 id 可能在两个 shard 都存在
-- CountRows 会 +1 而不是 0（行数膨胀）
+**背景**：`AddRows` 默认 round-robin 选 shard；`UpsertRows` 按 `on_columns` 哈希分 shard。两种策略不对齐 → 混用时同 id 可能落在两个 shard，CountRows +1 而不是 0（行数膨胀）。
 
-**根因**：Add 用 round-robin 分发到 shard，Upsert 用 on_columns 哈希分发。两种策略不一致。
+**修复**（生效于 AddRowsRequest 新增 `on_columns` 字段的版本起）：
+- `AddRows` 现在接受可选的 `on_columns`。传入后，Add 用和 Upsert 完全相同的 hash-partition 逻辑，同一 key 必然落在同一 shard。
+- Python SDK：`client.insert(table, data, on_columns=["id"])`
+- gRPC / REST：在 AddRowsRequest 里带 `on_columns=["id"]`
 
-**当前对策**：
-- 用户只用 `AddRows` + `DeleteRows` + `Search` → 不触发
-- 用户只用 `CreateTable (一次性加载) + Search + 偶尔 Upsert` → 在 CreateTable 之后的 Upsert 只会访问 CreateTable 时随机分片到的 shard，不一定是哈希对应的。仍可能不一致
+**使用约定**（违反会退化为原 bug）：
+- 如果你的表有 primary key，**对这张表的每一次 Add 和 Upsert 都要传相同的 `on_columns` 列表**。
+- 不想要 PK 语义的表继续用默认 `AddRows`（不传 on_columns），round-robin 行为不变。
+- 服务端目前不会记住一张表"曾经用过哪个 on_columns" → 不做跨调用一致性校验。由调用方（或 SDK 包装层）保证。
 
-**根治方向（未实施）**：把 Add 也改成哈希路由，或让用户显式声明 primary key。等真实使用场景出现后再决定。
+**还没做的**：让 table 层面显式声明 PK、服务端强制校验。等使用反馈后再决定要不要加。
 
 ## 2. "replica_factor" 不是数据副本
 
