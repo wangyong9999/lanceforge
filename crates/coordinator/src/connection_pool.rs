@@ -416,4 +416,54 @@ mod tests {
         let statuses = pool.worker_statuses().await;
         assert_eq!(statuses.len(), 0);
     }
+
+    #[tokio::test]
+    async fn test_add_endpoint_dynamically() {
+        let pool = make_pool(vec![]);
+        pool.add_endpoint("w_new", "10.0.0.1", 50100).await;
+        let statuses = pool.worker_statuses().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, "w_new");
+        assert_eq!(statuses[0].1, "10.0.0.1");
+        assert_eq!(statuses[0].2, 50100);
+    }
+
+    #[tokio::test]
+    async fn test_add_endpoint_overwrites_same_id() {
+        // Worker reconnecting to a new host/port (K8s pod reschedule).
+        let pool = make_pool(vec![("w0", "10.0.0.1", 50100)]);
+        pool.add_endpoint("w0", "10.0.0.5", 50100).await;
+        let statuses = pool.worker_statuses().await;
+        assert_eq!(statuses.len(), 1, "same id must overwrite, not duplicate");
+        assert_eq!(statuses[0].1, "10.0.0.5");
+    }
+
+    #[tokio::test]
+    async fn test_get_shard_uri_without_registry() {
+        // Pool without with_shard_uris returns None for every lookup —
+        // caller falls back to whatever bootstrapping path they have.
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
+        assert!(pool.get_shard_uri("any_shard").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_shard_uri_with_registry() {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let registry = Arc::new(RwLock::new(HashMap::new()));
+        registry.write().await.insert(
+            "products_shard_00".to_string(),
+            "s3://bucket/products/shard_00.lance".to_string(),
+        );
+
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)])
+            .with_shard_uris(registry.clone());
+
+        let uri = pool.get_shard_uri("products_shard_00").await;
+        assert_eq!(uri.as_deref(), Some("s3://bucket/products/shard_00.lance"));
+        // Unknown shard returns None (not an error).
+        assert!(pool.get_shard_uri("not_registered").await.is_none());
+    }
+
 }
