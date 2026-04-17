@@ -336,7 +336,7 @@ jobs:
             --ignore RUSTSEC-2026-0002
 
   coverage:
-    name: Code Coverage (lance-distributed crates)
+    name: Code Coverage (lib + integration)
     runs-on: ubuntu-latest
     needs: crate-unit-tests
     if: github.event_name == 'push'
@@ -366,35 +366,54 @@ jobs:
           key: ${{ runner.os }}-cov-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cov-
 
-      # Scope to our crates. Legacy ballista/* excluded; generated protobuf
-      # stubs (crates/proto/src/generated/**) and main.rs binary shims also
-      # excluded — they skew the denominator without being meaningfully
-      # testable at the unit level.
-      - name: Run tests under instrumentation (no report yet)
+      # The meaningful coverage signal comes from merging three corpora:
+      # (1) per-crate lib tests, (2) the in-process integration test suite
+      # that exercises full coordinator↔worker gRPC paths, and (3) the
+      # meta/common/worker unit tests. llvm-cov's --no-report lets us
+      # accumulate profraw across multiple runs and emit a single report.
+      #
+      # Scope: our 5 distributed crates + lanceforge integration crate.
+      # Generated protobuf stubs (crates/proto/src/generated/**) and
+      # main.rs binary shims are excluded via --ignore-filename-regex —
+      # they skew the denominator without being meaningfully testable.
+      - name: Lib coverage (distributed crates)
         run: |
-          cargo llvm-cov --no-report \
+          cargo llvm-cov --no-report --lib \
             -p lance-distributed-common \
             -p lance-distributed-proto \
             -p lance-distributed-meta \
             -p lance-distributed-coordinator \
-            -p lance-distributed-worker \
-            --lib
+            -p lance-distributed-worker
+
+      # Integration tests run serially with --test-threads=1 to avoid port
+      # conflicts — the binaries bind real TCP ports for the in-process
+      # coordinator/worker. Pattern matches the integration-tests job.
+      - name: Integration coverage (lanceforge)
+        run: |
+          for t in test_distributed_ann test_edge_cases test_data_freshness \
+                   test_text_query test_multi_table test_grpc_distributed \
+                   test_shard_routing test_durability test_ha; do
+            echo "=== $t ==="
+            cargo llvm-cov --no-report --test $t -p lanceforge -- --test-threads=1
+          done
 
       - name: Emit lcov.info (for artifact)
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info \
             --ignore-filename-regex 'generated|bin/main\.rs'
 
-      # Gate: line coverage must stay ≥ 55%.
-      # Baseline at the time this gate was introduced was 59.67% lines. The
-      # 55 floor allows ~4 points of drift (noise from one refactor) before
-      # failing CI. Raise this threshold deliberately when coverage
-      # ratchets up — treat it as a one-way ratchet, not a ceiling.
+      # Gate: line coverage must stay ≥ 70%.
+      # Baseline at the time this gate was raised was 70.11% lines / 70.48%
+      # regions (measured with lib + integration tests). 70 is where the
+      # floor lands — zero margin is intentional: we've already added unit
+      # tests to cover the gap, so any drop below 70 means a real
+      # regression (untested new code, deleted tests). Raise this
+      # threshold deliberately when coverage ratchets up.
       - name: Summary + threshold gate
         run: |
           cargo llvm-cov report --summary-only \
             --ignore-filename-regex 'generated|bin/main\.rs' \
-            --fail-under-lines 55 \
+            --fail-under-lines 70 \
             | tee coverage-summary.txt
 
       - name: Upload coverage report
