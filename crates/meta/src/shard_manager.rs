@@ -188,7 +188,7 @@ mod tests {
         let result = assign_shards(&shards, &executors, &policy, None);
         assert_eq!(result.len(), 3);
         // Each shard has exactly 1 executor
-        for (_, workers) in &result {
+        for workers in result.values() {
             assert_eq!(workers.len(), 1);
         }
     }
@@ -201,7 +201,7 @@ mod tests {
 
         let result = assign_shards(&shards, &executors, &policy, None);
         // Each shard has 2 executors (replicated)
-        for (_, workers) in &result {
+        for workers in result.values() {
             assert_eq!(workers.len(), 2);
             // No duplicate workers for same shard
             let unique: HashSet<&String> = workers.iter().collect();
@@ -225,7 +225,7 @@ mod tests {
             }
         }
         // Each worker should have exactly 2 shards (6 shards / 3 workers)
-        for (_, count) in &load {
+        for count in load.values() {
             assert_eq!(*count, 2, "Load should be balanced: {:?}", load);
         }
     }

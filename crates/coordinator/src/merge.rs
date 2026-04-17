@@ -262,7 +262,7 @@ mod tests {
         let n = 1000;
         let num_batches = 10;
         let batches: Vec<RecordBatch> = (0..num_batches).map(|b| {
-            let ids: Vec<i32> = (0..n).map(|i| (b * n + i) as i32).collect();
+            let ids: Vec<i32> = (0..n).map(|i| b * n + i).collect();
             let distances: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 + (b as f32) * 0.01).collect();
             make_distance_batch(ids, distances)
         }).collect();

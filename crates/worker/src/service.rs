@@ -268,6 +268,34 @@ impl LanceExecutorService for WorkerService {
     }
 }
 
+fn local_request_to_descriptor(req: &LocalSearchRequest) -> LanceQueryDescriptor {
+    LanceQueryDescriptor {
+        table_name: req.table_name.clone(),
+        query_type: req.query_type,
+        vector_query: match (&req.vector_column, &req.query_vector) {
+            (Some(col), Some(vec_data)) => Some(VectorQueryParams {
+                column: col.clone(),
+                vector_data: vec_data.clone(),
+                dimension: req.dimension.unwrap_or(0),
+                nprobes: req.nprobes.unwrap_or(10),
+                metric_type: req.metric_type.unwrap_or(0),
+                oversample_factor: 1,
+            }),
+            _ => None,
+        },
+        fts_query: match (&req.text_column, &req.query_text) {
+            (Some(col), Some(text)) => Some(FtsQueryParams {
+                query_text: text.clone(),
+                column: col.clone(),
+            }),
+            _ => None,
+        },
+        filter: req.filter.clone(),
+        k: req.k,
+        columns: req.columns.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,33 +402,5 @@ mod tests {
         assert_eq!(vq.dimension, 0);  // defaults to 0
         assert_eq!(vq.nprobes, 10);    // defaults to 10
         assert_eq!(vq.metric_type, 0); // defaults to 0
-    }
-}
-
-fn local_request_to_descriptor(req: &LocalSearchRequest) -> LanceQueryDescriptor {
-    LanceQueryDescriptor {
-        table_name: req.table_name.clone(),
-        query_type: req.query_type,
-        vector_query: match (&req.vector_column, &req.query_vector) {
-            (Some(col), Some(vec_data)) => Some(VectorQueryParams {
-                column: col.clone(),
-                vector_data: vec_data.clone(),
-                dimension: req.dimension.unwrap_or(0),
-                nprobes: req.nprobes.unwrap_or(10),
-                metric_type: req.metric_type.unwrap_or(0),
-                oversample_factor: 1,
-            }),
-            _ => None,
-        },
-        fts_query: match (&req.text_column, &req.query_text) {
-            (Some(col), Some(text)) => Some(FtsQueryParams {
-                query_text: text.clone(),
-                column: col.clone(),
-            }),
-            _ => None,
-        },
-        filter: req.filter.clone(),
-        k: req.k,
-        columns: req.columns.clone(),
     }
 }
