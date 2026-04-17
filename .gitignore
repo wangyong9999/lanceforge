@@ -90,8 +90,14 @@ cpp/Brewfile.lock.json
 
 # Rust
 target
+target-ci/
+target-*/
 # Cargo.lock
 !ballista-cli/Cargo.lock
+
+# Agent/tool scratch directories (not part of the repo)
+.codex/
+.codex
 
 rusty-tags.vi
 .history
