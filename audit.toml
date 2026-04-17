@@ -1,0 +1,40 @@
+# cargo-audit ignore manifest (NOT auto-loaded — see note below).
+# Docs: https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# NOTE: cargo-audit only reads `~/.cargo/audit.toml` (user-level), not this
+# workspace-level file. The --ignore flags in .github/workflows/{ci,nightly}.yml
+# MUST stay in sync with the list below. This file is the canonical
+# justification record reviewed in PR; the workflow flags are the executable
+# form.
+#
+# CI runs `cargo audit --deny warnings`, so any new advisory — vulnerability
+# OR warning — fails the build. The entries below are the ONLY exceptions,
+# each with a dated justification. Keep this list minimal, revisit it on
+# every quarterly review, and delete an entry as soon as the upstream
+# dependency replaces or updates the transitive crate.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2024-0436: `paste` is unmaintained.
+    # Transitive via datafusion / arrow. No RCE; only a "no longer getting
+    # fixes" notice. Safe to defer until datafusion upgrades.
+    "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2024-0370: `proc-macro-error` is unmaintained.
+    # Transitive via a datafusion/tantivy dependency chain. Build-time only,
+    # no runtime impact. Replaced upstream by `proc-macro-error2`; waiting
+    # on their migration.
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0134: `rustls-pemfile` is unmaintained.
+    # Transitive via lancedb/object_store. rustls upstream has moved the
+    # API into `rustls-pki-types`; this ignore drops once lance bumps
+    # object_store.
+    "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0002: `lru` crate IterMut unsoundness.
+    # Transitive via tantivy (via lance-index). Only triggers when calling
+    # `IterMut` on an LRU; tantivy doesn't hit that path. Low practical
+    # risk; upstream patch pending in tantivy's next lru bump.
+    "RUSTSEC-2026-0002",
+]
