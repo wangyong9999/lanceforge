@@ -414,4 +414,149 @@ mod tests {
 
         let _ = tokio::fs::remove_file(path).await;
     }
+
+    // Two-phase rebalance: set_next_target → report_loaded → is_next_target_ready
+    // → promote_target. This covers the critical shard-transition state machine.
+    #[tokio::test]
+    async fn test_next_target_lifecycle() {
+        let path = format!("/tmp/lanceforge_next_target_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let state = PersistentShardState::from_config(&path, &test_config()).await;
+
+        // Stage 1: set a new target with a shard pinned to w1 (not loaded yet).
+        let mut next = HashMap::new();
+        next.insert("new_shard".to_string(), vec!["w1".to_string()]);
+        state.set_next_target("products", next.clone()).await.unwrap();
+
+        // Not ready yet — w1 hasn't reported the shard as loaded.
+        assert!(!state.is_next_target_ready("products").await,
+            "target must not be ready before report_loaded");
+
+        // Reporting the wrong shard name keeps readiness false.
+        state.report_loaded("w1", vec!["wrong_shard".to_string()]).await;
+        assert!(!state.is_next_target_ready("products").await,
+            "reporting a different shard name shouldn't flip readiness");
+
+        // Stage 2: the correct report flips readiness.
+        state.report_loaded("w1", vec!["new_shard".to_string()]).await;
+        assert!(state.is_next_target_ready("products").await);
+
+        // Stage 3: promote — current becomes next, version bumps.
+        state.promote_target("products").await.unwrap();
+        let routing = state.get_shard_routing("products").await;
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].0, "new_shard");
+        assert_eq!(routing[0].1, "w1");
+
+        // Promoting again without a pending next is a no-op success path
+        // (target.next was taken in the previous promote).
+        assert!(!state.is_next_target_ready("products").await,
+            "after promotion there is no next target → not ready");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_promote_without_ready_next_fails() {
+        let path = format!("/tmp/lanceforge_promote_fail_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let state = PersistentShardState::from_config(&path, &test_config()).await;
+        // No set_next_target → no pending next → promote must fail loudly
+        // rather than silently "succeed" and leave stale routing.
+        let err = state.promote_target("products").await;
+        assert!(err.is_err(), "promote with no pending target must return Err");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_set_next_target_on_unknown_table() {
+        // Setting a next target for a table the state has never seen should
+        // bootstrap that table with empty current + the next mapping, so a
+        // subsequent promote creates the table cleanly.
+        let path = format!("/tmp/lanceforge_new_table_next_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let state = PersistentShardState::from_config(&path, &ClusterConfig::default()).await;
+        let mut next = HashMap::new();
+        next.insert("s0".to_string(), vec!["w0".to_string()]);
+        state.set_next_target("brand_new", next).await.unwrap();
+
+        state.report_loaded("w0", vec!["s0".to_string()]).await;
+        assert!(state.is_next_target_ready("brand_new").await);
+        state.promote_target("brand_new").await.unwrap();
+
+        let tables = state.all_tables().await;
+        assert!(tables.contains(&"brand_new".to_string()));
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_executor_registration() {
+        let path = format!("/tmp/lanceforge_exec_reg_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let state = PersistentShardState::from_config(&path, &test_config()).await;
+
+        // Pre-existing executor from config.
+        let before = state.all_executors().await;
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].0, "w0");
+
+        // Register new → list grows; register same id again → idempotent.
+        state.register_executor("w1", "10.0.0.2", 50101).await;
+        state.register_executor("w1", "10.0.0.2", 50101).await;
+        let after_add = state.all_executors().await;
+        assert_eq!(after_add.len(), 2, "duplicate register must be idempotent");
+
+        // Remove one → list shrinks; removing unknown id is a no-op.
+        state.remove_executor("w0").await;
+        state.remove_executor("does_not_exist").await;
+        let after_remove = state.all_executors().await;
+        assert_eq!(after_remove.len(), 1);
+        assert_eq!(after_remove[0].0, "w1");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_executors_for_table_dedup() {
+        // Two shards on the same executor should only list it once.
+        let path = format!("/tmp/lanceforge_exec_dedup_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let mut mapping = HashMap::new();
+        mapping.insert("s0".to_string(), vec!["w0".to_string(), "w1".to_string()]);
+        mapping.insert("s1".to_string(), vec!["w0".to_string()]);
+
+        let state = PersistentShardState::from_config(&path, &ClusterConfig::default()).await;
+        state.register_table("t", mapping).await;
+
+        let execs = state.executors_for_table("t").await;
+        assert_eq!(execs.len(), 2);
+        assert!(execs.contains(&"w0".to_string()));
+        assert!(execs.contains(&"w1".to_string()));
+
+        // Unknown table returns empty (not a panic).
+        assert!(state.executors_for_table("missing").await.is_empty());
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    // S3 is documented as "not yet implemented" in the SimpleStore stub.
+    // If someone ever flips the behavior, this test will fail loudly so they
+    // also remember to update the documentation and error message.
+    #[tokio::test]
+    async fn test_s3_metadata_path_returns_clear_error() {
+        let state = PersistentShardState::from_config("s3://bucket/meta.json",
+            &ClusterConfig::default()).await;
+        let err = state.load().await;
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("not yet implemented"),
+            "S3 load path must surface the 'not yet implemented' marker, got: {msg}");
+    }
 }

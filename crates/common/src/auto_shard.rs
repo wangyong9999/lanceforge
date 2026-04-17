@@ -191,4 +191,71 @@ mod tests {
         assert_eq!(shards[1].name, "products_frag_2_3");
         assert_eq!(shards[0].uri, "s3://b/p.lance");
     }
+
+    #[test]
+    fn test_split_parent_uri_s3() {
+        let (parent, name) = split_parent_uri("s3://bucket/path/table.lance");
+        assert_eq!(parent, "s3://bucket/path/");
+        assert_eq!(name, "table");
+    }
+
+    #[test]
+    fn test_split_parent_uri_local_absolute() {
+        let (parent, name) = split_parent_uri("/data/warehouse/products.lance");
+        assert_eq!(parent, "/data/warehouse/");
+        assert_eq!(name, "products");
+    }
+
+    #[test]
+    fn test_split_parent_uri_no_lance_suffix() {
+        // Not all Lance datasets have the .lance suffix on disk.
+        let (parent, name) = split_parent_uri("/tmp/foo_dataset");
+        assert_eq!(parent, "/tmp/");
+        assert_eq!(name, "foo_dataset");
+    }
+
+    #[test]
+    fn test_split_parent_uri_trailing_slash() {
+        // Trailing slash on Lance directories is common; shouldn't confuse the split.
+        let (parent, name) = split_parent_uri("s3://bucket/table.lance/");
+        assert_eq!(parent, "s3://bucket/");
+        assert_eq!(name, "table");
+    }
+
+    #[test]
+    fn test_split_parent_uri_no_directory() {
+        // Edge case: no slash at all — the dataset is "relative cwd".
+        let (parent, name) = split_parent_uri("table.lance");
+        assert_eq!(parent, "./");
+        assert_eq!(name, "table");
+    }
+
+    #[test]
+    fn test_assign_empty_executors() {
+        let frags = make_fragments(3, 100);
+        let shards = assign_fragments_to_executors("t", "uri", &frags, &[], 1);
+        assert!(shards.is_empty(),
+            "no executors must return empty — otherwise caller can't route anywhere");
+    }
+
+    #[test]
+    fn test_assign_zero_chunk_size_defaults_to_one() {
+        // Caller mistake: max_fragments_per_shard=0 would cause a div-by-zero
+        // or panic if we didn't clamp. The .max(1) guard prevents that.
+        let frags = make_fragments(3, 100);
+        let shards = assign_fragments_to_executors("t", "uri", &frags, &["w0".into()], 0);
+        assert_eq!(shards.len(), 3, "chunk size 0 should behave like 1 (one shard per fragment)");
+    }
+
+    #[test]
+    fn test_assign_row_aggregation_in_shard_name() {
+        // Each shard name should span the first and last fragment IDs in the chunk.
+        let frags = make_fragments(7, 100);
+        let shards = assign_fragments_to_executors("t", "uri", &frags, &["w0".into()], 3);
+        // 7 frags / chunks of 3 → [0-2] [3-5] [6-6]
+        assert_eq!(shards.len(), 3);
+        assert_eq!(shards[0].name, "t_frag_0_2");
+        assert_eq!(shards[1].name, "t_frag_3_5");
+        assert_eq!(shards[2].name, "t_frag_6_6");
+    }
 }

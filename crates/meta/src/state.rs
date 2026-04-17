@@ -299,4 +299,143 @@ mod tests {
 
         let _ = tokio::fs::remove_file(&path).await;
     }
+
+    // set_next_target → promote_target flips current and bumps version.
+    #[tokio::test]
+    async fn test_set_next_then_promote() {
+        let state = test_state().await;
+
+        let mut initial = HashMap::new();
+        initial.insert("s0".to_string(), vec!["w0".to_string()]);
+        state.register_table("t", initial).await;
+
+        let mut next = HashMap::new();
+        next.insert("s0".to_string(), vec!["w1".to_string()]);
+        state.set_next_target("t", next).await.unwrap();
+
+        // MetaShardState has no readiness gate (always true) — promote succeeds.
+        assert!(state.is_next_target_ready("t").await,
+            "MetaShardState skips readiness gate by design");
+        state.promote_target("t").await.unwrap();
+
+        let routing = state.get_shard_routing("t").await;
+        assert_eq!(routing[0].1, "w1", "current should now point to w1");
+
+        // Version bumped.
+        let target = state.get_target("t").await.unwrap();
+        assert_eq!(target.version, 2, "version must bump after promote");
+    }
+
+    #[tokio::test]
+    async fn test_promote_missing_table_errors() {
+        let state = test_state().await;
+        let err = state.promote_target("no_such_table").await;
+        assert!(err.is_err(), "promoting unknown table must fail");
+        assert!(err.unwrap_err().contains("not found"),
+            "error should mention 'not found' for operator diagnostics");
+    }
+
+    #[tokio::test]
+    async fn test_get_shard_routing_primary_and_secondary() {
+        let state = test_state().await;
+        let mut m = HashMap::new();
+        m.insert("s0".to_string(), vec!["primary_w".to_string(), "secondary_w".to_string()]);
+        m.insert("s1".to_string(), vec!["solo_w".to_string()]);
+        state.register_table("t", m).await;
+
+        let routing = state.get_shard_routing("t").await;
+        let by_shard: HashMap<String, (String, Option<String>)> = routing.into_iter()
+            .map(|(s, p, sec)| (s, (p, sec)))
+            .collect();
+
+        // Replicated shard has Some secondary.
+        let (p, sec) = &by_shard["s0"];
+        assert_eq!(p, "primary_w");
+        assert_eq!(sec.as_deref(), Some("secondary_w"));
+
+        // Single-replica shard has None secondary.
+        let (p, sec) = &by_shard["s1"];
+        assert_eq!(p, "solo_w");
+        assert!(sec.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_executors_for_table_dedup_and_missing() {
+        let state = test_state().await;
+        let mut m = HashMap::new();
+        m.insert("s0".to_string(), vec!["w0".to_string(), "w1".to_string()]);
+        m.insert("s1".to_string(), vec!["w0".to_string()]);
+        state.register_table("t", m).await;
+
+        let execs = state.executors_for_table("t").await;
+        assert_eq!(execs.len(), 2, "duplicate executors must be collapsed");
+
+        // Unknown table returns empty list (not an error).
+        assert!(state.executors_for_table("nope").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_register_executor_idempotent() {
+        let state = test_state().await;
+        state.register_executor("w0", "h", 1).await;
+        state.register_executor("w0", "h", 1).await;
+        state.register_executor("w0", "different_host", 2).await; // also idempotent by id
+        let execs = state.all_executors().await;
+        assert_eq!(execs.len(), 1, "same id must not duplicate");
+    }
+
+    // Shard-URI persistence (used when Phase 2 creates shards dynamically and
+    // needs to remember their Lance dataset URIs across coordinator restarts).
+    #[tokio::test]
+    async fn test_shard_uri_lifecycle() {
+        let state = test_state().await;
+
+        assert!(state.get_shard_uris().await.is_empty(), "fresh state has no URIs");
+
+        let mut batch = HashMap::new();
+        batch.insert("t_s0".to_string(), "s3://bucket/t/s0.lance".to_string());
+        batch.insert("t_s1".to_string(), "s3://bucket/t/s1.lance".to_string());
+        state.put_shard_uris(&batch).await;
+
+        let stored = state.get_shard_uris().await;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored["t_s0"], "s3://bucket/t/s0.lance");
+
+        // Second put with a disjoint key should MERGE, not replace.
+        let mut more = HashMap::new();
+        more.insert("t_s2".to_string(), "s3://bucket/t/s2.lance".to_string());
+        state.put_shard_uris(&more).await;
+        let after_merge = state.get_shard_uris().await;
+        assert_eq!(after_merge.len(), 3);
+
+        // remove_shard_uris with an unknown name is a no-op.
+        state.remove_shard_uris(&["t_s0".to_string(), "does_not_exist".to_string()]).await;
+        let after_remove = state.get_shard_uris().await;
+        assert_eq!(after_remove.len(), 2);
+        assert!(!after_remove.contains_key("t_s0"));
+    }
+
+    #[tokio::test]
+    async fn test_all_tables_filters_by_prefix() {
+        // MetaShardState prefixes keys with "{prefix}/tables/". Using a
+        // different prefix on the same store must not see tables from
+        // the first namespace — multi-tenant isolation at the state level.
+        let path = format!("/tmp/lanceforge_metastate_ns_{}.json", rand_id());
+        let _ = tokio::fs::remove_file(&path).await;
+        let store: Arc<dyn MetaStore> = Arc::new(FileMetaStore::new(&path).await.unwrap());
+
+        let ns_a = MetaShardState::new(store.clone(), "tenant_a");
+        let ns_b = MetaShardState::new(store.clone(), "tenant_b");
+
+        let mut m = HashMap::new();
+        m.insert("s0".to_string(), vec!["w0".to_string()]);
+        ns_a.register_table("a_table", m).await;
+
+        let a_tables = ns_a.all_tables().await;
+        let b_tables = ns_b.all_tables().await;
+        assert!(a_tables.contains(&"a_table".to_string()));
+        assert!(b_tables.is_empty(), "tenant_b must not see tenant_a's tables");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
 }

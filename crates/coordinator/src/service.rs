@@ -1866,4 +1866,209 @@ mod tests {
         let config = ClusterConfig::default();
         let _svc = CoordinatorService::new(&config, Duration::from_secs(5));
     }
+
+    // ---------- Pure helper function tests ----------
+    //
+    // These are the request-validation and batch-partitioning helpers that
+    // back every Search / Insert RPC. Getting the k/offset math wrong is
+    // how you leak memory, crash on overflow, or silently serve wrong
+    // pagination windows. Unit tests here catch those bugs before they
+    // reach the gRPC layer.
+
+    #[test]
+    fn test_validate_k_rejects_zero() {
+        assert!(validate_k(0, 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_k_rejects_over_max() {
+        assert!(validate_k(MAX_K + 1, 1).is_err());
+        // Exactly at MAX_K must succeed.
+        assert_eq!(validate_k(MAX_K, 1).unwrap(), MAX_K);
+    }
+
+    #[test]
+    fn test_validate_k_detects_oversample_overflow() {
+        // 1 * u32::MAX overflows when multiplied by oversample=2.
+        let err = validate_k(u32::MAX / 2 + 1, 2).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_validate_offset_k_rejects_zero_k() {
+        assert!(validate_offset_k(5, 0, 100, 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_offset_k_rejects_overflow() {
+        // offset + k overflows u32.
+        assert!(validate_offset_k(u32::MAX, 2, 1_000_000, 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_offset_k_rejects_exceeds_max() {
+        // offset+k > max_k.
+        assert!(validate_offset_k(90, 20, 100, 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_offset_k_success() {
+        let (total, fetch) = validate_offset_k(10, 20, 1000, 2).unwrap();
+        assert_eq!(total, 30);
+        assert_eq!(fetch, 60, "with oversample=2, fetch is (offset+k)*2");
+    }
+
+    #[test]
+    fn test_split_batch_n_le_one() {
+        let batch = make_i32_batch(vec![1, 2, 3, 4, 5]);
+        let parts = split_batch(&batch, 1);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].num_rows(), 5);
+
+        // n=0 is treated the same as n=1 (the caller already validated upstream).
+        let parts = split_batch(&batch, 0);
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn test_split_batch_even_chunks() {
+        let batch = make_i32_batch((0..10).collect());
+        let parts = split_batch(&batch, 2);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].num_rows(), 5);
+        assert_eq!(parts[1].num_rows(), 5);
+    }
+
+    #[test]
+    fn test_split_batch_uneven_chunks() {
+        // 7 rows / 3 shards → [3, 3, 1] (ceil-div chunk size).
+        let batch = make_i32_batch((0..7).collect());
+        let parts = split_batch(&batch, 3);
+        assert_eq!(parts.len(), 3);
+        let sizes: Vec<_> = parts.iter().map(|b| b.num_rows()).collect();
+        assert_eq!(sizes.iter().sum::<usize>(), 7);
+        // All-non-empty — we filter out empty partitions.
+        assert!(sizes.iter().all(|&s| s > 0));
+    }
+
+    #[test]
+    fn test_split_batch_more_shards_than_rows() {
+        // 3 rows / 5 shards → only 3 non-empty partitions (empties filtered).
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let parts = split_batch(&batch, 5);
+        assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_single_shard() {
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let out = partition_batch_by_hash(&batch, &["id".into()], 1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_zero_is_error() {
+        let batch = make_i32_batch(vec![1]);
+        assert!(partition_batch_by_hash(&batch, &["id".into()], 0).is_err());
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_unknown_column_errors() {
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let err = partition_batch_by_hash(&batch, &["nope".into()], 4).unwrap_err();
+        assert!(err.contains("column 'nope'"), "error should name the bad column");
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_partitions_all_rows() {
+        // All rows must end up in some partition — no drops.
+        let batch = make_i32_batch((0..100).collect());
+        let out = partition_batch_by_hash(&batch, &["id".into()], 4).unwrap();
+        assert_eq!(out.len(), 4);
+        let total: usize = out.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_deterministic() {
+        // Same input must land in the same partition layout every call —
+        // otherwise upsert would silently send the same row to two shards.
+        let batch = make_i32_batch((0..50).collect());
+        let a = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        let b = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.num_rows(), y.num_rows(),
+                "hash partitioning must be stable across calls");
+        }
+    }
+
+    #[test]
+    fn test_apply_pagination_passthrough_on_error_response() {
+        // Error responses must not be decoded/re-encoded — preserve as-is.
+        let resp = pb::SearchResponse {
+            arrow_ipc_data: vec![],
+            num_rows: 0,
+            error: "upstream failure".to_string(),
+            truncated: false, next_offset: 0, latency_ms: 5,
+        };
+        let out = apply_pagination_and_cap(resp.clone(), 0, 10, 0);
+        assert_eq!(out.error, "upstream failure");
+        assert_eq!(out.latency_ms, 5);
+    }
+
+    #[test]
+    fn test_apply_pagination_offset_past_total() {
+        // offset beyond total_rows must return an empty response (not panic,
+        // not a negative slice). next_offset is 0 because nothing more to fetch.
+        let batch = make_i32_batch((0..5).collect());
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch).unwrap();
+        let resp = pb::SearchResponse {
+            arrow_ipc_data: ipc,
+            num_rows: 5, error: String::new(),
+            truncated: false, next_offset: 0, latency_ms: 0,
+        };
+        let out = apply_pagination_and_cap(resp, 100, 10, 0);
+        assert_eq!(out.num_rows, 0);
+        assert_eq!(out.next_offset, 0);
+    }
+
+    #[test]
+    fn test_apply_pagination_sets_next_offset_when_more_rows_remain() {
+        // 100 rows, offset=10, k=20 → slice [10..30], next_offset=30 (still 70 to go).
+        let batch = make_i32_batch((0..100).collect());
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch).unwrap();
+        let resp = pb::SearchResponse {
+            arrow_ipc_data: ipc, num_rows: 100, error: String::new(),
+            truncated: false, next_offset: 0, latency_ms: 0,
+        };
+        let out = apply_pagination_and_cap(resp, 10, 20, 0);
+        assert_eq!(out.num_rows, 20);
+        assert_eq!(out.next_offset, 30);
+        assert!(!out.truncated);
+    }
+
+    #[test]
+    fn test_apply_pagination_last_page_next_offset_zero() {
+        // Fetching the final window → no next_offset.
+        let batch = make_i32_batch((0..100).collect());
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch).unwrap();
+        let resp = pb::SearchResponse {
+            arrow_ipc_data: ipc, num_rows: 100, error: String::new(),
+            truncated: false, next_offset: 0, latency_ms: 0,
+        };
+        let out = apply_pagination_and_cap(resp, 90, 20, 0);
+        assert_eq!(out.num_rows, 10, "requested 20 but only 10 remain");
+        assert_eq!(out.next_offset, 0);
+    }
+
+    fn make_i32_batch(values: Vec<i32>) -> arrow::array::RecordBatch {
+        use arrow::array::{ArrayRef, Int32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let arr: ArrayRef = Arc::new(Int32Array::from(values));
+        arrow::array::RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
 }
