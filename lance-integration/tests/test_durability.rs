@@ -140,7 +140,6 @@ async fn test_sustained_load() {
                 errors.fetch_add(1, Ordering::Relaxed);
             }
         }
-        offset: 0,
     }
 
     let s = success.load(Ordering::Relaxed);
@@ -220,7 +219,6 @@ async fn test_concurrent_load() {
             if resp.is_ok() && resp.unwrap().get_ref().error.is_empty() {
                 succ.fetch_add(1, Ordering::Relaxed);
             }
-            offset: 0,
         }));
     }
 

@@ -187,7 +187,6 @@ async fn test_text_query_with_mock_embedding() {
     println!("✓ Empty query rejected");
 
     println!("\n=== All text query tests passed ===");
-    offset: 0,
 }
 
 /// Test: text query without embedding config — should fail gracefully
@@ -250,5 +249,4 @@ async fn test_text_query_no_embedding_config() {
     let err_msg = resp.unwrap_err().message().to_string();
     assert!(err_msg.contains("embedding"), "Error should mention embedding: {}", err_msg);
     println!("✓ Text query without config: clear error message");
-    offset: 0,
 }

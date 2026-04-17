@@ -184,7 +184,6 @@ async fn test_shard_pruning_in_cluster() {
 
     assert!(resp2.num_rows > 0, "Unfiltered should return results from both shards");
     println!("✓ No pruning: {} results from all shards", resp2.num_rows);
-    offset: 0,
 }
 
 /// Test: primary executor down, secondary takes over
@@ -269,5 +268,4 @@ async fn test_secondary_failover() {
     assert!(resp.error.is_empty(), "Failover should work: {}", resp.error);
     assert!(resp.num_rows > 0, "Should get results from secondary executor");
     println!("✓ Secondary failover: {} results from secondary executor", resp.num_rows);
-    offset: 0,
 }

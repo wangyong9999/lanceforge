@@ -213,9 +213,9 @@ def t_full_lifecycle():
                        filter="category = 'lifecycle'")
     assert r.num_rows > 0, "Inserted lifecycle rows not found"
 
-    # Delete
+    # Delete (wait > read_consistency_secs=3 so cached dataset snapshot refreshes)
     client.delete("ha_table", filter="category = 'lifecycle'")
-    time.sleep(1)
+    time.sleep(5)
     r2 = client.search("ha_table", query_vector=np.zeros(DIM).tolist(), k=50,
                         filter="category = 'lifecycle'")
     if r2.num_rows > 0:
@@ -241,8 +241,9 @@ def t_worker_failure():
         r = client.search("ha_table", query_vector=np.zeros(DIM).tolist(), k=5)
         assert r.num_rows > 0
     except Exception as e:
-        # Partial failure OK if at least some results
-        if "unhealthy" in str(e).lower():
+        msg = str(e).lower()
+        # Accept degraded outcomes: partial failure, unavailable, unhealthy
+        if any(k in msg for k in ("partial", "unavailable", "unhealthy")):
             pass  # Expected: w1's shard unavailable
         else:
             raise

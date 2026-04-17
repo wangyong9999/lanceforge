@@ -280,7 +280,6 @@ async fn test_grpc_ann_search() {
     sched_handle.abort();
 
     println!("\n=== All gRPC distributed tests passed ===");
-    offset: 0,
 }
 
 /// Test: Scheduler returns error for unknown table
@@ -332,7 +331,6 @@ async fn test_grpc_unknown_table() {
     println!("✓ Unknown table returns NOT_FOUND");
 
     sched_handle.abort();
-    offset: 0,
 }
 
 /// Test: Empty shard returns empty results
@@ -408,5 +406,4 @@ async fn test_grpc_empty_result() {
 
     exec_handle.abort();
     sched_handle.abort();
-    offset: 0,
 }
