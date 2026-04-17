@@ -258,16 +258,52 @@ print("\n── Phase 6: Worker Recovery ──")
 def t_worker_recovery():
     global w1
     w1 = start_worker("w1", 56101)
-    # Wait for health check to detect recovery (10s interval + connection time)
-    time.sleep(15)
 
+    # Poll until NO healthy worker has zero shards. Earlier versions of this
+    # test slept 15s then checked "healthy == 2" and did a search; it was
+    # flaky on slow CI because w1 passes the TCP/gRPC health probe several
+    # seconds before its shard-recovery LoadShard actually completes. In
+    # that window a scatter-gather search hits w1 with no open Lance
+    # handle → DEADLINE_EXCEEDED or "service unavailable".
+    #
+    # Checking the SUM of loaded_shards isn't enough either: w0 already
+    # carries multiple shards from earlier phases, so the sum crosses any
+    # fixed threshold while w1 is still empty. We need per-worker ≥1.
     client = LanceForgeClient(f"127.0.0.1:{COORD_PORT}")
-    s = client.status()
-    healthy = sum(1 for e in s["executors"] if e["healthy"])
-    assert healthy == 2, f"Expected 2 healthy after recovery, got {healthy}: {s['executors']}"
+    deadline = time.time() + 30
+    last_s = None
+    while time.time() < deadline:
+        last_s = client.status()
+        healthy_execs = [e for e in last_s["executors"] if e["healthy"]]
+        if (len(healthy_execs) == 2
+                and all(e.get("loaded_shards", 0) > 0 for e in healthy_execs)):
+            break
+        time.sleep(1)
+    assert last_s is not None
+    healthy_execs = [e for e in last_s["executors"] if e["healthy"]]
+    assert len(healthy_execs) == 2 and all(
+        e.get("loaded_shards", 0) > 0 for e in healthy_execs
+    ), (
+        f"Expected 2 healthy workers each with ≥1 loaded shard within 30s, "
+        f"got {last_s['executors']}"
+    )
 
-    r = client.search("ha_table", query_vector=np.zeros(DIM).tolist(), k=10)
-    assert r.num_rows > 0
+    # Final search — with a short retry window because the connection pool's
+    # cached channel to w1 can lag a couple of health-check ticks behind the
+    # status report (tonic Channel lazy-reconnects), surfacing as transient
+    # UNAVAILABLE right after restart. Without the retry, the whole test
+    # suite flakes intermittently on slow CI runners.
+    last_err = None
+    for _ in range(5):
+        try:
+            r = client.search("ha_table", query_vector=np.zeros(DIM).tolist(), k=10)
+            assert r.num_rows > 0
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(2)
+    else:
+        raise AssertionError(f"Search still failing after 5 retries post-recovery: {last_err}")
     client.close()
 test("7. Worker recovered, cluster fully healthy", t_worker_recovery)
 
