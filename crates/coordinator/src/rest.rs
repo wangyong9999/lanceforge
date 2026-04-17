@@ -454,4 +454,71 @@ mod tests {
         assert!(json.contains("\"num_rows\":0"));
         assert!(json.contains("\"latency_ms\":5"));
     }
+
+    #[test]
+    fn test_extract_path_handles_missing_method() {
+        // A bodyless garbage request must not panic.
+        assert_eq!(extract_path("/"), "/");
+        // No whitespace at all → fallback to "/".
+        assert_eq!(extract_path("GET"), "/");
+    }
+
+    #[test]
+    fn test_extract_path_strips_query_string() {
+        assert_eq!(extract_path("GET /v1/search?k=5&fields=id HTTP/1.1\r\n"), "/v1/search");
+        // Query string with only '?' is still handled.
+        assert_eq!(extract_path("GET /v1/count? HTTP/1.1\r\n"), "/v1/count");
+    }
+
+    #[test]
+    fn test_extract_body_with_crlf_in_payload() {
+        // Body contains CRLF but the split only fires on the first \r\n\r\n
+        // (the header/body boundary), so the payload is preserved verbatim.
+        let req = "POST /v1/upload HTTP/1.1\r\nContent-Type: text/plain\r\n\r\nline1\r\nline2\r\n";
+        let body = extract_body(req);
+        assert_eq!(body, "line1\r\nline2\r\n");
+    }
+
+    #[test]
+    fn test_extract_body_missing_boundary_returns_default_json() {
+        // If the request is malformed (no \r\n\r\n), downstream handlers
+        // get "{}" so serde_json parsing yields sensible defaults rather
+        // than a parse error.
+        assert_eq!(extract_body("POST /v1/search HTTP/1.1\r\nContent-Type: application/json"),
+            "{}");
+    }
+
+    #[test]
+    fn test_ipc_to_json_with_real_batch() {
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+        let ipc = lance_distributed_common::ipc::record_batch_to_ipc(&batch).unwrap();
+
+        let json = ipc_to_json(&ipc, 2, 42);
+        assert!(json.contains("\"num_rows\":2"));
+        assert!(json.contains("\"latency_ms\":42"));
+        // Should include the actual row data in JSON Lines form.
+        assert!(json.contains("\"id\":1"));
+        assert!(json.contains("\"name\":\"a\""));
+        assert!(json.contains("\"id\":2"));
+        assert!(json.contains("\"name\":\"b\""));
+    }
+
+    #[test]
+    fn test_ipc_to_json_malformed_data_returns_error_marker() {
+        // Invalid IPC bytes must return a JSON error, not panic.
+        let json = ipc_to_json(&[0xff, 0xfe, 0xfd], 3, 0);
+        assert!(json.contains("error"), "got: {json}");
+    }
 }
