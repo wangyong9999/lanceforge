@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray};
+use arrow::array::{FixedSizeListArray, Float32Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
@@ -40,8 +40,10 @@ async fn create_shard(path: &str, num_rows: usize, dim: usize) {
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Create;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 

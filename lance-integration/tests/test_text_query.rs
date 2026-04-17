@@ -46,8 +46,10 @@ async fn create_shard(path: &str, num_rows: usize, dim: usize, seed: u64, id_off
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Create;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 

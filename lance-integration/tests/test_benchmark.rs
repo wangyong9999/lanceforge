@@ -50,8 +50,10 @@ async fn create_shard(path: &str, num_rows: usize, dim: usize, seed: u64, id_off
     ]).unwrap();
 
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut params = lance::dataset::WriteParams::default();
-    params.mode = lance::dataset::WriteMode::Create;
+    let params = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(params)).await.unwrap();
 }
 
@@ -106,7 +108,6 @@ async fn test_distributed_speedup() {
             dimension: dim as u32, nprobes: 1, metric_type: 0, oversample_factor: 1,
         }),
         fts_query: None, filter: None, k: k as u32, columns: vec![],
-        ..Default::default()
     };
 
     let single_start = Instant::now();
@@ -118,12 +119,11 @@ async fn test_distributed_speedup() {
 
     // --- Distributed cluster ---
     let mut handles = Vec::new();
-    for i in 0..num_shards {
+    for (i, port) in exec_ports.iter().copied().enumerate() {
         let shards = config.shards_for_executor(&format!("e{i}"));
         let ctx = SessionContext::default();
         let reg = Arc::new(LanceTableRegistry::new(ctx, &shards).await.unwrap());
         let svc = WorkerService::new(reg);
-        let port = exec_ports[i];
         handles.push(tokio::spawn(async move {
             let addr = format!("0.0.0.0:{port}").parse().unwrap();
             tonic::transport::Server::builder()

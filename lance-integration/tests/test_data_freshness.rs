@@ -33,8 +33,10 @@ async fn create_shard(path: &str, num_rows: usize, dim: usize, id_offset: i32) {
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Create;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 
@@ -55,8 +57,10 @@ async fn append_rows(path: &str, num_rows: usize, dim: usize, id_offset: i32) {
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Append;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Append,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 

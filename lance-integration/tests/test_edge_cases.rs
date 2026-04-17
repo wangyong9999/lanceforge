@@ -2,15 +2,14 @@
 // Edge case and robustness tests for LanceForge integration.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use arrow::array::{Float32Array, Int32Array, RecordBatch, StringArray, FixedSizeListArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
 
-use lanceforge::codec::proto::{LanceQueryDescriptor, LanceQueryType, VectorQueryParams, FtsQueryParams};
-use lanceforge::config::{ClusterConfig, ExecutorConfig, ShardConfig, TableConfig};
+use lanceforge::codec::proto::{LanceQueryDescriptor, LanceQueryType, VectorQueryParams};
+use lanceforge::config::ShardConfig;
 use lanceforge::executor::LanceTableRegistry;
 use lanceforge::merge::{global_top_k_by_distance, global_top_k_by_score, reciprocal_rank_fusion};
 
@@ -49,8 +48,10 @@ async fn create_shard(path: &str, num_rows: usize, dim: usize, seed: u64, id_off
     ]).unwrap();
 
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut params = lance::dataset::WriteParams::default();
-    params.mode = lance::dataset::WriteMode::Create;
+    let params = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(params)).await.unwrap();
 }
 
@@ -74,7 +75,7 @@ async fn test_executor_k_zero_rejected() {
         query_type: LanceQueryType::Ann as i32,
         vector_query: Some(VectorQueryParams {
             column: "vector".into(),
-            vector_data: vec![0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            vector_data: [0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
             dimension: 4,
             nprobes: 1,
             metric_type: 0,
@@ -165,7 +166,7 @@ async fn test_executor_dimension_mismatch_rejected() {
         query_type: LanceQueryType::Ann as i32,
         vector_query: Some(VectorQueryParams {
             column: "vector".into(),
-            vector_data: vec![0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            vector_data: [0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
             dimension: 8, // Claims 8 but data has 4
             nprobes: 1,
             metric_type: 0,
@@ -198,7 +199,7 @@ async fn test_executor_unknown_table_rejected() {
         query_type: LanceQueryType::Ann as i32,
         vector_query: Some(VectorQueryParams {
             column: "vector".into(),
-            vector_data: vec![0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            vector_data: [0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
             dimension: 4,
             nprobes: 1,
             metric_type: 0,
@@ -237,7 +238,7 @@ async fn test_executor_table_name_prefix_safety() {
         query_type: LanceQueryType::Ann as i32,
         vector_query: Some(VectorQueryParams {
             column: "vector".into(),
-            vector_data: vec![0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
+            vector_data: [0_f32; 4].iter().flat_map(|f| f.to_le_bytes()).collect(),
             dimension: 4,
             nprobes: 1,
             metric_type: 0,
@@ -284,7 +285,7 @@ async fn test_executor_concurrent_queries() {
                 query_type: LanceQueryType::Ann as i32,
                 vector_query: Some(VectorQueryParams {
                     column: "vector".into(),
-                    vector_data: vec![i as f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect(),
+                    vector_data: [i as f32; 8].iter().flat_map(|f| f.to_le_bytes()).collect(),
                     dimension: 8,
                     nprobes: 1,
                     metric_type: 0,

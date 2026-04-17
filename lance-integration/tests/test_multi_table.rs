@@ -45,8 +45,10 @@ async fn create_products_shard(path: &str, num_rows: usize, dim: usize, id_offse
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Create;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 
@@ -68,8 +70,10 @@ async fn create_documents_shard(path: &str, num_rows: usize, dim: usize, id_offs
         ).unwrap()),
     ]).unwrap();
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut p = lance::dataset::WriteParams::default();
-    p.mode = lance::dataset::WriteMode::Create;
+    let p = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(p)).await.unwrap();
 }
 

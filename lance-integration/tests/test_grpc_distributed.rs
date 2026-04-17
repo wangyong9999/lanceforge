@@ -4,7 +4,6 @@
 // Starts Scheduler + 2 Executor gRPC servers in-process (separate tokio tasks),
 // then runs client queries against the Scheduler and verifies correctness.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use lanceforge::generated::lance_distributed::{
     lance_executor_service_server::LanceExecutorServiceServer,
     lance_scheduler_service_server::LanceSchedulerServiceServer,
     lance_scheduler_service_client::LanceSchedulerServiceClient,
-    AnnSearchRequest, FtsSearchRequest, HybridSearchRequest,
+    AnnSearchRequest,
 };
 use lanceforge::coordinator::CoordinatorService;
 use lanceforge::worker::WorkerService;
@@ -82,8 +81,10 @@ async fn create_lance_shard(
     ]).unwrap();
 
     let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
-    let mut params = lance::dataset::WriteParams::default();
-    params.mode = lance::dataset::WriteMode::Create;
+    let params = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(params)).await.unwrap();
 }
 

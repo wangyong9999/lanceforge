@@ -101,8 +101,10 @@ async fn create_test_lance_table(
         vec![Ok(batch)],
         schema,
     );
-    let mut write_params = lance::dataset::WriteParams::default();
-    write_params.mode = lance::dataset::WriteMode::Create;
+    let write_params = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Create,
+        ..Default::default()
+    };
     lance::dataset::Dataset::write(reader, path, Some(write_params)).await?;
 
     Ok(())
