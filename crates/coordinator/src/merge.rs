@@ -275,4 +275,83 @@ mod tests {
         // Should complete well under 50ms even on slow CI
         assert!(elapsed.as_millis() < 50, "Merge took {}ms (>50ms regression)", elapsed.as_millis());
     }
+
+    // ---------- Property-based tests ----------
+    //
+    // These test global_top_k_by_distance against a brute-force reference:
+    // "gather all rows from all input batches, sort by distance asc, take k."
+    // Any divergence (off-by-one, missing rows, wrong order) is caught and
+    // shrunk to a minimal counterexample.
+    use proptest::prelude::*;
+
+    /// Brute-force reference: all rows sorted asc by distance, then first k.
+    /// Used as the oracle for property tests.
+    fn brute_force_top_k(batches: &[RecordBatch], k: usize) -> Vec<(i32, f32)> {
+        let mut all: Vec<(i32, f32)> = batches.iter().flat_map(|b| {
+            let ids = b.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+            let dists = b.column(1).as_any().downcast_ref::<Float32Array>().unwrap();
+            (0..b.num_rows()).map(|i| (ids.value(i), dists.value(i))).collect::<Vec<_>>()
+        }).collect();
+        // total_cmp so NaN sorts consistently (to the end, matching nulls_first=false).
+        all.sort_by(|a, b| a.1.total_cmp(&b.1));
+        all.truncate(k);
+        all
+    }
+
+    // Default `cases` honors the PROPTEST_CASES env var; nightly CI bumps it
+    // to ~10000 without touching code.
+    proptest! {
+        /// For any (batches, k): the merge result has exactly min(k, total_rows)
+        /// rows, is sorted ascending by distance, and matches the brute-force
+        /// reference up to equal-distance reordering.
+        ///
+        /// IMPORTANT: workers already return per-shard sorted results in
+        /// production. The merge's correctness relies on that precondition, so
+        /// the generator pre-sorts each batch.
+        #[test]
+        fn prop_global_top_k_matches_brute_force(
+            // 1..=8 batches, each with 0..=20 rows, distances in [0.0, 100.0)
+            raw in prop::collection::vec(
+                prop::collection::vec((any::<i32>(), 0.0f32..100.0f32), 0..20),
+                1..8,
+            ),
+            k in 1usize..30,
+        ) {
+            let batches: Vec<RecordBatch> = raw.into_iter().map(|mut rows| {
+                // Respect production precondition: per-batch sorted asc.
+                rows.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let (ids, dists): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+                make_distance_batch(ids, dists)
+            }).collect();
+
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let expected_len = k.min(total_rows);
+
+            let merged = global_top_k_by_distance(batches.clone(), k)
+                .expect("merge must not error on valid inputs");
+
+            // Invariant 1: result size = min(k, total_rows).
+            prop_assert_eq!(merged.num_rows(), expected_len);
+
+            // Invariant 2: result is sorted ascending by _distance.
+            let dists = merged.column(1).as_any()
+                .downcast_ref::<Float32Array>().unwrap();
+            for i in 1..dists.len() {
+                prop_assert!(dists.value(i-1).total_cmp(&dists.value(i)).is_le(),
+                    "merge not sorted asc at index {}: {} > {}",
+                    i, dists.value(i-1), dists.value(i));
+            }
+
+            // Invariant 3: distances match brute force (IDs may tie-break
+            // differently — only distance values are canonical).
+            let expected = brute_force_top_k(&batches, k);
+            let got: Vec<f32> = (0..dists.len()).map(|i| dists.value(i)).collect();
+            let want: Vec<f32> = expected.iter().map(|(_, d)| *d).collect();
+            prop_assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(want.iter()) {
+                prop_assert!(g.total_cmp(w).is_eq(),
+                    "distance mismatch: got {g}, want {w}");
+            }
+        }
+    }
 }

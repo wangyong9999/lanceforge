@@ -338,4 +338,103 @@ mod tests {
             &shards, &executors, &policy, None, None);
         assert_eq!(result.len(), 3);
     }
+
+    // ---------- Property-based tests ----------
+    //
+    // These guard the assign_shards contract against regressions that hand-
+    // picked examples miss: any N shards × M workers × R replicas combination
+    // must satisfy four invariants. If a future optimization breaks one, the
+    // shrinker gives us the minimal failing case automatically.
+    use proptest::prelude::*;
+
+    fn unique_names(prefix: &'static str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    // Default `cases` comes from `ProptestConfig::default()` which honors the
+    // `PROPTEST_CASES` env var, so nightly CI can crank it up without code
+    // changes. We intentionally do not hardcode `cases:` here.
+    proptest! {
+        /// Invariant bundle for the unsized (count-balanced) path.
+        #[test]
+        fn prop_assign_shards_invariants(
+            num_shards in 1usize..20,
+            num_workers in 1usize..8,
+            replica_factor in 1usize..5,
+        ) {
+            let shards = unique_names("s", num_shards);
+            let workers = unique_names("w", num_workers);
+            let policy = ShardPolicy { replica_factor, max_shards_per_worker: 0 };
+
+            let assignment = assign_shards(&shards, &workers, &policy, None);
+
+            // (1) Every input shard has an entry.
+            prop_assert_eq!(assignment.len(), num_shards);
+
+            let expected_replicas = replica_factor.min(num_workers);
+            let worker_set: HashSet<&String> = workers.iter().collect();
+
+            for (shard, assigned) in &assignment {
+                // (2) Replica count = min(replica_factor, num_workers).
+                prop_assert_eq!(assigned.len(), expected_replicas,
+                    "shard {} got {} replicas, expected {}",
+                    shard, assigned.len(), expected_replicas);
+
+                // (3) No duplicate worker within a single shard's replicas.
+                let uniq: HashSet<&String> = assigned.iter().collect();
+                prop_assert_eq!(uniq.len(), assigned.len(),
+                    "shard {} has duplicate worker replicas: {:?}",
+                    shard, assigned);
+
+                // (4) Every assigned worker is from the input executor list.
+                for w in assigned {
+                    prop_assert!(worker_set.contains(w),
+                        "shard {} assigned unknown worker {}", shard, w);
+                }
+            }
+
+            // (5) Load balance: max_load - min_load ≤ 1 when no affinity constraint
+            //     (greedy least-loaded placement is optimal up to rounding).
+            let mut load: HashMap<&String, usize> = workers.iter().map(|w| (w, 0)).collect();
+            for assigned in assignment.values() {
+                for w in assigned {
+                    *load.entry(w).or_default() += 1;
+                }
+            }
+            let max = load.values().copied().max().unwrap_or(0);
+            let min = load.values().copied().min().unwrap_or(0);
+            prop_assert!(max - min <= 1,
+                "load imbalance > 1: max={max}, min={min}, load={:?}", load);
+        }
+
+        /// Size-aware path: largest shards must land on distinct workers when
+        /// replica_factor=1 and there are enough workers to spread them.
+        #[test]
+        fn prop_assign_shards_size_aware_spreads_largest(
+            num_workers in 2usize..6,
+        ) {
+            // num_shards = num_workers so the greedy packer must put exactly
+            // one large shard per worker.
+            let num_shards = num_workers;
+            let shards = unique_names("s", num_shards);
+            let workers = unique_names("w", num_workers);
+            let policy = ShardPolicy { replica_factor: 1, max_shards_per_worker: 0 };
+
+            // Every shard has the same large size → each worker gets exactly one.
+            let sizes: HashMap<String, u64> = shards.iter()
+                .map(|s| (s.clone(), 1_000_000u64))
+                .collect();
+
+            let assignment = assign_shards_with_sizes(
+                &shards, &workers, &policy, None, Some(&sizes));
+
+            // Collect the primary worker for each shard and check they are distinct.
+            let primaries: HashSet<&String> = assignment.values()
+                .map(|v| &v[0])
+                .collect();
+            prop_assert_eq!(primaries.len(), num_shards,
+                "equal-sized shards were not spread across workers: {:?}",
+                assignment);
+        }
+    }
 }
