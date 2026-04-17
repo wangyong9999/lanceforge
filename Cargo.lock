@@ -4198,12 +4198,14 @@ name = "lance-distributed-meta"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fs4",
  "lance-distributed-common",
  "lance-distributed-proto",
  "log",
  "object_store",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
 ]

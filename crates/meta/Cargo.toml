@@ -17,3 +17,10 @@ async-trait = { workspace = true }
 # S3MetaStore
 object_store = { workspace = true }
 url = "2"
+
+# Cross-process advisory file lock for FileMetaStore to prevent multi-coordinator
+# split-brain when the same metadata file is shared via NFS/shared volume.
+fs4 = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

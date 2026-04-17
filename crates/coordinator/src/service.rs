@@ -744,8 +744,13 @@ impl LanceSchedulerService for CoordinatorService {
                 };
                 let sn = shard_name.clone();
                 let wid = worker_id.clone();
+                // 120s budget covers IPC decode + dataset write + optional index build.
+                // Without this, a stalled worker hangs the entire CreateTable indefinitely.
                 handles.push(tokio::spawn(async move {
-                    let result = client.create_local_shard(Request::new(create_req)).await;
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(120),
+                        client.create_local_shard(Request::new(create_req)),
+                    ).await;
                     (sn, wid, result)
                 }));
             }
@@ -758,7 +763,7 @@ impl LanceSchedulerService for CoordinatorService {
         let mut first_err: Option<String> = None;
         for handle in handles {
             match handle.await {
-                Ok((shard_name, wid, Ok(resp))) => {
+                Ok((shard_name, wid, Ok(Ok(resp)))) => {
                     let r = resp.into_inner();
                     if r.error.is_empty() {
                         total_created += r.num_rows;
@@ -768,9 +773,16 @@ impl LanceSchedulerService for CoordinatorService {
                         first_err = Some(format!("CreateLocalShard failed: {}", r.error));
                     }
                 }
-                Ok((_, _, Err(e))) => {
+                Ok((_, _, Ok(Err(e)))) => {
                     if first_err.is_none() {
                         first_err = Some(format!("CreateLocalShard RPC: {e}"));
+                    }
+                }
+                Ok((sn, wid, Err(_elapsed))) => {
+                    if first_err.is_none() {
+                        first_err = Some(format!(
+                            "CreateLocalShard timeout on worker {wid} for shard {sn} (>120s)"
+                        ));
                     }
                 }
                 Err(e) => {

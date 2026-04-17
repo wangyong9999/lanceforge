@@ -74,9 +74,17 @@ pub trait MetaStore: Send + Sync + 'static {
 /// MetaStore backed by a single JSON file with in-memory cache.
 /// Suitable for single-coordinator or development deployments.
 /// For multi-coordinator, use S3MetaStore or etcd.
+///
+/// At construction, an exclusive advisory lock is taken on `<path>.lock`.
+/// This fails fast if another process already holds the lock, preventing
+/// split-brain when operators accidentally share a filesystem backend
+/// (e.g. via NFS) across multiple coordinator instances.
 pub struct FileMetaStore {
     path: String,
     data: tokio::sync::RwLock<StoreData>,
+    /// Lock file handle. Kept alive for process lifetime; dropping releases the lock.
+    #[allow(dead_code)]
+    lock_file: std::fs::File,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -87,6 +95,26 @@ struct StoreData {
 
 impl FileMetaStore {
     pub async fn new(path: &str) -> Result<Self, MetaError> {
+        // Acquire cross-process advisory lock BEFORE reading the data file,
+        // so two coordinators cannot race on the initial load.
+        if let Some(parent) = Path::new(path).parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+        let lock_path = format!("{path}.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| MetaError::StorageError(format!("open lock {lock_path}: {e}")))?;
+        use fs4::FileExt;
+        lock_file.try_lock_exclusive()
+            .map_err(|e| MetaError::StorageError(format!(
+                "FileMetaStore at {path} is already locked by another process — \
+                 use S3MetaStore or etcd for multi-coordinator deployments ({e})"
+            )))?;
+
         let data = if Path::new(path).exists() {
             let content = tokio::fs::read_to_string(path).await
                 .map_err(|e| MetaError::StorageError(format!("read {path}: {e}")))?;
@@ -95,10 +123,12 @@ impl FileMetaStore {
         } else {
             StoreData::default()
         };
-        info!("FileMetaStore: {} ({} keys)", path, data.entries.len());
+        info!("FileMetaStore: {} ({} keys) [locked {lock_path}]",
+            path, data.entries.len());
         Ok(Self {
             path: path.to_string(),
             data: tokio::sync::RwLock::new(data),
+            lock_file,
         })
     }
 
@@ -552,5 +582,28 @@ mod tests {
         assert!(matches!(err, Err(MetaError::VersionConflict { .. })));
 
         let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn test_file_store_advisory_lock_prevents_concurrent_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
+
+        // First instance takes the lock
+        let store1 = FileMetaStore::new(&path).await.unwrap();
+
+        // Second instance must fail fast — prevents multi-process split-brain
+        let err = FileMetaStore::new(&path).await;
+        match &err {
+            Err(MetaError::StorageError(m)) if m.contains("locked") => {}
+            Err(MetaError::StorageError(m)) => panic!("wrong error: {m}"),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("expected lock error, got Ok"),
+        }
+
+        // After first instance drops, a new one can open
+        drop(store1);
+        let _store2 = FileMetaStore::new(&path).await
+            .expect("lock should be released after drop");
     }
 }
