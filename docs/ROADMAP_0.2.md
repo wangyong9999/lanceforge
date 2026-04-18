@@ -105,13 +105,16 @@
 
 **小步骤**：
 
-- **B1.1** 持久状态清单审计
-  - 扫描所有 `struct *State`, `static`, `OnceCell`, 磁盘路径赋值
-  - 产出 `docs/STATELESS_INVARIANTS.md`：列每一处状态（in-memory / local disk / OBS），标注"cache vs truth"
-  - 所有被标为 truth 但不在 OBS 的条目 → B1.2 的工作项
+- **B1.1** 持久状态清单审计 — ✅ 完成
+  - 产出 `docs/STATELESS_INVARIANTS.md`：分 Truth / Cache / Config 三类枚举代码库每处状态
+  - 识别 4 处 Gap（A 密钥 config-only / B auto-shard 本地文件 / C FileMetaStore 仍可启用 / D StaticShardState 默认兜底）
+  - 结论：整体 SaaS-first 化程度 ~75%，剩余工作集中在 Gap A-D
 
-- **B1.2** 非 OBS truth → 迁 OBS
-  - 预期涉及：session token 持久化、API key registry（现在可能本地 YAML）、shard assignment 历史、orphan GC 游标
+- **B1.2** 非 OBS truth → 迁 OBS — 4 个子项，详见 `docs/STATELESS_INVARIANTS.md` §5
+  - **B1.2.1** 引入 `deployment_profile` 配置 + 启动期校验（闭 Gap C + D）— 2d
+  - **B1.2.2** auto-shard config 从本地 tmp → MetaStore（闭 Gap B）— 1w
+  - **B1.2.3** API key registry 从 config → MetaStore + hot-reload（闭 Gap A）— 2w
+  - **B1.2.4** 兼容性 & 迁移测试：老 config → saas profile 升级路径 — 3d
   - 每项独立 commit，可单独 review
 
 - **B1.3** worker 启动路径改造
