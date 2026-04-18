@@ -1,4 +1,29 @@
-# 大 k 性能 profile（H12 测量结果）
+# 大 k 性能 profile（H12 + H24 闭合）
+
+## ⚠ 更新（2026-04-18，G1 闭合）
+
+H24 的 60% 错误率**不是 LanceForge bug**。根因：WSL2 环境里的 `HTTPS_PROXY=http://127.0.0.1:7897` 被 Python gRPC 客户端错误地用于 loopback 连接——`no_proxy=127.*,localhost` 对 grpcio 无效。高并发 × 大 k 响应下，本地代理撑不住就关闭 socket，client 端看到 `UNAVAILABLE: Socket closed`。
+
+修复：`bench_phase17_matrix.py` 导入时 `os.environ.pop(...)` 清掉 `HTTP_PROXY/HTTPS_PROXY/GRPC_PROXY`。
+
+修复后实测（同机、同样 100K × 128d × 2 shards × conc=10）：
+
+| k | QPS 修复前 | QPS 修复后 | P99 修复前 | P99 修复后 | Errors 修复前 | Errors 修复后 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 1642 | 1690 | 9.9ms | 10.1ms | 0 | 0 |
+| 100 | 682 | **1175** | 34.3ms | **19.6ms** | 0 | 0 |
+| 1000 | 94.7 | **190** | 199ms | **113ms** | 0 | 0 |
+| 10000 | 12.7 | **54.7** | 778ms | **265ms** | **1535** | **0** |
+
+所有 k 级别 QPS 提升 40-330%，P99 减半，错误归零。
+
+**结论**：LanceForge 本身在 k=10000 × 100K 行工作负载下**没有正确性问题**。整个 H24 故事最终是诊断工具的教训，不是产品缺陷。
+
+原始小 k 曲线分析（IPC 序列化成本 vs k）依然成立，保留原记录如下作为历史参考。
+
+---
+
+## 一、原始 k-sweep 实测（2026-04-18 首次）
 
 **建档时间**：2026-04-18
 **对应 HARDENING_PLAN 项**：H12

@@ -16,6 +16,18 @@ Output:
 """
 
 import sys, os, time, struct, subprocess, json, csv, shutil, argparse
+
+# H24 lesson (2026-04-18): if HTTPS_PROXY / HTTP_PROXY are set (common on
+# WSL2 with a local HTTP proxy) the Python gRPC client routes loopback
+# traffic through the proxy, which under sustained conc=10 × large-k
+# load starts closing sockets and surfaces as "UNAVAILABLE: Socket
+# closed" errors that look like a LanceForge bug but aren't. Clear
+# those env vars before importing grpc so the bench measures actual
+# server behaviour, not proxy-induced noise. `no_proxy=127.*,localhost`
+# alone isn't enough — grpcio ignores NO_PROXY.
+for _var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+             "GRPC_PROXY", "grpc_proxy"):
+    os.environ.pop(_var, None)
 from datetime import datetime
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -293,6 +305,7 @@ def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids, s
         local_lat = []
         local_rec = []
         local_err = 0
+        local_err_samples = {}  # capture first few error messages per class
         for i in range(total):
             q_idx = (tid * total + i) % len(queries)
             try:
@@ -301,17 +314,30 @@ def measure_config(stub, table, queries, dim, k, nprobes, concurrency, gt_ids, s
                 if q_idx < len(gt_ids):
                     hits = len(set(ids) & set(gt_ids[q_idx][:RECALL_K]))
                     local_rec.append(hits / RECALL_K)
-            except Exception:
+            except Exception as e:
                 local_err += 1
-        return local_lat, local_rec, local_err
+                # Classify error. Keep first 3 distinct messages per class
+                # so a runaway loop doesn't pollute the report.
+                key = f"{type(e).__name__}"
+                if hasattr(e, 'code'):
+                    key = f"{key}/{e.code()}"
+                if key not in local_err_samples:
+                    local_err_samples[key] = str(e)[:300]
+        return local_lat, local_rec, local_err, local_err_samples
 
     t0 = time.perf_counter()
+    all_err_samples = {}
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         futures = [ex.submit(worker, i) for i in range(concurrency)]
         for f in as_completed(futures):
-            lat, rec, err = f.result()
+            lat, rec, err, samples = f.result()
             latencies.extend(lat); recalls.extend(rec); errors += err
+            for k_err, v_err in samples.items():
+                all_err_samples.setdefault(k_err, v_err)
     wall = time.perf_counter() - t0
+    if errors > 0:
+        for err_class, sample in all_err_samples.items():
+            print(f"   [error sample: {err_class}] {sample}")
     successful = len(latencies)
 
     lat_ms = sorted([l * 1000 for l in latencies])

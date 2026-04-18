@@ -32,7 +32,7 @@
 | H21 | SIGTERM + drain timeout | `fa13726` |
 | H22 | smoke bench PR gate | `60e85a2` |
 | H23 | meta tests → tempdir | `486b5c5` |
-| H24 | k=10000 错误率调查 | **filed, not closed** |
+| H24 | k=10000 错误率调查 | ✅ 闭合于 G1（2026-04-18，HTTPS_PROXY 环境问题，LanceForge 无 bug） |
 
 ---
 
