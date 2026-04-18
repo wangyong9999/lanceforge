@@ -620,6 +620,36 @@ executors: []
         assert_eq!(config.health_check.interval_secs, 10);
     }
 
+    /// Explicit B1.2.4 upgrade-path test: a config written against 0.1.0
+    /// schema (no `deployment_profile`, no new fields) must still parse,
+    /// default to `dev`, and pass validation. Breaking this test is a
+    /// breaking change that requires a major version bump.
+    #[test]
+    fn test_config_0_1_yaml_upgrades_cleanly() {
+        // Representative 0.1.0-era config with no knowledge of
+        // deployment_profile. Includes the fields that were stable in 0.1.x.
+        let yaml = r#"
+tables: []
+executors:
+  - {id: w0, host: "127.0.0.1", port: 50100}
+  - {id: w1, host: "127.0.0.1", port: 50101}
+default_table_path: /var/lib/lanceforge
+replica_factor: 2
+server:
+  query_timeout_secs: 30
+  max_response_bytes: 67108864
+cache:
+  ttl_secs: 5
+security:
+  api_keys: ["legacy-key-1"]
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).expect("0.1 YAML must still parse");
+        assert_eq!(config.deployment_profile, DeploymentProfile::Dev,
+                   "missing deployment_profile must default to Dev to preserve 0.1 behaviour");
+        // Validation must not introduce new errors on old configs.
+        assert!(config.validate().is_ok(), "0.1 YAML must still validate");
+    }
+
     #[test]
     fn test_config_custom_values() {
         let yaml = r#"

@@ -39,7 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config = if args[1] == "--auto-shard" {
-        // Auto-shard mode: discover fragments and generate config automatically
+        // Auto-shard mode: discover fragments and generate config automatically.
+        //
+        // Allowed only under deployment_profile=dev. The generated config is
+        // written to /tmp/lanceforge_autoshard_{pid}.yaml and consumed by
+        // workers on the same machine — neither survives a pod replacement,
+        // which is fine for laptop/dev use but fatal for SaaS / self-hosted
+        // production. ROADMAP_0.2 §B1 Gap B tracks the full MetaStore-backed
+        // auto-shard bootstrap (B1.2.2b, deferred post-alpha).
         if args.len() < 5 {
             eprintln!("Usage: lance-coordinator --auto-shard <table_name> <table_uri> <executor_config.yaml> [port]");
             std::process::exit(1);
@@ -47,6 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let table_name = &args[2];
         let table_uri = &args[3];
         let executor_config = ClusterConfig::from_file(&args[4])?;
+
+        use lance_distributed_common::config::DeploymentProfile;
+        if executor_config.deployment_profile != DeploymentProfile::Dev {
+            eprintln!(
+                "--auto-shard is only permitted under deployment_profile=dev.\n\
+                 Current profile: {:?}. The generated config is written to /tmp and \
+                 consumed by workers on the same machine — it does not survive pod \
+                 replacement. Use an explicit executor config (or a SaaS bootstrap \
+                 tool) instead.",
+                executor_config.deployment_profile
+            );
+            std::process::exit(2);
+        }
 
         info!("Auto-shard mode: discovering fragments in {}", table_uri);
         let auto_config = lance_distributed_common::auto_shard::generate_auto_config(
@@ -56,11 +76,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &executor_config.storage_options,
         ).await.map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
-        // Write generated config for workers to use
         let auto_config_path = format!("/tmp/lanceforge_autoshard_{}.yaml", std::process::id());
         let yaml = serde_yaml::to_string(&auto_config)?;
         tokio::fs::write(&auto_config_path, &yaml).await?;
-        info!("Auto-shard config written to {} — start workers with this config", auto_config_path);
+        warn!(
+            "Auto-shard config written to {} — dev-only ephemeral file, will not \
+             survive pod/process restart. Start workers with: <same_config_path>",
+            auto_config_path
+        );
 
         auto_config
     } else {
