@@ -479,6 +479,16 @@ impl MetaStore for S3MetaStore {
 mod tests {
     use super::*;
 
+    /// Shared helper (H23): every FileMetaStore test gets its own tempdir,
+    /// wiped on Drop. No more hard-coded `/tmp/lanceforge_meta_test_*.json`
+    /// colliding across parallel cargo test runs, retries, or crash leftovers.
+    /// Returns (tempdir_guard, absolute_path_to_file).
+    fn unique_meta_path() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
+        (dir, path)
+    }
+
     // ── S3MetaStore tests (using local filesystem via file:// URLs) ──
 
     #[tokio::test]
@@ -577,8 +587,7 @@ mod tests {
     async fn test_cas_reject_stale_expected_version() {
         // Arrange: key at v1. Attempt update at v1-1 (stale) must error
         // with VersionConflict carrying the true {expected, actual}.
-        let path = format!("/tmp/lanceforge_cas_stale_{}.json", std::process::id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let (_dir, path) = unique_meta_path();
 
         let store = FileMetaStore::new(&path).await.unwrap();
         let v1 = store.put("k", "v1", 0).await.unwrap();
@@ -591,30 +600,24 @@ mod tests {
             }
             other => panic!("expected VersionConflict, got {other:?}"),
         }
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[tokio::test]
     async fn test_delete_nonexistent_key_is_ok() {
         // Per trait contract (store.rs:60), delete of an absent key
         // returns Ok(()). This covers the NotFound handling branch.
-        let path = format!("/tmp/lanceforge_del_absent_{}.json", std::process::id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let (_dir, path) = unique_meta_path();
 
         let store = FileMetaStore::new(&path).await.unwrap();
         assert!(store.delete("never-existed").await.is_ok(),
                 "delete of absent key must be a no-op success");
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[tokio::test]
     async fn test_file_store_corrupted_snapshot_rejected() {
         // A half-written JSON blob in the MetaStore file must surface
         // as a parse error at load, not deserialize to partial state.
-        let path = format!("/tmp/lanceforge_corrupt_{}.json", std::process::id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let (_dir, path) = unique_meta_path();
         tokio::fs::write(&path, b"{this is not valid json at all").await.unwrap();
 
         let err = FileMetaStore::new(&path).await.err();
@@ -622,8 +625,6 @@ mod tests {
             matches!(&err, Some(MetaError::StorageError(m)) if m.contains("parse")),
             "corrupted snapshot must be rejected with a parse error, got: {err:?}"
         );
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[tokio::test]
@@ -644,8 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_keys_empty_and_populated() {
-        let path = format!("/tmp/lanceforge_list_{}.json", std::process::id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let (_dir, path) = unique_meta_path();
 
         let store = FileMetaStore::new(&path).await.unwrap();
         assert!(store.list_keys("").await.unwrap().is_empty(),
@@ -658,18 +658,15 @@ mod tests {
         let mut ns_keys = store.list_keys("ns/").await.unwrap();
         ns_keys.sort();
         assert_eq!(ns_keys, vec!["ns/a".to_string(), "ns/b".to_string()]);
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
     // ── FileMetaStore tests ──
 
     #[tokio::test]
     async fn test_file_store_crud() {
-        let path = "/tmp/lanceforge_meta_test_crud.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
 
-        let store = FileMetaStore::new(path).await.unwrap();
+        let store = FileMetaStore::new(&path).await.unwrap();
 
         // Create
         let v1 = store.put("tables/products", r#"{"shards":["s0"]}"#, 0).await.unwrap();
@@ -691,16 +688,13 @@ mod tests {
         // Delete
         store.delete("tables/products").await.unwrap();
         assert!(store.get("tables/products").await.unwrap().is_none());
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
     async fn test_file_store_prefix() {
-        let path = "/tmp/lanceforge_meta_test_prefix.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
 
-        let store = FileMetaStore::new(path).await.unwrap();
+        let store = FileMetaStore::new(&path).await.unwrap();
         store.put("tables/a", "1", 0).await.unwrap();
         store.put("tables/b", "2", 0).await.unwrap();
         store.put("sessions/w0", "alive", 0).await.unwrap();
@@ -710,37 +704,31 @@ mod tests {
 
         let entries = store.get_prefix("tables/").await.unwrap();
         assert_eq!(entries.len(), 2);
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
     async fn test_file_store_persistence() {
-        let path = "/tmp/lanceforge_meta_test_persist.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
 
         // Write
         {
-            let store = FileMetaStore::new(path).await.unwrap();
+            let store = FileMetaStore::new(&path).await.unwrap();
             store.put("key", "value", 0).await.unwrap();
         }
 
         // Read after "restart"
         {
-            let store = FileMetaStore::new(path).await.unwrap();
+            let store = FileMetaStore::new(&path).await.unwrap();
             let entry = store.get("key").await.unwrap().unwrap();
             assert_eq!(entry.value, "value");
         }
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
     async fn test_cas_create_if_not_exists() {
-        let path = "/tmp/lanceforge_meta_test_cas.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
 
-        let store = FileMetaStore::new(path).await.unwrap();
+        let store = FileMetaStore::new(&path).await.unwrap();
 
         // First create: expected_version=0 → success
         store.put("new_key", "v1", 0).await.unwrap();
@@ -748,71 +736,60 @@ mod tests {
         // Second create: expected_version=0 → conflict (already exists)
         let err = store.put("new_key", "v2", 0).await;
         assert!(matches!(err, Err(MetaError::VersionConflict { .. })));
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     // ── Schema-version tests (B3.2) ──
 
     #[tokio::test]
     async fn test_schema_version_stamped_on_new_store() {
-        let path = "/tmp/lanceforge_meta_schema_new.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
 
         // Fresh store → put one key so persist runs → reopen and inspect JSON.
         {
-            let store = FileMetaStore::new(path).await.unwrap();
+            let store = FileMetaStore::new(&path).await.unwrap();
             store.put("k", "v", 0).await.unwrap();
         }
-        let content = tokio::fs::read_to_string(path).await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["schema_version"].as_u64().unwrap() as u32,
                    CURRENT_SCHEMA_VERSION);
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
     async fn test_schema_version_upgraded_from_pre_0_2_snapshot() {
         // Simulate a 0.1-era snapshot with no schema_version field.
-        let path = "/tmp/lanceforge_meta_schema_pre02.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
         let legacy = r#"{"entries":{"k":{"value":"v","version":1}},"global_version":1}"#;
-        tokio::fs::write(path, legacy).await.unwrap();
+        tokio::fs::write(&path, legacy).await.unwrap();
 
         // Loading must succeed (pre-0.2 compatible).
-        let store = FileMetaStore::new(path).await.unwrap();
+        let store = FileMetaStore::new(&path).await.unwrap();
         let entry = store.get("k").await.unwrap().unwrap();
         assert_eq!(entry.value, "v");
         // Writing any key stamps the new schema_version.
         store.put("k2", "v2", 0).await.unwrap();
-        let content = tokio::fs::read_to_string(path).await.unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed["schema_version"].as_u64().unwrap() as u32,
                    CURRENT_SCHEMA_VERSION);
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
     async fn test_schema_version_future_rejected() {
         // A snapshot authored by a newer server (schema_v999) must be rejected
         // so old servers don't silently corrupt forward-version state.
-        let path = "/tmp/lanceforge_meta_schema_future.json";
-        let _ = tokio::fs::remove_file(path).await;
+        let (_dir, path) = unique_meta_path();
         let future_snapshot = format!(
             r#"{{"entries":{{}},"global_version":0,"schema_version":{}}}"#,
             CURRENT_SCHEMA_VERSION + 999
         );
-        tokio::fs::write(path, future_snapshot).await.unwrap();
+        tokio::fs::write(&path, future_snapshot).await.unwrap();
 
-        let err = FileMetaStore::new(path).await.err();
+        let err = FileMetaStore::new(&path).await.err();
         assert!(
             matches!(&err, Some(MetaError::StorageError(m)) if m.contains("newer than this server supports")),
             "expected fwd-compat error, got: {err:?}"
         );
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
