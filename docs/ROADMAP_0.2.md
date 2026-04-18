@@ -386,9 +386,38 @@
 - 每月一次 checkpoint review（commit tag `roadmap-checkpoint-YYYY-MM`）
 
 ### 3.3 Milestone 退出条件
-- **0.2-alpha**：所有 B 项✅，内部 dogfood 2 周无 P0 事故
-- **0.2-beta**：R1-R6 完成，R7 至少最小能力；公开 beta，50+ 外部用户
-- **0.2-GA**：M 项至少落 2 项；RELEASE_NOTES.md 详列 breaking changes
+
+#### 0.2-alpha exit criteria（2026-04-18 修订，落地化版本）
+
+把每项 "B 做了" 转成 **产出物 × 量化门** 二元组——alpha 不靠主观判断 ✅。
+
+| ID | Minimum 产出物 | 量化门 |
+|---|---|---|
+| **B1.2.3** | `auth.rs` 支持 MetaStore 后端 + 定期 refresh；`lance-admin auth` CLI 子命令 | `add-key` 后新 key ≤ 60s 被 coordinator 识别；legacy config 路径保留为 bootstrap-only |
+| **B2.2** | `coordinator::scatter_gather` / `connection_pool` 支持 read-primary / write-primary 标记 | `bench_phase17_mixed.py` 10 QPS 写下 Read QPS ≥ 80% read-only baseline |
+| **B3.5** | `docs/COMPAT_POLICY.md` | 存在，且明确 N-1 规则、proto 演化规则、break policy |
+| **B4-min** | `docs/COVERAGE_MATRIX.md` + `target/cov/html/` artifacts | 4 关键模块（scatter_gather / global_top_k_merge / metastore CAS / connection_pool）分支覆盖率**已测量并入档**；目标 ≥ 85% 但不 block alpha |
+| **B5-min** | `chaos/` 目录 + DSL runner + 2 faults (`worker_kill`, `slow_disk`) | 每 fault 运行 10 轮，通过率 100%，结果文件落地 |
+| **B6-min** | `soak/` harness + 2h 数据采集脚本 | 2h soak 期间 RSS / open-fd 漂移 < 3% |
+| **Docs** | README / QUICKSTART / CHANGELOG / RELEASE_NOTES 全部提及 `deployment_profile` + 0.2 新能力 | 无死链，docs 交叉引用一致 |
+| **Regression** | 全量 `cargo test --lib` + `e2e_ha_test.py` + `bench_phase17_mixed.py` 绿跑 | 全绿，结果文件 commit |
+
+**显式延后到 beta 或更晚**：
+- B4 真正做到 4 模块 ≥ 90% 分支覆盖（alpha 只测量 + 定基线）
+- B5 full chaos fault library（net_partition / OOM / s3_429 / clock_skew）
+- B5 nightly 100-iter CI job（基础设施）
+- B6 full 24h soak CI job
+- B3.3 `lance-admin migrate` CLI（0.2→0.3 出现第一次 schema 变更时再写）
+
+#### 0.2-beta exit criteria
+- R1-R6 全部完成，R7 至少 ADD COLUMN NULLABLE
+- 50+ 外部用户 + 2 个 real-world case study（含 RAG）
+- Chaos / Soak 升级为 CI nightly job，连续 2 周无 regression
+
+#### 0.2-GA exit criteria
+- M 项至少落 2 项（建议 M1 sparse vector + M3 lake interop）
+- 所有 breaking changes 在 `CHANGELOG.md` 明确列出
+- 至少 1 个 publicly documented production deployment
 
 ---
 
