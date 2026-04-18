@@ -232,6 +232,82 @@ cache:
 - **B2-extended：sparse cache keys**——去 `dataset_version` 依赖
 - 这两项是 0.2-beta / 0.3 目标，不是 alpha blocker
 
+## 八、50 QPS 写场景深度根因（beta 的起点）
+
+alpha 达成 10 QPS 写 82.5% 后，50 QPS 写仍然 -81%（450 vs 2440）。表面上 B2.2 的路由已经把读流量隔离在 w1 上，rc=60 让 cache 稳定在 60s 窗口内——为什么高写压下仍然崩？
+
+### 8.1 瓶颈切换观察
+
+10 QPS vs 50 QPS 读 QPS 降幅不成比例：**写压增 5×、读 QPS 掉 4.5×**。说明已经**不是同一个机制主导**。
+
+| 场景 | Read QPS | P99 | vs baseline | 主导瓶颈 |
+|---|---:|---:|---:|---|
+| read-only | 2440 | ~15ms | — | — |
+| +10 QPS 写 | 2014 | 127ms | 82.5% | cache invalidation（B2.2 + rc=60 已解决）|
+| +50 QPS 写 | 450 | >300ms | 18.5% | **存储层共享资源**（下详述）|
+
+### 8.2 S3 / 对象存储下是否同样瓶颈？未确认
+
+本轮所有 bench 都跑在**本地 ext4**。根据架构推理，S3/GCS/Azure 对象存储下行为会**显著不同**：
+
+- **本地 fs**：两个 worker 进程通过 kernel page cache + 同一物理盘 ↔ **共享真实存储**
+- **S3**：每个 worker 是独立 HTTP 客户端，对象存储本身承载一切多客户端并发语义——worker 间在**客户端层**不共享任何东西
+
+按 S3 语义，w0 的 PUT 不会阻塞 w1 的 GET。所以理论上 50 QPS 写场景在 S3 下应该比本地 fs 好。**但这需要实测**，相关实验列为 beta 工作（§8.6）。
+
+本节以下分析基于**本地 fs bench 的观察**。
+
+### 8.3 本地 fs 下的多重瓶颈（按贡献度排）
+
+1. **Manifest commit 风暴**
+   - 每次 `AddRows` = 1 次 lance manifest 的 read-modify-write + fsync
+   - 50 AddRows/s → 50 manifest 提交/s
+   - manifest 在累积后变大（每条 fragment 添加一条 entry），每次 commit 成本上升
+   - 两个 worker 指向**同一个 manifest 文件**——w0 写 manifest 时 w1 可能要等 fs 层同步
+
+2. **fsync write barrier**
+   - ext4 默认 `data=ordered`，fsync 把整个文件系统的脏页推到磁盘
+   - w0 的 50 fsync/s 实质上让整个 fs 的写入层序列化
+   - w1 即使只读，它的 page-cache refresh（读 manifest 看 version）也会因 fs busy 而被延迟
+
+3. **Kernel page cache 污染**
+   - w0 写入的新 fragment 数据会挤占 page cache
+   - w1 的 IVF partition 缓存被驱逐 → 冷 miss → 磁盘 I/O
+   - WSL2 里 page cache 更紧张
+
+4. **Lance 内部 dataset handle 同步**（未证实，需 tracing）
+   - lancedb Table 对象打开的是同一个 `.lance` 目录
+   - 可能有某种轻量 handle-level 协调（even if inter-process 不锁）
+   - 影响：每次 refresh manifest 要做 IO
+
+### 8.4 H1（version tick）在此场景为什么不生效
+
+已知 rc=60 场景下 w1 的 poller 每 60s 才调 `table.version()`。QueryCache 按 `(query, dataset_version)` 索引，60s 窗口里 version 不变 → cache 稳定。
+
+但实测 P99 = 300ms，cache hit 不可能 P99 300ms（baseline cache 命中 P99 = 15ms）。所以 cache 命中率在下降，或者**命中后的后续路径本身被拉长**。
+
+最可能：
+- lancedb 内部 read path（不是我们的 QueryCache）**仍在观测 dataset 变化**，因为 w0 写入的 fragment 会让底层 fs 级别 mtime 变
+- lancedb 的 `read_consistency_interval` 只影响"多久主动 check manifest"，不影响"fs 变化事件穿透"
+
+### 8.5 为什么 "fragment-level invalidation" 不是全部答案
+
+ROADMAP 之前写"fragment-level invalidation"是认为瓶颈在 cache 层。实测数据表明瓶颈在**存储层**（§8.3）。Fragment-level cache 只能在 cache 层提供增量收益（10-30 QPS 写场景再拿 10-15%），对 50 QPS 根本撬不动。
+
+### 8.6 真正的 beta 解法（按 ROI 排）
+
+- **B2.3 Write batching**（写路径批处理，~1 周）：coordinator/worker 侧加 WriteBuffer，窗口 500ms 或 1000 行，50 commits/s → 10 commits/s（-80% 写放大）。**在本地 fs 下是最大杠杆**。
+- **B2.4 Fragment-level invalidation**（~2 周）：ROADMAP 原计划。配合 lancedb fragment API。在 10-30 QPS 写场景叠加 10-15%；50 QPS 场景锦上添花。
+- **B2.5 物理存储隔离 PoC**（~1 周 spike）：write worker 写独立 hot tier；背景 compact 到 cold tier；readers 只读 cold tier。彻底解除 fs 层争抢。本地 fs 下 ROI 最高但运维最重。
+- **B2.6 S3 基线验证**（~2 天）：在真实 S3/MinIO 下重跑 bench。**如果 S3 下 50 QPS 写已经接近 80%，则 B2.3-2.5 只需要本地 dev 场景，不需要 beta-blocking**。
+- **B2.7 Async commit**（和 B2.3 叠加）：`durability: {sync, async, group_commit}` 配置；async 场景 ack 不等 fsync，背景按时间或字节批量推。
+
+### 8.7 建议 beta exit criteria（B2 维度）
+
+- 本地 fs：50 QPS 写读 QPS ≥ 60% baseline（不求 80%，那是 GA）
+- S3/MinIO：50 QPS 写读 QPS ≥ 80% baseline（如 B2.6 实测本就接近则不做 Tier 1）
+- 前置：`B2.6` 先跑完，定位真问题在本地 fs 还是 S3 也如此
+
 ---
 
 ## 八、更新 LIMITATIONS.md §11 的行动项

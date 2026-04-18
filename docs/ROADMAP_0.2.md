@@ -303,6 +303,20 @@
 
 ---
 
+### 层 1.5：beta-blocker 的 B2 延续
+
+**背景**：alpha 达成 `+10 QPS 写 = 82.5% baseline`，但 `+50 QPS 写 = 18.5%`。根因不在 cache（原 ROADMAP 假设），而在**存储层共享资源**（详见 `docs/PROFILE_MIXED_RW.md` §8）。拆成 5 个 beta 子项：
+
+| ID | 工作 | 估工 | 验收 |
+|---|---|---|---|
+| **B2.3** | Write batching — WriteBuffer 窗口 500ms / 1000 行满任一 flush；proto 加 `queued` + `commit_seq` | ~1w | 本地 fs 下 50 QPS 写场景读 QPS ≥ 60% baseline |
+| **B2.4** | Fragment-level invalidation — cache key 从 `dataset_version` 换成 `fragment_id_set`；依赖 lancedb fragment API | ~2w | 10-30 QPS 写场景再拿 10-15% |
+| **B2.5** | 物理存储隔离 PoC — write worker 写独立 hot tier，背景 compact 到 cold tier；readers 只读 cold | ~1w spike + N 周落地 | feasibility note + PoC 数据 |
+| **B2.6** | **S3 基线验证**（前置，最先做） — 在 MinIO / 真 S3 下跑同 bench；对象存储 HTTP 语义下 worker 间本不共享存储资源，可能 50 QPS 场景本来就好 | ~2d | 实测数据入 PROFILE_MIXED_RW.md |
+| **B2.7** | Async commit — `durability: {sync, async, group_commit}`；async 模式 ack 不等 fsync | ~1w（和 B2.3 叠加）| 可选加速 B2.3 的写放大收益 |
+
+**依赖顺序**：B2.6 先跑 → 拿到本地 fs vs S3 的对比数字 → 决定 B2.3/B2.4/B2.5 哪些是真 beta blocker。如果 B2.6 显示 S3 下已经达 80%，B2.5 可能完全不做（S3 部署即解决）。
+
 ### 层 2：Strong-Recommend（0.2-beta，~8 周）
 
 企业客户必问项。0.2-beta 目标 80% 完成。
