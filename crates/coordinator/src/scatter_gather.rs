@@ -386,4 +386,81 @@ mod tests {
         assert!(groups.contains_key("w1"), "Should failover to w1");
         assert!(!groups.contains_key("w0"), "w0 is down");
     }
+
+    // ── H6: scatter_gather error-branch lib coverage (no live workers) ──
+
+    #[test]
+    fn test_group_mixed_healthy_unhealthy() {
+        // w0 down, w1 up (secondary for s0, primary for s1);
+        // w2 up (only secondary for s1, primary for s2).
+        // Expected: s0 → w1, s1 → w1 or w2, s2 → w2.
+        let routing = routing_3shards();
+        let healthy: HashSet<String> = ["w1", "w2"].iter().map(|s| s.to_string()).collect();
+        let (groups, skipped) = group_shards_by_worker(&routing, &healthy).unwrap();
+        assert_eq!(skipped, 0, "every shard has at least one healthy candidate");
+        let total: usize = groups.values().map(|v| v.len()).sum();
+        assert_eq!(total, 3);
+        assert!(!groups.contains_key("w0"), "w0 is unhealthy, must not receive shards");
+    }
+
+    #[test]
+    fn test_group_empty_routing_returns_ok_zero_skipped() {
+        // Zero-shard routing (e.g. after full pruning): we return Ok with
+        // empty groups and 0 skipped, not an error.
+        let routing: Vec<(String, String, Option<String>)> = vec![];
+        let healthy: HashSet<String> = ["w0"].iter().map(|s| s.to_string()).collect();
+        let (groups, skipped) = group_shards_by_worker(&routing, &healthy).unwrap();
+        assert!(groups.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_group_single_shard_single_replica_missing() {
+        // One shard, primary down, no secondary → skipped.
+        let routing = vec![("s0".into(), "w0".into(), None)];
+        let healthy: HashSet<String> = HashSet::new();
+        let err = group_shards_by_worker(&routing, &healthy).unwrap_err();
+        assert!(err.contains("unhealthy"), "got: {err}");
+    }
+
+    #[test]
+    fn test_group_secondary_only_healthy() {
+        // Primary w0 down, secondary w1 healthy — s0 must go to w1.
+        let routing = vec![("s0".into(), "w0".into(), Some("w1".into()))];
+        let healthy: HashSet<String> = ["w1"].iter().map(|s| s.to_string()).collect();
+        let (groups, skipped) = group_shards_by_worker(&routing, &healthy).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(groups.get("w1").map(|v| v.len()), Some(1));
+        assert!(!groups.contains_key("w0"));
+    }
+
+    #[test]
+    fn test_failure_threshold_single_failure_half_rounded() {
+        // 1/2 failures — "failures*2 > total" condition is > not >=
+        // so 1/2 is NOT a failure (tie goes to success).
+        assert!(check_failure_threshold(1, 2).is_ok(),
+                "exactly half failed should not error (strict >50% rule)");
+    }
+
+    #[test]
+    fn test_failure_threshold_large_numbers() {
+        // Guard the arithmetic for realistic cluster sizes.
+        assert!(check_failure_threshold(5, 100).is_ok());
+        assert!(check_failure_threshold(50, 100).is_ok(), "exactly 50% OK");
+        assert!(check_failure_threshold(51, 100).is_err(), "51% fails");
+    }
+
+    #[test]
+    fn test_group_three_way_replica() {
+        // Some shards have extended replica (replica_factor=3 would surface
+        // that via secondary + another spot — but our Option<String> model
+        // only captures 2. This test pins the 2-replica ceiling behaviour.)
+        let routing = vec![("s0".into(), "w0".into(), Some("w1".into()))];
+        let healthy: HashSet<String> = ["w0", "w1", "w2"].iter().map(|s| s.to_string()).collect();
+        let (groups, _) = group_shards_by_worker(&routing, &healthy).unwrap();
+        let total: usize = groups.values().map(|v| v.len()).sum();
+        assert_eq!(total, 1, "single shard routes to exactly one worker");
+        assert!(!groups.contains_key("w2"),
+                "w2 is healthy but not in this shard's replica set, must not receive");
+    }
 }
