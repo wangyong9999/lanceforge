@@ -390,7 +390,7 @@ pub struct ShardConfig {
 }
 
 /// Configuration for an Executor node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutorConfig {
     /// Unique executor identifier
     pub id: String,

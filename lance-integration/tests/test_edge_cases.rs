@@ -302,15 +302,12 @@ async fn test_executor_concurrent_queries() {
 
     let mut success = 0;
     for handle in handles {
-        match handle.await.unwrap() {
-            Ok(batch) => {
-                assert!(batch.num_rows() > 0);
-                success += 1;
-            }
-            Err(e) => panic!("Concurrent query failed: {}", e),
-        }
+        let result = handle.await.unwrap();
+        let batch = result.unwrap_or_else(|e| panic!("concurrent query failed: {e}"));
+        assert!(batch.num_rows() > 0, "query returned empty batch");
+        success += 1;
     }
-    assert_eq!(success, 10, "All 10 concurrent queries should succeed");
+    assert_eq!(success, 10, "all 10 concurrent queries should succeed");
 }
 
 // ============================================================

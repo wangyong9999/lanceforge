@@ -127,8 +127,8 @@ async fn test_grpc_ann_search() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: exec0_port },
-            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: exec1_port },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: exec0_port , role: Default::default()},
+            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: exec1_port , role: Default::default()},
         ],
         ..Default::default()
     };
@@ -357,7 +357,7 @@ async fn test_grpc_empty_result() {
                 executors: vec!["e0".into()],
             }],
         }],
-        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: exec_port }],
+        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: exec_port , role: Default::default()}],
         ..Default::default()
     };
 

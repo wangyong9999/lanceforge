@@ -180,11 +180,13 @@ async fn test_config_routing() {
                 id: "exec_0".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 50051,
+                role: Default::default(),
             },
             ExecutorConfig {
                 id: "exec_1".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 50052,
+                role: Default::default(),
             },
         ],
         ..Default::default()
@@ -256,11 +258,13 @@ async fn test_end_to_end_distributed_ann() {
                 id: "exec_0".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 50051,
+                role: Default::default(),
             },
             ExecutorConfig {
                 id: "exec_1".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 50052,
+                role: Default::default(),
             },
         ],
         ..Default::default()

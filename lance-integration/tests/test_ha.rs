@@ -70,8 +70,7 @@ async fn test_multi_coordinator_failover() {
             }],
         }],
         executors: vec![ExecutorConfig {
-            id: "w0".into(), host: "127.0.0.1".into(), port: worker_port,
-        }],
+            id: "w0".into(), host: "127.0.0.1".into(), port: worker_port, role: Default::default() }],
         ..Default::default()
     };
 

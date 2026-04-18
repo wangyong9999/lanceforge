@@ -74,7 +74,7 @@ async fn test_text_query_with_mock_embedding() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep , role: Default::default()},
         ],
         embedding: Some(EmbeddingConfig {
             provider: "mock".into(),
@@ -209,7 +209,7 @@ async fn test_text_query_no_embedding_config() {
             name: "t".into(),
             shards: vec![ShardConfig { name: "t_s0".into(), uri: s0.to_str().unwrap().into(), executors: vec!["e0".into()] }],
         }],
-        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep }],
+        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep , role: Default::default()}],
         ..Default::default() // embedding: None
     };
 

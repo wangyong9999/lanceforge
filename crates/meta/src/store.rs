@@ -704,15 +704,11 @@ mod tests {
         );
         tokio::fs::write(path, future_snapshot).await.unwrap();
 
-        let err = FileMetaStore::new(path).await;
-        match err {
-            Err(MetaError::StorageError(m)) => {
-                assert!(m.contains("newer than this server supports"),
-                        "expected fwd-compat error, got: {m}");
-            }
-            Err(e) => panic!("wrong error kind: {e}"),
-            Ok(_) => panic!("future schema_version must not load"),
-        }
+        let err = FileMetaStore::new(path).await.err();
+        assert!(
+            matches!(&err, Some(MetaError::StorageError(m)) if m.contains("newer than this server supports")),
+            "expected fwd-compat error, got: {err:?}"
+        );
 
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -726,13 +722,11 @@ mod tests {
         let store1 = FileMetaStore::new(&path).await.unwrap();
 
         // Second instance must fail fast — prevents multi-process split-brain
-        let err = FileMetaStore::new(&path).await;
-        match &err {
-            Err(MetaError::StorageError(m)) if m.contains("locked") => {}
-            Err(MetaError::StorageError(m)) => panic!("wrong error: {m}"),
-            Err(e) => panic!("unexpected error: {e}"),
-            Ok(_) => panic!("expected lock error, got Ok"),
-        }
+        let err = FileMetaStore::new(&path).await.err();
+        assert!(
+            matches!(&err, Some(MetaError::StorageError(m)) if m.contains("locked")),
+            "expected lock error, got: {err:?}"
+        );
 
         // After first instance drops, a new one can open
         drop(store1);

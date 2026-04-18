@@ -84,8 +84,8 @@ async fn test_shard_pruning_in_cluster() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 },
-            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 , role: Default::default()},
+            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 , role: Default::default()},
         ],
         ..Default::default()
     };
@@ -216,8 +216,8 @@ async fn test_secondary_failover() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 },
-            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 , role: Default::default()},
+            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 , role: Default::default()},
         ],
         ..Default::default()
     };

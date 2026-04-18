@@ -89,6 +89,7 @@ async fn test_distributed_speedup() {
         tables: vec![TableConfig { name: "bench".into(), shards: shard_configs }],
         executors: (0..num_shards).map(|i| ExecutorConfig {
             id: format!("e{i}"), host: "127.0.0.1".into(), port: exec_ports[i],
+            role: Default::default(),
         }).collect(),
         ..Default::default()
     };

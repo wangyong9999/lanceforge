@@ -136,8 +136,10 @@ def proc_fd_count(pid):
         return None
 
 
-def workload_loop(stop_event, stats, stub):
-    """Background thread: 5 readers + 1 writer at modest rate."""
+def workload_loop(stop_event, stats, stub, read_only=False):
+    """Background thread: 5 readers + optional 1 writer at modest rate.
+    Read-only mode is the correct signal for RSS/fd drift analysis —
+    mixed-load growth is dominated by legitimate data volume, not leaks."""
     rng = np.random.default_rng(7)
     queries = [rng.standard_normal(DIM).astype(np.float32) for _ in range(20)]
     next_id = N_ROWS + 100_000
@@ -177,21 +179,22 @@ def workload_loop(stop_event, stats, stub):
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         for i in range(5): ex.submit(reader, i)
-        ex.submit(writer)
+        if not read_only:
+            ex.submit(writer)
         stop_event.wait()
 
 
-def run_soak(minutes, sample_interval_s=SAMPLE_INTERVAL_S):
+def run_soak(minutes, sample_interval_s=SAMPLE_INTERVAL_S, read_only=False):
     procs = start_cluster()
     try:
         stub = make_stub()
-        print(f"[setup] creating soak table ({N_ROWS} rows × {DIM}d)...", flush=True)
+        print(f"[setup] creating soak table ({N_ROWS} rows × {DIM}d){' [read-only]' if read_only else ''}...", flush=True)
         setup_table(stub)
         time.sleep(3)
 
         stats = {'read_ok': 0, 'read_err': 0, 'write_ok': 0, 'write_err': 0}
         stop = threading.Event()
-        t = threading.Thread(target=workload_loop, args=(stop, stats, stub), daemon=True)
+        t = threading.Thread(target=workload_loop, args=(stop, stats, stub, read_only), daemon=True)
         t.start()
 
         # Warm-up 30s so the first RSS sample isn't pre-workload.
@@ -261,10 +264,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--minutes', type=int, default=15, help='soak duration (default 15min smoke; 120 for alpha gate)')
     ap.add_argument('--drift-threshold', type=float, default=3.0, help='max allowed drift %% (default 3)')
+    ap.add_argument('--read-only', action='store_true',
+                    help='read-only workload (proper signal for cache/handle leaks; '
+                         'default is mixed RW which naturally grows worker RSS with data volume)')
     args = ap.parse_args()
 
-    print(f"=== Soak run: {args.minutes} minutes (threshold {args.drift_threshold}%) ===", flush=True)
-    report = run_soak(args.minutes)
+    mode = "read-only" if args.read_only else "mixed RW"
+    print(f"=== Soak run: {args.minutes} minutes, {mode} (threshold {args.drift_threshold}%) ===", flush=True)
+    report = run_soak(args.minutes, read_only=args.read_only)
+    report['workload'] = mode
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = os.path.join(RESULTS_DIR, f"soak_{args.minutes}min_{ts}.json")

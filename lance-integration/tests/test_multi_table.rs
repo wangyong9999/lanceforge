@@ -114,7 +114,7 @@ async fn test_multi_table_different_schemas() {
                 }],
             },
         ],
-        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep }],
+        executors: vec![ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep , role: Default::default()}],
         ..Default::default()
     };
 

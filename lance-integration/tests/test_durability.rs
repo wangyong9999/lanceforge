@@ -79,8 +79,8 @@ async fn test_sustained_load() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 },
-            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep0 , role: Default::default() },
+            ExecutorConfig { id: "e1".into(), host: "127.0.0.1".into(), port: ep1 , role: Default::default() },
         ],
         ..Default::default()
     };
@@ -171,7 +171,7 @@ async fn test_concurrent_load() {
             ],
         }],
         executors: vec![
-            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep },
+            ExecutorConfig { id: "e0".into(), host: "127.0.0.1".into(), port: ep , role: Default::default() },
         ],
         ..Default::default()
     };
