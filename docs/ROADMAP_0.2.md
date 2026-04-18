@@ -25,7 +25,9 @@
 - 目的是**冷冻保存**未来 SQL 分析能力的底座，而不是让它腐化或污染主路径
 - 0.2 验收标准：默认 build `cargo build --workspace` 不编译 ballista；feature-gated `--features sql-analytics` 下仍可编译
 
-**当前状态（2026-04-18）**：Ballista **仍在默认 members**（`Cargo.toml:20-34`）—— `ballista-cli`、`ballista/{client,core,executor,scheduler}`、`benchmarks`（ballista-benchmarks）、`examples`（ballista-examples）7 个 crate 全在。已验证 `crates/*` 对 `ballista/*` 零依赖，隔离可行。对应行动项 **L0.6**（见 §4）。
+**当前状态（2026-04-18，L0.6 后）**：通过 `default-members` 实现逻辑隔离——`cargo build` / `cargo test` / `cargo clippy`（无参）只涉及 LanceForge 6 个 crate；Ballista 7 crate 仍在 `members` 以保留 `workspace.package` / `workspace.dependencies` 继承（`ballista/*/Cargo.toml` 的 `edition = { workspace = true }` 依赖它）。
+
+**剩余工作（延后至 M2 时处理）**：严格 `--workspace` 隔离需要给 `ballista/` 建独立 workspace（移除对父 `workspace.*` 的继承），工作量 ~2d 但只在 M2 激活 SQL 路径时有价值。当前 CI 已全部 `-p`-based，不受 `--workspace` 是否包含 Ballista 影响。
 
 ### 0.4 对 PHASE17_SUMMARY §十的推翻
 
@@ -400,7 +402,7 @@
 | L0.4 | 归档 PLAN.md / PHASE17_SUMMARY.md | ✅ `87df6b0` |
 | L0.5 | 本 ROADMAP commit | ✅ `87df6b0` |
 | B1.1 | 持久状态审计，出 STATELESS_INVARIANTS.md | ✅ `e4bf58e` |
-| **L0.6** | **Ballista workspace 物理隔离**（见 §0.3 当前状态） | ⏳ ~1d，预期 B1.2.1 前做 |
+| L0.6 | Ballista workspace 逻辑隔离（default-members） | ✅ `TBD` |
 | B1.2.1 | `deployment_profile` 启动守卫（闭 Gap C + D） | ⏳ ~2d |
 | B1.2.2 | auto-shard config → MetaStore（闭 Gap B） | ⏳ ~1w |
 | B1.2.3 | API key registry → MetaStore + hot-reload（闭 Gap A） | ⏳ ~2w |

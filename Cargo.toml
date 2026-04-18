@@ -18,6 +18,19 @@
 [workspace]
 exclude = ["dev/msrvcheck", "python"]
 members = [
+    # LanceForge — SaaS-first distributed retrieval engine (default build).
+    "lance-integration",
+    "crates/proto",
+    "crates/common",
+    "crates/coordinator",
+    "crates/worker",
+    "crates/meta",
+    # Ballista — kept in the workspace so ballista/* can still inherit
+    # [workspace.package] / [workspace.dependencies], but excluded from
+    # `default-members` so `cargo build` / `cargo test` (no flags) at the
+    # repo root skip them entirely. ROADMAP_0.2 §0.3 / §M2 document the
+    # long-term intent: Ballista is frozen as the future SQL-analytics
+    # substrate and must not contaminate the main query path.
     "ballista-cli",
     "ballista/client",
     "ballista/core",
@@ -25,6 +38,8 @@ members = [
     "ballista/scheduler",
     "benchmarks",
     "examples",
+]
+default-members = [
     "lance-integration",
     "crates/proto",
     "crates/common",
