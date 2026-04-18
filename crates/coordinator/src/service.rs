@@ -444,7 +444,7 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("Either query_vector or query_text required".to_string()));
         };
 
-        let dimension = if req.dimension > 0 { req.dimension } else { (query_vector.len() / 4) as u32 };
+        let dimension = validate_vector_dimension(&query_vector, req.dimension)?;
 
         let local_req = pb::LocalSearchRequest {
             query_type: LanceQueryType::Ann as i32,
@@ -518,13 +518,14 @@ impl LanceSchedulerService for CoordinatorService {
         })?;
         let req = request.into_inner();
         let (merge_limit, oversample_k) = validate_offset_k(req.offset, req.k, self.max_k, self.oversample_factor)?;
+        let dimension = validate_vector_dimension(&req.query_vector, req.dimension)?;
 
         let local_req = pb::LocalSearchRequest {
             query_type: LanceQueryType::Hybrid as i32,
             table_name: req.table_name.clone(),
             vector_column: Some(req.vector_column),
             query_vector: Some(req.query_vector),
-            dimension: Some(req.dimension),
+            dimension: Some(dimension),
             nprobes: Some(req.nprobes),
             metric_type: Some(req.metric_type),
             text_column: Some(req.text_column),
@@ -1653,6 +1654,15 @@ impl LanceSchedulerService for CoordinatorService {
         let k = if req.k == 0 { 10 } else { req.k };
         let oversample_k = k * self.oversample_factor;
 
+        // Every query_vector in the batch must agree with the declared
+        // dimension; validate once up front so a bad entry doesn't spawn
+        // the scatter-gather just to fail downstream.
+        for (i, qv) in req.query_vectors.iter().enumerate() {
+            validate_vector_dimension(qv, req.dimension).map_err(|e|
+                Status::invalid_argument(format!("query_vectors[{i}]: {}", e.message()))
+            )?;
+        }
+
         // Execute each query in parallel
         let mut handles = Vec::new();
         for qv in &req.query_vectors {
@@ -1911,6 +1921,39 @@ fn validate_k(k: u32, oversample_factor: u32) -> std::result::Result<u32, Status
     Ok(k)
 }
 
+/// Validate that a query_vector byte payload is internally consistent with the
+/// declared `dimension`. The wire format is packed little-endian f32, so the
+/// byte length must be a positive multiple of 4 and — if a dimension is
+/// declared — must equal `dimension * 4`.
+///
+/// Returns the agreed dimension (declared wins when non-zero, otherwise derived).
+/// The empty-vector case (len == 0) is a different code path — ann_search uses
+/// it for text-embedding fallback, so we pass through with the declared value.
+///
+/// H10 hardening: previously, `ann_search` silently took `req.dimension` on
+/// faith when > 0, so a client sending `dimension=5` with a 16-byte
+/// `query_vector` (4 f32s) would pass the coordinator and then produce
+/// nonsense or a crash inside the worker's lance query path.
+fn validate_vector_dimension(query_vector: &[u8], declared_dim: u32) -> std::result::Result<u32, Status> {
+    if query_vector.is_empty() {
+        return Ok(declared_dim);
+    }
+    if query_vector.len() % 4 != 0 {
+        return Err(Status::invalid_argument(format!(
+            "query_vector length {} is not a multiple of 4 bytes (little-endian f32 expected)",
+            query_vector.len()
+        )));
+    }
+    let derived = (query_vector.len() / 4) as u32;
+    if declared_dim > 0 && declared_dim != derived {
+        return Err(Status::invalid_argument(format!(
+            "dimension mismatch: query_vector carries {} f32 values (len={} bytes) but dimension={} was declared",
+            derived, query_vector.len(), declared_dim
+        )));
+    }
+    Ok(if declared_dim > 0 { declared_dim } else { derived })
+}
+
 /// Validate offset+k against per-call limit and oversample headroom.
 fn validate_offset_k(offset: u32, k: u32, max_k: u32, oversample_factor: u32) -> std::result::Result<(u32, u32), Status> {
     if k == 0 { return Err(Status::invalid_argument("k must be > 0")); }
@@ -2134,6 +2177,68 @@ mod tests {
     fn test_validate_offset_k_offset_at_max_without_k_fails() {
         // offset = max_k with k = 1 would need row max_k+1 — reject.
         assert!(validate_offset_k(100, 1, 100, 1).is_err());
+    }
+
+    // ── H10: dimension / query_vector consistency ──
+
+    #[test]
+    fn test_validate_vector_dim_derives_from_bytes_when_dim_zero() {
+        // 16 bytes = 4 f32 values. Declared_dim=0 means "derive".
+        let vec_bytes = vec![0u8; 16];
+        assert_eq!(validate_vector_dimension(&vec_bytes, 0).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_validate_vector_dim_agrees_with_declared() {
+        let vec_bytes = vec![0u8; 16]; // 4 f32s
+        // declared=4 agrees → accept and return 4.
+        assert_eq!(validate_vector_dimension(&vec_bytes, 4).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_validate_vector_dim_rejects_mismatch() {
+        let vec_bytes = vec![0u8; 16]; // 4 f32s
+        // declared=5 disagrees with derived=4 → reject.
+        let err = validate_vector_dimension(&vec_bytes, 5).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("dimension mismatch"), "got: {}", err.message());
+        assert!(err.message().contains("declared"), "error must spell out the conflict");
+    }
+
+    #[test]
+    fn test_validate_vector_dim_rejects_non_f32_aligned_bytes() {
+        // 13 bytes is not a valid f32 little-endian sequence.
+        let vec_bytes = vec![0u8; 13];
+        let err = validate_vector_dimension(&vec_bytes, 0).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("not a multiple of 4"), "got: {}", err.message());
+    }
+
+    #[test]
+    fn test_validate_vector_dim_empty_passes_through() {
+        // Empty query_vector is the text-embed fallback path; caller
+        // resolves it elsewhere. Validate passes the declared value
+        // through unchanged.
+        assert_eq!(validate_vector_dimension(&[], 0).unwrap(), 0);
+        assert_eq!(validate_vector_dimension(&[], 128).unwrap(), 128);
+    }
+
+    #[test]
+    fn test_validate_vector_dim_large_vector_declared() {
+        // 4096 bytes = 1024 f32s. Declared agrees.
+        let vec_bytes = vec![0u8; 4096];
+        assert_eq!(validate_vector_dimension(&vec_bytes, 1024).unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_validate_vector_dim_off_by_one_caught() {
+        // Most realistic bug: client hardcodes dimension from one model
+        // but sends vector from another. declared=768 (BERT-base),
+        // derived=384 (MiniLM) — must reject.
+        let vec_bytes = vec![0u8; 384 * 4];
+        let err = validate_vector_dimension(&vec_bytes, 768).unwrap_err();
+        assert!(err.message().contains("384"), "error must include the derived value");
+        assert!(err.message().contains("768"), "error must include the declared value");
     }
 
     #[test]
