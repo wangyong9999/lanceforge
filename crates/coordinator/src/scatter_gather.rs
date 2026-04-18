@@ -189,9 +189,14 @@ async fn scatter_gather_inner(
             let req = (*shared_req).clone();
             let worker_id = wid.clone();
             let timeout = query_timeout;
+            // H13: per-shard latency timing. Each task reports its own wall
+            // clock so operators debugging a slow query can see which
+            // worker is the outlier instead of only seeing the aggregate.
             tasks.spawn(async move {
+                let start = std::time::Instant::now();
                 let result = tokio::time::timeout(timeout, client.execute_local_search(Request::new(req))).await;
-                (worker_id, result)
+                let per_worker_ms = start.elapsed().as_millis() as u64;
+                (worker_id, result, per_worker_ms)
             });
         }
     }
@@ -202,9 +207,14 @@ async fn scatter_gather_inner(
     let mut failures = 0;
     let mut failure_details = Vec::new();
 
+    // H13: collect per-shard latencies so slow-query logs can pinpoint
+    // the outlier worker. Populated in the gather loop below.
+    let mut per_worker_latencies: Vec<(String, u64)> = Vec::with_capacity(total);
+
     while let Some(handle) = tasks.join_next().await {
         match handle {
-            Ok((wid, Ok(Ok(response)))) => {
+            Ok((wid, Ok(Ok(response)), per_ms)) => {
+                per_worker_latencies.push((wid.clone(), per_ms));
                 let resp = response.into_inner();
                 if !resp.error.is_empty() {
                     failures += 1; failure_details.push(format!("{}: {}", wid, resp.error));
@@ -215,9 +225,39 @@ async fn scatter_gather_inner(
                     }
                 }
             }
-            Ok((wid, Ok(Err(status)))) => { failures += 1; failure_details.push(format!("{}: {}", wid, status.code())); }
-            Ok((wid, Err(_))) => { failures += 1; failure_details.push(format!("{}: timeout", wid)); }
+            Ok((wid, Ok(Err(status)), per_ms)) => {
+                per_worker_latencies.push((wid.clone(), per_ms));
+                failures += 1;
+                failure_details.push(format!("{}: {}", wid, status.code()));
+            }
+            Ok((wid, Err(_), per_ms)) => {
+                per_worker_latencies.push((wid.clone(), per_ms));
+                failures += 1;
+                failure_details.push(format!("{}: timeout", wid));
+            }
             Err(_e) => { failures += 1; }
+        }
+    }
+
+    // H13: emit per-shard breakdown at debug level on every query, and
+    // warn level whenever the max worker latency exceeds 2× the median
+    // (the usual "straggler" pattern). debug! keeps the default-logging
+    // production build quiet; operators bump RUST_LOG when they're
+    // debugging a slow-query incident.
+    if !per_worker_latencies.is_empty() {
+        debug!(
+            "Scatter {} per-shard latencies (ms): {:?}",
+            table_name, per_worker_latencies
+        );
+        let max_ms = per_worker_latencies.iter().map(|(_, m)| *m).max().unwrap_or(0);
+        let mut sorted: Vec<u64> = per_worker_latencies.iter().map(|(_, m)| *m).collect();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2];
+        if median > 0 && max_ms > median.saturating_mul(2) {
+            warn!(
+                "Scatter {} straggler: max={}ms median={}ms detail={:?}",
+                table_name, max_ms, median, per_worker_latencies
+            );
         }
     }
 
