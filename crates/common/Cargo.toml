@@ -10,9 +10,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 log = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "fs", "io-util"] }
+tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 async-trait = { workspace = true }
 arrow = { workspace = true }
 
 # For auto-shard fragment discovery
 lance = { version = "4.0.0", default-features = false, features = ["aws"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

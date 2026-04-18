@@ -97,15 +97,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http2_keepalive_timeout(Some(keepalive_timeout))
         .concurrency_limit_per_connection(server_cfg.concurrency_limit);
 
+    // TLS: delegate cert/key loading to the shared helper (H17) so
+    // coordinator and worker share the same error wording and empty-
+    // file rejection.
     if config.security.tls_enabled() {
         let cert_path = config.security.tls_cert.as_ref()
             .ok_or("TLS enabled but tls_cert path missing")?;
         let key_path = config.security.tls_key.as_ref()
             .ok_or("TLS enabled but tls_key path missing")?;
-        let cert = tokio::fs::read(cert_path).await?;
-        let key = tokio::fs::read(key_path).await?;
-        let identity = tonic::transport::Identity::from_pem(cert, key);
-        let tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+        let tls_config = lance_distributed_common::tls::load_server_tls_config(cert_path, key_path).await?;
         info!("TLS enabled");
         server = server.tls_config(tls_config)?;
     }
