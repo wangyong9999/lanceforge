@@ -84,22 +84,27 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 每一条都有明确理由不在当前版本实现（详见 Phase 15/16 的架构反思日志）。需要时再加。
 
-## 11. 读写混合下的读 QPS 严重降级（Phase 17 新发现）
+## 11. 读写混合下的读 QPS 降级
 
-**实测**：100K 行表，10 readers + 1 writer：
+**实测**：100K 行表 × 128d × IVF_FLAT-32，10 readers + 1 writer @ N QPS，30s 持续：
 
-| 场景 | 读 QPS | 读 P99 |
-|---|---:|---:|
-| read-only | 2528 | 12 ms |
-| + 10 QPS 写 | **218** | **105 ms** |
-| + 50 QPS 写 | **56** | **272 ms** |
+| 场景 | 读 QPS | 读 P99 | 与 read-only 对比 |
+|---|---:|---:|---:|
+| read-only | 2345 | 13 ms | — |
+| + 10 QPS 写 | 887 | 101 ms | -62% |
+| + 50 QPS 写 | 58 | 309 ms | -97% |
 
-**怀疑根因**：每次写都改变 dataset version → cache 全失效；下次读重做 IVF + 重读 manifest。
+数据来自 `lance-integration/bench/results/phase17/mixed_20260418_152253.json`。
+
+**历史**：Phase 17 首版实测 -91% / -98%；Phase 18 引入 atomic version poller + RwLock snapshot 后降至 -62% / -97%。
+
+**根因分析与改进计划**：详见 `docs/PROFILE_MIXED_RW.md`，以及 `docs/ROADMAP_0.2.md` §B2（缓存分级失效重设计）。
 
 **当前对策**：
-- 写入低频（< 1 QPS）时影响可忽略
-- 高写入场景：调高 `cache.read_consistency_secs`（容忍稍旧读），或物理读写分离
-- 等 Phase 18 做更深的 cache 失效优化
+- 写入低频（< 1 QPS）场景影响可忽略
+- 中频写入场景（1-10 QPS）：调高 `cache.read_consistency_secs`（例如 30s），容忍稍旧读
+- 高频写入场景（> 10 QPS）：物理读写分离（replica_factor=2，约定 read-only worker）
+- 0.2 目标：10 QPS 写场景读 QPS 恢复到 ≥ 80% 基线
 
 ## 12. 性能拐点（参考 BENCHMARK.md）
 
