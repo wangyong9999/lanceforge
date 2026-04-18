@@ -288,22 +288,22 @@ def t_worker_recovery():
         f"got {last_s['executors']}"
     )
 
-    # Final search — with a short retry window because the connection pool's
-    # cached channel to w1 can lag a couple of health-check ticks behind the
-    # status report (tonic Channel lazy-reconnects), surfacing as transient
-    # UNAVAILABLE right after restart. Without the retry, the whole test
-    # suite flakes intermittently on slow CI runners.
+    # Small retry window: the connection pool now replaces the entire
+    # WorkerState (including tonic Channel) on the unhealthy→healthy
+    # transition, so the first post-restart query should almost always
+    # succeed. Keep 2×1s to tolerate one extra health-check tick on a
+    # loaded runner; anything beyond that is a real regression.
     last_err = None
-    for _ in range(5):
+    for _ in range(3):
         try:
             r = client.search("ha_table", query_vector=np.zeros(DIM).tolist(), k=10)
             assert r.num_rows > 0
             break
         except Exception as e:
             last_err = e
-            time.sleep(2)
+            time.sleep(1)
     else:
-        raise AssertionError(f"Search still failing after 5 retries post-recovery: {last_err}")
+        raise AssertionError(f"Search still failing after 3 retries post-recovery: {last_err}")
     client.close()
 test("7. Worker recovered, cluster fully healthy", t_worker_recovery)
 

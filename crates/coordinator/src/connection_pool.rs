@@ -231,7 +231,22 @@ impl ConnectionPool {
 
             let endpoints_snapshot = self.endpoints.read().await.clone();
             for (wid, (host, port)) in &endpoints_snapshot {
-                let needs_connect = !self.workers.read().await.contains_key(wid);
+                // Force a fresh connect whenever the worker is either absent or
+                // currently unhealthy. The old condition (`!contains_key`) left
+                // a stale tonic Channel attached to a previous worker process
+                // after it died and came back: health_check alone is not enough
+                // to prove that Channel can still carry real RPC traffic, so
+                // scatter_gather would hit it and fail with UNAVAILABLE on the
+                // first post-restart query. Replacing the entire WorkerState
+                // (via the Reconnected branch below) guarantees scatter_gather
+                // sees a freshly connected client.
+                let needs_connect = {
+                    let workers = self.workers.read().await;
+                    match workers.get(wid) {
+                        None => true,
+                        Some(ws) => !ws.healthy,
+                    }
+                };
 
                 if needs_connect {
                     let endpoint = match self.build_endpoint(host, *port) {
