@@ -256,6 +256,16 @@ message AddRowsRequest {
   // which shard owns a given row, and mixed workloads duplicate rows on
   // different shards. See docs/LIMITATIONS.md §1.
   repeated string on_columns = 3;
+  // Optional client-supplied deduplication token (H3). If non-empty and the
+  // coordinator has seen this exact request_id within the last 5 minutes,
+  // the previously-produced WriteResponse is replayed without re-executing
+  // the write. Empty string keeps 0.1 behaviour (no dedup).
+  //
+  // Typical use: clients that retry on transient failures (gRPC
+  // UNAVAILABLE, DEADLINE_EXCEEDED) pick a UUID per logical write and keep
+  // it across retries. Without this, AddRows with round-robin routing
+  // produces duplicate rows on retry because the write_counter has moved.
+  string request_id = 4;
 }
 
 message DeleteRowsRequest {
@@ -267,6 +277,11 @@ message UpsertRowsRequest {
   string table_name = 1;
   bytes arrow_ipc_data = 2;       // Rows to upsert (Arrow IPC)
   repeated string on_columns = 3; // Join key columns for dedup (e.g., ["id"])
+  // Same semantics as AddRowsRequest.request_id — optional dedup token for
+  // retry-safe writes. merge_insert is already idempotent for the same
+  // (on_columns, payload) tuple, but this spares the worker the cost of
+  // re-executing the merge when a client retries after a transient error.
+  string request_id = 4;
 }
 
 message WriteResponse {

@@ -224,6 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // H3: spawn the write-dedup cache reaper before the gRPC server takes
+    // ownership of `service`. The reaper scans the in-memory map every
+    // 60s and drops entries older than the 5-minute TTL.
+    service.spawn_dedup_reaper();
+
     // Start REST/metrics HTTP server on port+1. Shares bg_shutdown so a
     // SIGTERM to the coordinator drains REST in lockstep with gRPC instead
     // of leaving a stale `/healthz` answering 200 OK after the rest of

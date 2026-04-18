@@ -339,6 +339,17 @@ pub struct AddRowsRequest {
     /// different shards. See docs/LIMITATIONS.md §1.
     #[prost(string, repeated, tag = "3")]
     pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Optional client-supplied deduplication token (H3). If non-empty and the
+    /// coordinator has seen this exact request_id within the last 5 minutes,
+    /// the previously-produced WriteResponse is replayed without re-executing
+    /// the write. Empty string keeps 0.1 behaviour (no dedup).
+    ///
+    /// Typical use: clients that retry on transient failures (gRPC
+    /// UNAVAILABLE, DEADLINE_EXCEEDED) pick a UUID per logical write and keep
+    /// it across retries. Without this, AddRows with round-robin routing
+    /// produces duplicate rows on retry because the write_counter has moved.
+    #[prost(string, tag = "4")]
+    pub request_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteRowsRequest {
@@ -358,6 +369,12 @@ pub struct UpsertRowsRequest {
     /// Join key columns for dedup (e.g., \["id"\])
     #[prost(string, repeated, tag = "3")]
     pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Same semantics as AddRowsRequest.request_id — optional dedup token for
+    /// retry-safe writes. merge_insert is already idempotent for the same
+    /// (on_columns, payload) tuple, but this spares the worker the cost of
+    /// re-executing the merge when a client retries after a transient error.
+    #[prost(string, tag = "4")]
+    pub request_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WriteResponse {

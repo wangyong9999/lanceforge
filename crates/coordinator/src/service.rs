@@ -58,7 +58,23 @@ pub struct CoordinatorService {
     meta_state: Option<Arc<lance_distributed_meta::state::MetaShardState>>,
     /// Per-table DDL mutex: prevents concurrent CreateTable/DropTable on same table name.
     ddl_locks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Write-idempotency dedup cache (H3). Maps client-supplied request_id
+    /// to (inserted_at, cached WriteResponse). Entries older than
+    /// `dedup_ttl` are purged by a background reaper; new requests with a
+    /// known id replay the cached response without re-executing the write.
+    /// Empty request_id skips the cache entirely — 0.1 behaviour.
+    write_dedup: Arc<tokio::sync::RwLock<std::collections::HashMap<String, (std::time::Instant, pb::WriteResponse)>>>,
 }
+
+/// How long a completed write's request_id stays deduplicatable.
+/// Clients that retry within this window get the cached result; retries
+/// outside it re-execute the write. 5 minutes covers typical network /
+/// coordinator-restart retry loops without bloating memory on idle keys.
+const WRITE_DEDUP_TTL: Duration = Duration::from_secs(300);
+
+/// Background reaper interval — scanned every 60 s; pays ~O(N) per sweep
+/// over the current in-memory dedup map.
+const WRITE_DEDUP_REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 impl CoordinatorService {
     pub fn new(config: &ClusterConfig, query_timeout: Duration) -> Self {
@@ -241,6 +257,7 @@ impl CoordinatorService {
             bg_shutdown,
             meta_state: None,
             ddl_locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            write_dedup: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -317,6 +334,66 @@ mod audit_util_tests {
 }
 
 impl CoordinatorService {
+
+    /// Check the dedup cache for a prior response to `request_id`. Empty
+    /// ids skip the cache. Expired entries are not returned; they'll be
+    /// cleaned up by the reaper (or lazily by the next write with the
+    /// same id — see `record_dedup`). Returns the cached response if
+    /// still live within TTL, None otherwise.
+    async fn check_dedup(&self, request_id: &str) -> Option<pb::WriteResponse> {
+        if request_id.is_empty() {
+            return None;
+        }
+        let cache = self.write_dedup.read().await;
+        let (inserted_at, resp) = cache.get(request_id)?;
+        if inserted_at.elapsed() <= WRITE_DEDUP_TTL {
+            Some(resp.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Record a freshly-produced response under `request_id`. No-op on
+    /// empty id. Cached responses are kept for `WRITE_DEDUP_TTL` and
+    /// returned verbatim on retry.
+    async fn record_dedup(&self, request_id: &str, resp: &pb::WriteResponse) {
+        if request_id.is_empty() {
+            return;
+        }
+        self.write_dedup.write().await.insert(
+            request_id.to_string(),
+            (std::time::Instant::now(), resp.clone()),
+        );
+    }
+
+    /// Spawn the dedup-cache reaper. Runs until `bg_shutdown` fires.
+    /// Takes `&self` (not `Arc<Self>`) so callers don't have to Arc the
+    /// whole service — the cache and the shutdown Notify are already Arc
+    /// fields and cloned into the background task directly.
+    pub fn spawn_dedup_reaper(&self) {
+        let cache = self.write_dedup.clone();
+        let stop = self.bg_shutdown.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(WRITE_DEDUP_REAP_INTERVAL);
+            tick.tick().await; // skip immediate first tick
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = stop.notified() => {
+                        info!("write dedup reaper stopping (shutdown)");
+                        return;
+                    }
+                }
+                let mut guard = cache.write().await;
+                let before = guard.len();
+                guard.retain(|_, (inserted, _)| inserted.elapsed() <= WRITE_DEDUP_TTL);
+                let after = guard.len();
+                if before != after {
+                    log::debug!("write dedup: reaped {} expired entries, {} live", before - after, after);
+                }
+            }
+        });
+    }
 
     /// Acquire a per-table DDL mutex. Prevents concurrent CreateTable/DropTable
     /// on the same table name from racing and creating duplicate shards.
@@ -588,9 +665,17 @@ impl LanceSchedulerService for CoordinatorService {
         self.check_perm(&request, super::auth::Permission::Write)?;
         let req_ref = request.get_ref();
         self.audit(&request, "AddRows", &req_ref.table_name,
-                   &format!("bytes={} on_columns={}",
+                   &format!("bytes={} on_columns={} request_id={}",
                             req_ref.arrow_ipc_data.len(),
-                            req_ref.on_columns.join(",")));
+                            req_ref.on_columns.join(","),
+                            if req_ref.request_id.is_empty() { "<none>" } else { &req_ref.request_id }));
+        // H3: dedup before any real work. Client retries within the 5-min
+        // window get the original response without a second write.
+        if let Some(cached) = self.check_dedup(&req_ref.request_id).await {
+            log::debug!("add_rows dedup hit for request_id={}", req_ref.request_id);
+            return Ok(Response::new(cached));
+        }
+        let request_id = req_ref.request_id.clone();
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -612,7 +697,9 @@ impl LanceSchedulerService for CoordinatorService {
         //   on_columns empty → historical round-robin over shards (one call,
         //                      one shard). Kept for backward compat.
         if !req.on_columns.is_empty() {
-            return self.add_rows_hash_partitioned(req, routing).await;
+            let resp = self.add_rows_hash_partitioned(req, routing).await?;
+            self.record_dedup(&request_id, resp.get_ref()).await;
+            return Ok(resp);
         }
 
         let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % routing.len();
@@ -658,11 +745,13 @@ impl LanceSchedulerService for CoordinatorService {
             .map_err(|e| Status::internal(format!("Worker error: {}", e)))?;
 
         let resp = result.into_inner();
-        Ok(Response::new(pb::WriteResponse {
+        let write_resp = pb::WriteResponse {
             affected_rows: resp.affected_rows,
             new_version: resp.new_version,
             error: resp.error,
-        }))
+        };
+        self.record_dedup(&request_id, &write_resp).await;
+        Ok(Response::new(write_resp))
     }
 
     async fn delete_rows(
@@ -748,9 +837,17 @@ impl LanceSchedulerService for CoordinatorService {
         self.check_perm(&request, super::auth::Permission::Write)?;
         let req_ref = request.get_ref();
         self.audit(&request, "UpsertRows", &req_ref.table_name,
-                   &format!("bytes={} on_columns={}",
+                   &format!("bytes={} on_columns={} request_id={}",
                             req_ref.arrow_ipc_data.len(),
-                            req_ref.on_columns.join(",")));
+                            req_ref.on_columns.join(","),
+                            if req_ref.request_id.is_empty() { "<none>" } else { &req_ref.request_id }));
+        // H3: dedup (merge_insert is already semantically idempotent for the
+        // same payload, but this spares the worker the recompute).
+        if let Some(cached) = self.check_dedup(&req_ref.request_id).await {
+            log::debug!("upsert_rows dedup hit for request_id={}", req_ref.request_id);
+            return Ok(Response::new(cached));
+        }
+        let request_id = req_ref.request_id.clone();
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -832,11 +929,13 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
-        Ok(Response::new(pb::WriteResponse {
+        let write_resp = pb::WriteResponse {
             affected_rows: total_affected,
             new_version: max_version,
             error,
-        }))
+        };
+        self.record_dedup(&request_id, &write_resp).await;
+        Ok(Response::new(write_resp))
     }
 
     async fn create_table(
@@ -2377,6 +2476,94 @@ mod tests {
         let out = partition_batch_by_hash(&batch, &["id".into()], 1).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].num_rows(), 3);
+    }
+
+    // ── H3: write-idempotency dedup cache ──
+
+    fn make_dedup_service() -> CoordinatorService {
+        let config = ClusterConfig {
+            tables: vec![],
+            executors: vec![ExecutorConfig {
+                id: "w0".into(), host: "127.0.0.1".into(), port: 1,
+                role: Default::default(),
+            }],
+            ..Default::default()
+        };
+        CoordinatorService::new(&config, Duration::from_secs(30))
+    }
+
+    #[tokio::test]
+    async fn test_dedup_empty_id_never_caches() {
+        let svc = make_dedup_service();
+        // Empty id: record is a no-op, check returns None.
+        let resp = pb::WriteResponse { affected_rows: 100, new_version: 1, error: String::new() };
+        svc.record_dedup("", &resp).await;
+        assert!(svc.check_dedup("").await.is_none(),
+                "empty request_id must never be cached (0.1 behaviour)");
+    }
+
+    #[tokio::test]
+    async fn test_dedup_roundtrip() {
+        let svc = make_dedup_service();
+        let resp = pb::WriteResponse { affected_rows: 42, new_version: 7, error: String::new() };
+        svc.record_dedup("req-abc", &resp).await;
+        let got = svc.check_dedup("req-abc").await.expect("cache hit expected");
+        assert_eq!(got.affected_rows, 42);
+        assert_eq!(got.new_version, 7);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_miss_on_unknown_id() {
+        let svc = make_dedup_service();
+        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
+        svc.record_dedup("known", &resp).await;
+        assert!(svc.check_dedup("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dedup_expired_entry_ignored() {
+        // Inject an expired entry directly into the cache and confirm
+        // check_dedup returns None (the reaper clean-up is best-effort,
+        // so `check_dedup` must independently honour the TTL).
+        let svc = make_dedup_service();
+        let past = std::time::Instant::now()
+            .checked_sub(WRITE_DEDUP_TTL + Duration::from_secs(10))
+            .expect("Instant subtraction did not underflow in test env");
+        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
+        svc.write_dedup.write().await.insert("stale".into(), (past, resp));
+        assert!(svc.check_dedup("stale").await.is_none(),
+                "TTL-expired entries must not be served even if reaper hasn't run");
+    }
+
+    #[tokio::test]
+    async fn test_dedup_overwrites_prior_entry_for_same_id() {
+        // Same request_id written twice: the second record_dedup wins.
+        // Not strictly required by the protocol (clients shouldn't
+        // reuse ids across different payloads) but documents the
+        // last-writer-wins semantics for anyone reading the code.
+        let svc = make_dedup_service();
+        let a = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
+        let b = pb::WriteResponse { affected_rows: 99, new_version: 2, error: String::new() };
+        svc.record_dedup("same", &a).await;
+        svc.record_dedup("same", &b).await;
+        let got = svc.check_dedup("same").await.unwrap();
+        assert_eq!(got.affected_rows, 99);
+        assert_eq!(got.new_version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_preserves_error_field() {
+        // A failed write should be cached too — re-executing after a
+        // logical error gives the same outcome, so clients get the
+        // same error back on retry rather than a surprise success.
+        let svc = make_dedup_service();
+        let failed = pb::WriteResponse {
+            affected_rows: 0, new_version: 0,
+            error: "table not found".into(),
+        };
+        svc.record_dedup("failed-req", &failed).await;
+        let got = svc.check_dedup("failed-req").await.unwrap();
+        assert_eq!(got.error, "table not found");
     }
 
     #[test]
