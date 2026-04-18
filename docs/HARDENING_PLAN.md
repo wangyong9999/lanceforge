@@ -104,6 +104,7 @@
 | **H20** | A7 CI wall time 分层（PR / nightly）| 2h |
 | **H21** | Graceful shutdown drain — SIGTERM coord 有 in-flight 查询时必须等完或快速 fail 不 hang | 2h |
 | **H22** | Bench PR gate — smoke mixed bench（短窗口）进 CI PR flow，回归 >15% block merge | 2h |
+| **H23** | 测试路径去 /tmp 共享，用 tempfile::tempdir — 消除 meta 并行 flake | 2h |
 
 ## 五、执行顺序
 
@@ -118,11 +119,20 @@
 
 **Checkpoint 数字**：workspace lib 测试 218 → **235**（+17）。无回归。
 
-### 波次 2 — 覆盖深度（9h）
+### 波次 2 — 覆盖深度（9h）— ✅ 完成 2026-04-18
 动测试代码多、生产代码少。对应 audit 最大痛点。
-7. H6 scatter_gather 覆盖（4h）
-8. H7 connection_pool 覆盖（3h）
-9. H8 meta/store S3 错误路径（2h）
+7. H7 connection_pool 覆盖（3h）— ✅ `cb4f762`（+9 tests, 13→22）
+8. H8 meta/store S3 错误路径（2h）— ✅ `99a1c93`（+6 tests, 38→44）
+9. H6 scatter_gather helper 覆盖（4h）— ✅ `1af27d1`（+7 tests, 13→20）
+
+**Checkpoint 数字**：workspace lib 测试 235 → **257**（+22）。
+
+**Wave 2 执行中新发现**（加进 §4 的 P1 列表）：
+- **H23** meta 测试偶发 flake（`state::tests::test_shard_uri_lifecycle` 等）
+  在并行跑 `cargo test --lib` 时随机失败；单独 `-p lance-distributed-meta --lib` 重跑即通过。
+  推测：多个测试共享 /tmp 路径或 etcd/FileMetaStore lock 竞争。
+  **影响**：CI 偶发 flake；debug 成本上升。
+  **修法**：每个测试用 `tempfile::tempdir()` 或 pid+test_name 唯一化路径；审计所有 `/tmp/` 字面量。
 
 ### 波次 3 — 一致性与边界（10h）
 结构性改动，需要跨 crate 协调。
