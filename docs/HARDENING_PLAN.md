@@ -107,14 +107,16 @@
 
 ## 五、执行顺序
 
-### 波次 1 — 快速清理（4h）
+### 波次 1 — 快速清理（4h）— ✅ 完成 2026-04-18
 最小改动、最高确定性、先压低总体风险面。每项独立 commit。
-1. H1 config bounds（0.5h）
-2. H2 write RPC audit（1h）
-3. H16 test panic → assert（0.5h）
-4. H15 REST metrics shutdown（0.5h）
-5. H19 offset+k 边界测试（0.5h）
-6. H14 EtcdShardState shutdown（1h）
+1. H1 config bounds（0.5h）— ✅ `439598a`
+2. H2 write RPC audit（1h）— ✅ `4d626dc`
+3. H16 test panic → assert + ExecutorConfig::Default（0.5h）— ✅ `d10398c`
+4. H19 offset+k 边界测试（0.5h）— ✅ `087ddba`
+5. H15 REST metrics shutdown（0.5h）— ✅ `7cbab18`
+6. H14 EtcdShardState shutdown（1h）— ✅ `03bfeef`
+
+**Checkpoint 数字**：workspace lib 测试 218 → **235**（+17）。无回归。
 
 ### 波次 2 — 覆盖深度（9h）
 动测试代码多、生产代码少。对应 audit 最大痛点。
