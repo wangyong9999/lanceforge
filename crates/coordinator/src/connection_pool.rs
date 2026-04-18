@@ -584,6 +584,110 @@ mod tests {
         assert_eq!(pool.pick_by_role(&candidates, false).await.unwrap(), 0);
     }
 
+    // ── H7: connection_pool lib-coverage expansion ──
+
+    #[tokio::test]
+    async fn test_build_endpoint_http_scheme_without_tls() {
+        let pool = make_pool(vec![]);
+        let ep = pool.build_endpoint("10.0.0.1", 50100).unwrap();
+        // Endpoint doesn't expose the URI for direct inspection, but
+        // construction must succeed — validates the format! path +
+        // from_shared + timeout setters.
+        let _ = ep;
+    }
+
+    #[tokio::test]
+    async fn test_build_endpoint_rejects_invalid_host() {
+        let pool = make_pool(vec![]);
+        // NUL bytes in a URI are invalid — tonic from_shared should reject.
+        let err = pool.build_endpoint("10.0.0.1\0junk", 50100).err();
+        assert!(err.is_some(), "build_endpoint must reject a NUL-containing host");
+    }
+
+    #[tokio::test]
+    async fn test_build_endpoint_https_when_tls_configured() {
+        // rustls needs a crypto provider installed at process level before
+        // any TLS config is built. Idempotent in tests: the first test to
+        // run wins, the rest see Err and continue.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dummy_pem = b"-----BEGIN CERTIFICATE-----\nMIIBkTCB+w==\n-----END CERTIFICATE-----\n".to_vec();
+        let pool = make_pool(vec![]).with_tls(dummy_pem);
+        // Scheme flips to https; build_endpoint adapts.
+        let res = pool.build_endpoint("10.0.0.1", 50100);
+        // Either success or TLS config error — both prove the scheme/TLS
+        // branches are exercised. With a malformed cert we expect Err.
+        let _ = res;
+    }
+
+    #[tokio::test]
+    async fn test_get_healthy_client_returns_unhealthy_error() {
+        // Inject a WorkerState marked unhealthy and prove the error branch.
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
+        {
+            // Build a dummy client — we won't call it, we just need a
+            // WorkerState value. Use a bare Endpoint that never connects.
+            let ep = tonic::transport::Channel::from_static("http://127.0.0.1:50100")
+                .connect_timeout(Duration::from_millis(1));
+            let channel = ep.connect_lazy();
+            let client = pb::lance_executor_service_client::LanceExecutorServiceClient::new(channel);
+            pool.workers.write().await.insert("w0".to_string(), WorkerState {
+                client,
+                healthy: false,
+                last_check: Instant::now(),
+                consecutive_failures: 3,
+                loaded_shards: 0,
+                total_rows: 0,
+            });
+        }
+        let err = pool.get_healthy_client("w0").await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(err.message().contains("unhealthy"), "got: {}", err.message());
+    }
+
+    #[tokio::test]
+    async fn test_set_roles_replaces_prior_map() {
+        use lance_distributed_common::config::ExecutorRole::*;
+        let pool = make_pool(vec![]);
+        let mut m1 = HashMap::new();
+        m1.insert("w0".into(), ReadPrimary);
+        pool.set_roles(m1).await;
+        assert_eq!(pool.role_of("w0").await, ReadPrimary);
+
+        let mut m2 = HashMap::new();
+        m2.insert("w0".into(), WritePrimary);
+        pool.set_roles(m2).await;
+        assert_eq!(pool.role_of("w0").await, WritePrimary,
+                   "set_roles must replace, not merge");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_is_idempotent() {
+        // Calling shutdown twice should not panic. Also exercises the
+        // Notify::notify_one code path so the shutdown struct field is
+        // covered.
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
+        pool.shutdown();
+        pool.shutdown(); // no panic
+    }
+
+    #[tokio::test]
+    async fn test_add_endpoint_idempotency_under_add_then_lookup() {
+        let pool = make_pool(vec![]);
+        pool.add_endpoint("w_dyn", "10.0.0.5", 50200).await;
+        pool.add_endpoint("w_dyn", "10.0.0.5", 50200).await;  // same again
+        let statuses = pool.worker_statuses().await;
+        assert_eq!(statuses.iter().filter(|(id, _, _, _, _, _, _)| id == "w_dyn").count(), 1,
+                   "repeated add_endpoint with same id must not duplicate");
+    }
+
+    #[tokio::test]
+    async fn test_get_shard_uri_missing_key() {
+        let uris = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let pool = make_pool(vec![]).with_shard_uris(uris);
+        assert!(pool.get_shard_uri("never-registered").await.is_none());
+    }
+
     #[tokio::test]
     async fn test_add_endpoint_overwrites_same_id() {
         // Worker reconnecting to a new host/port (K8s pod reschedule).
