@@ -43,11 +43,16 @@ def start_cluster():
     kill()
     if os.path.exists(BASE): shutil.rmtree(BASE)
     os.makedirs(BASE)
+    # B2.1 H1 sweep: let env override read_consistency_secs so we can
+    # empirically test whether cache-key version churn is the dominant
+    # cause of mixed-RW QPS degradation.
+    rc_secs = int(os.environ.get("LANCEFORGE_RC_SECS", "3"))
     cfg = {
         'tables': [],
         'executors': [{'id': f'w{i}', 'host': '127.0.0.1', 'port': WORKER_PORTS[i]} for i in range(2)],
         'default_table_path': BASE,
         'server': {'max_k': 50_000, 'slow_query_ms': 0},
+        'cache': {'read_consistency_secs': rc_secs},
     }
     with open(f"{BASE}/config.yaml", 'w') as f: yaml.dump(cfg, f)
     procs = []

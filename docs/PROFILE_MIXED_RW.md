@@ -122,10 +122,26 @@ cache 粒度：**整张表 × 整体 dataset_version**。任意写 → version++
 
 按先易后难排序，每项单独 commit：
 
-### 6.1 Config 实验（零代码，1 小时）
-- 把 `cache.read_consistency_secs` 依次设 1 / 3 / 10 / 30，跑 bench，看 +10qps 下 Read QPS 曲线
-- **H1 的直接验证**。如果 30s 下 QPS 回到 >80%，说明 H1 是主因
-- 如果 QPS 几乎不变，H1 排除
+### 6.1 Config 实验（零代码，已完成）✅
+
+**结果**（`mixed_20260418_*` 系列，rc_secs=3 基线 vs rc_secs=30）：
+
+| write QPS | rc_secs=3 Read QPS | rc_secs=30 Read QPS | 相对改善 | 结论 |
+|---:|---:|---:|---:|---|
+| 0 (read-only) | 2345 | 2136 | —（噪声） | 基线 |
+| 10 | 887 (-62%) | **1103 (-48%)** | +25% | H1 部分证实 |
+| 50 | 58 (-97.4%) | 55.9 (-97.4%) | **0%** | H1 在高写压下完全不生效 |
+
+**判定**：
+- **H1（version tick storm）部分贡献**：10 QPS 写场景下，拉长 rc_secs 从 3s 到 30s 能拿回约 25% 的 loss，但离 80% 目标还差远
+- **H1 不是主因**：即使 rc=30s 下 cache key 在 30s 窗口内稳定，仍损失 48% QPS。这一半 loss 必须来自**非缓存**因素
+- **50 QPS 写场景下 H1 影响为零**：rc_secs 改变对高写压完全无效——说明写路径本身（不是 cache 失效）是瓶颈
+
+**促升级的假设**（根据实验数据重排）：
+- **H2（writer lock 阻塞 reader）→ 从中高置信升为最高置信**
+- **H6（fsync contention）→ 从中置信升为高置信**
+- H1 降为"贡献 ~25%，调 rc_secs 可作为短期 mitigation"
+- H3/H4/H5 仍待验证
 
 ### 6.2 加 tracing span（半天）
 在以下位置加 `#[instrument]`：
@@ -162,29 +178,30 @@ cache 粒度：**整张表 × 整体 dataset_version**。任意写 → version++
 
 **B2.1 验收**：产出一份 "where the 62% goes" 报告，假设树每个假设标为证实/证伪/待测，给 B2.2 的分层设计方案提供定量依据。
 
-## 七、B2.2 预判（profile 前先写下来，事后校对）
+## 七、B2.2 设计方向（基于实验数据更新）
 
-基于 H1 + 当前 cache 结构，**当前最可能的设计方向**：
+实验更新 H1 排名后，设计方向**重排**：
 
-1. **Cache key 去 version 化，改按 "query + IVF snapshot" 索引**
-   - IVF 索引重建频率低（只在 CreateIndex 时），即使数据变也不动索引
-   - 命中 cache 返回的结果会 miss 掉增量 fragments 的 top-K 候选
-   - 需要配套：对增量 fragments 做 delta-search 并合并
-   - 复杂度高，但是正路
+1. **写读物理分离（当前数据下最值钱）** ← 从 #3 升为 #1
+   - 实验表明即使 cache 稳定，写路径本身仍严重阻塞读（-48% @ 10 QPS, -97% @ 50 QPS）
+   - 把"写只打 primary worker，reader 只打 replica worker"做成正式调度策略
+   - 不要求 cache 重写，不动 lancedb
+   - 预期效果：reader 端完全隔离写压力，QPS 接近 read-only 基线
+   - 工程量：~1 周（scheduler 路由逻辑 + 配置 + 文档）
 
-2. **Fragment-level 失效**
-   - 维护 cache → fragment_id set 反向索引
-   - 写入只脏受影响 fragment 的 cache 条目
-   - 写入路径需要返回 "我写入了哪些 fragment"
-   - 难点：lancedb 未必暴露这个信息
+2. **Cache key 去 version 化（中长期正道）**
+   - IVF 索引重建频率低，即使数据变也不动索引
+   - 配套 delta-search 对增量 fragments，然后合并
+   - 复杂度高，2-3 周工程量
+   - 但它解决的问题 H1 只贡献 25%，ROI 不如 #1
 
-3. **写读物理分离（最简单，推荐作为 escape hatch）**
-   - replica_factor=2 → 一 worker 标 read-only，另一 worker 标 write-primary
-   - readers 只打 read-only worker，其 version 按 read_consistency_secs 懒更新
-   - write-primary 自己不承接读
-   - 不需要代码改动 cache 逻辑，配置层面解决
+3. **Fragment-level 失效（依赖 lancedb API）**
+   - 风险大，放后面
+   - 需要 lancedb 暴露"写影响哪些 fragments"的信息
 
-**现在的判断**：B2.2 先做 #3（配置层解法，1 周落地），给用户一个立即可用的 escape hatch；同步预研 #1（技术路径最干净，但 2-3 周工程量）。#2 风险大（依赖 lancedb API），放后面。
+**当前判断**：B2.2 先落 #1（读写物理分离路由）；同步给 H2/H6 加 tracing 做根因定位（§6.2）；#2 暂不启动，ROI 不划算。
+
+**短期 mitigation（docs）**：让用户在 LIMITATIONS §11 的基础上知道可以调 `cache.read_consistency_secs` 拿回部分 QPS（10 QPS 写场景 +25%）。已反映在 LIMITATIONS §11。
 
 ---
 
