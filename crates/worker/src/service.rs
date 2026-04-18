@@ -264,6 +264,7 @@ impl LanceExecutorService for WorkerService {
             loaded_shards,
             total_rows,
             shard_names,
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }
 }

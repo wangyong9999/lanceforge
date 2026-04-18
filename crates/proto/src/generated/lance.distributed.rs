@@ -93,6 +93,11 @@ pub struct HealthCheckResponse {
     /// names of all loaded shards (for recovery)
     #[prost(string, repeated, tag = "4")]
     pub shard_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Server version, populated from Cargo CARGO_PKG_VERSION on build. Clients
+    /// use this as the ground truth for capability negotiation; empty string
+    /// means pre-0.2 server (no version advertised). ROADMAP_0.2 §B3.1.
+    #[prost(string, tag = "5")]
+    pub server_version: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClusterStatusRequest {}

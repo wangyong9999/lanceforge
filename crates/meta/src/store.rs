@@ -42,6 +42,22 @@ impl std::fmt::Display for MetaError {
 
 impl std::error::Error for MetaError {}
 
+/// Current on-disk / on-OBS schema version for the MetaStore snapshot.
+///
+/// ROADMAP_0.2 §B3.2. Versioning rules:
+///   - 0 = implicit pre-0.2 snapshot (no `schema_version` field in JSON).
+///         Deserializes to `StoreData::default()` schema_version via serde
+///         default, then gets stamped to `CURRENT_SCHEMA_VERSION` on the
+///         next successful write. Reads keep working.
+///   - 1 = 0.2-alpha baseline. Same shape as 0 but explicit.
+///   - Future bumps MUST land with a migration in `migrate_snapshot` and
+///     be documented in `docs/COMPAT_POLICY.md` (B3.5).
+///
+/// A snapshot with a version strictly greater than `CURRENT_SCHEMA_VERSION`
+/// is rejected at load time — we cannot safely read a format authored by a
+/// newer server without forward-compat proof.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 /// MetaStore trait: versioned KV with CAS semantics.
 ///
 /// All implementations must guarantee:
@@ -91,6 +107,35 @@ pub struct FileMetaStore {
 struct StoreData {
     entries: HashMap<String, Versioned<String>>,
     global_version: u64,
+    /// On-disk schema version. Missing in pre-0.2 snapshots → deserializes
+    /// to 0 via serde default; gets stamped on the next write.
+    #[serde(default)]
+    schema_version: u32,
+}
+
+impl StoreData {
+    /// Validate a freshly-loaded snapshot's schema_version. Called after
+    /// JSON deserialization but before the store becomes available for
+    /// reads. Returns Err for forward-incompatible snapshots, Ok for
+    /// current or upgrade-on-next-write-compatible snapshots.
+    fn validate_schema_version(&self, source: &str) -> Result<(), MetaError> {
+        if self.schema_version > CURRENT_SCHEMA_VERSION {
+            return Err(MetaError::StorageError(format!(
+                "{source}: snapshot schema_version {} is newer than this server \
+                 supports ({}). Upgrade the server or use `lance-admin migrate` \
+                 to author a downgraded snapshot.",
+                self.schema_version, CURRENT_SCHEMA_VERSION
+            )));
+        }
+        if self.schema_version < CURRENT_SCHEMA_VERSION {
+            log::info!(
+                "{source}: loaded schema_version {} (< current {}), will be \
+                 upgraded in place on next write",
+                self.schema_version, CURRENT_SCHEMA_VERSION
+            );
+        }
+        Ok(())
+    }
 }
 
 impl FileMetaStore {
@@ -115,16 +160,18 @@ impl FileMetaStore {
                  use S3MetaStore or etcd for multi-coordinator deployments ({e})"
             )))?;
 
-        let data = if Path::new(path).exists() {
+        let data: StoreData = if Path::new(path).exists() {
             let content = tokio::fs::read_to_string(path).await
                 .map_err(|e| MetaError::StorageError(format!("read {path}: {e}")))?;
-            serde_json::from_str(&content)
-                .map_err(|e| MetaError::StorageError(format!("parse {path}: {e}")))?
+            let parsed: StoreData = serde_json::from_str(&content)
+                .map_err(|e| MetaError::StorageError(format!("parse {path}: {e}")))?;
+            parsed.validate_schema_version(&format!("FileMetaStore({path})"))?;
+            parsed
         } else {
-            StoreData::default()
+            StoreData { schema_version: CURRENT_SCHEMA_VERSION, ..Default::default() }
         };
-        info!("FileMetaStore: {} ({} keys) [locked {lock_path}]",
-            path, data.entries.len());
+        info!("FileMetaStore: {} ({} keys, schema_v{}) [locked {lock_path}]",
+            path, data.entries.len(), data.schema_version);
         Ok(Self {
             path: path.to_string(),
             data: tokio::sync::RwLock::new(data),
@@ -133,6 +180,14 @@ impl FileMetaStore {
     }
 
     async fn persist(&self) -> Result<(), MetaError> {
+        // Stamp current schema_version on every persist so pre-0.2 snapshots
+        // get upgraded in place on the next write. Cheap — it's one u32 field.
+        {
+            let mut data = self.data.write().await;
+            if data.schema_version != CURRENT_SCHEMA_VERSION {
+                data.schema_version = CURRENT_SCHEMA_VERSION;
+            }
+        }
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MetaError::StorageError(format!("serialize: {e}")))?;
@@ -265,12 +320,14 @@ impl S3MetaStore {
                     .map_err(|e| MetaError::StorageError(format!("read {uri}: {e}")))?;
                 let store_data: StoreData = serde_json::from_slice(&bytes)
                     .map_err(|e| MetaError::StorageError(format!("parse {uri}: {e}")))?;
-                info!("S3MetaStore: {} ({} keys)", uri, store_data.entries.len());
+                store_data.validate_schema_version(&format!("S3MetaStore({uri})"))?;
+                info!("S3MetaStore: {} ({} keys, schema_v{})",
+                    uri, store_data.entries.len(), store_data.schema_version);
                 (store_data, update_version)
             }
             Err(object_store::Error::NotFound { .. }) => {
-                info!("S3MetaStore: {} (new, 0 keys)", uri);
-                (StoreData::default(), None)
+                info!("S3MetaStore: {} (new, 0 keys, schema_v{})", uri, CURRENT_SCHEMA_VERSION);
+                (StoreData { schema_version: CURRENT_SCHEMA_VERSION, ..Default::default() }, None)
             }
             Err(e) => return Err(MetaError::StorageError(format!("get {uri}: {e}"))),
         };
@@ -285,6 +342,14 @@ impl S3MetaStore {
 
     /// Persist current state to S3 with conditional PUT.
     async fn persist(&self) -> Result<(), MetaError> {
+        // Stamp current schema_version on every persist so pre-0.2 snapshots
+        // get upgraded in place on the next write. Cheap — it's one u32 field.
+        {
+            let mut data = self.data.write().await;
+            if data.schema_version != CURRENT_SCHEMA_VERSION {
+                data.schema_version = CURRENT_SCHEMA_VERSION;
+            }
+        }
         let data = self.data.read().await;
         let json = serde_json::to_string_pretty(&*data)
             .map_err(|e| MetaError::StorageError(format!("serialize: {e}")))?;
@@ -344,6 +409,7 @@ impl S3MetaStore {
                     .map_err(|e| MetaError::StorageError(format!("read: {e}")))?;
                 let store_data: StoreData = serde_json::from_slice(&bytes)
                     .map_err(|e| MetaError::StorageError(format!("parse: {e}")))?;
+                store_data.validate_schema_version("S3MetaStore::refresh")?;
                 *self.data.write().await = store_data;
                 *self.etag.write().await = update_version;
                 Ok(())
@@ -580,6 +646,73 @@ mod tests {
         // Second create: expected_version=0 → conflict (already exists)
         let err = store.put("new_key", "v2", 0).await;
         assert!(matches!(err, Err(MetaError::VersionConflict { .. })));
+
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    // ── Schema-version tests (B3.2) ──
+
+    #[tokio::test]
+    async fn test_schema_version_stamped_on_new_store() {
+        let path = "/tmp/lanceforge_meta_schema_new.json";
+        let _ = tokio::fs::remove_file(path).await;
+
+        // Fresh store → put one key so persist runs → reopen and inspect JSON.
+        {
+            let store = FileMetaStore::new(path).await.unwrap();
+            store.put("k", "v", 0).await.unwrap();
+        }
+        let content = tokio::fs::read_to_string(path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["schema_version"].as_u64().unwrap() as u32,
+                   CURRENT_SCHEMA_VERSION);
+
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn test_schema_version_upgraded_from_pre_0_2_snapshot() {
+        // Simulate a 0.1-era snapshot with no schema_version field.
+        let path = "/tmp/lanceforge_meta_schema_pre02.json";
+        let _ = tokio::fs::remove_file(path).await;
+        let legacy = r#"{"entries":{"k":{"value":"v","version":1}},"global_version":1}"#;
+        tokio::fs::write(path, legacy).await.unwrap();
+
+        // Loading must succeed (pre-0.2 compatible).
+        let store = FileMetaStore::new(path).await.unwrap();
+        let entry = store.get("k").await.unwrap().unwrap();
+        assert_eq!(entry.value, "v");
+        // Writing any key stamps the new schema_version.
+        store.put("k2", "v2", 0).await.unwrap();
+        let content = tokio::fs::read_to_string(path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["schema_version"].as_u64().unwrap() as u32,
+                   CURRENT_SCHEMA_VERSION);
+
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn test_schema_version_future_rejected() {
+        // A snapshot authored by a newer server (schema_v999) must be rejected
+        // so old servers don't silently corrupt forward-version state.
+        let path = "/tmp/lanceforge_meta_schema_future.json";
+        let _ = tokio::fs::remove_file(path).await;
+        let future_snapshot = format!(
+            r#"{{"entries":{{}},"global_version":0,"schema_version":{}}}"#,
+            CURRENT_SCHEMA_VERSION + 999
+        );
+        tokio::fs::write(path, future_snapshot).await.unwrap();
+
+        let err = FileMetaStore::new(path).await;
+        match err {
+            Err(MetaError::StorageError(m)) => {
+                assert!(m.contains("newer than this server supports"),
+                        "expected fwd-compat error, got: {m}");
+            }
+            Err(e) => panic!("wrong error kind: {e}"),
+            Ok(_) => panic!("future schema_version must not load"),
+        }
 
         let _ = tokio::fs::remove_file(path).await;
     }

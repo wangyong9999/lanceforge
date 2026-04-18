@@ -108,6 +108,10 @@ message HealthCheckResponse {
   uint32 loaded_shards = 2;
   uint64 total_rows = 3;
   repeated string shard_names = 4;   // names of all loaded shards (for recovery)
+  // Server version, populated from Cargo CARGO_PKG_VERSION on build. Clients
+  // use this as the ground truth for capability negotiation; empty string
+  // means pre-0.2 server (no version advertised). ROADMAP_0.2 §B3.1.
+  string server_version = 5;
 }
 
 message ClusterStatusRequest {}
