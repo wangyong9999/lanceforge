@@ -1,5 +1,42 @@
 # 0.2-alpha → 0.2-beta 硬化与覆盖计划
 
+> **Status (2026-04-18 最终)**：计划内 23 项 + 执行中发现的 H23 全部落地。
+> 最终测试：**workspace lib 291 tests pass**（基线 218 → +73），**HA E2E 8/8**。
+> 衍生发现 **H24**（k=10000 查询 60% 错误率）已 filed，不在本计划闭环内。
+> 可以进 0.2.0-beta.1 gate（§8 beta-ready 定义）。
+
+## 执行记录（commit 索引）
+
+| ID | Item | Commit |
+|---|---|---|
+| H1 | config validate bounds | `439598a` |
+| H2 | write-RPC audit | `4d626dc` |
+| H3 | AddRows/Upsert idempotency | `861e437` |
+| H4 | JoinSet cancellation | `d6d8b51` |
+| H5 | ShardState typed error | `27487d8` |
+| H6 | scatter_gather coverage | `1af27d1` |
+| H7 | connection_pool coverage | `cb4f762` |
+| H8 | MetaStore S3 error paths | `99a1c93` |
+| H9 | Python E2E → CI | `60e85a2` |
+| H10 | dimension/query_vector consistency | `2e890cc` |
+| H11 | DDL boundary coverage | `5e2defc` |
+| H12 | 大 k bench + PERF_LARGE_K finding | `e9b4740` |
+| H13 | per-shard latency log | `fed72e6` |
+| H14 | EtcdShardState shutdown | `03bfeef` |
+| H15 | REST server shutdown | `7cbab18` |
+| H16 | idiomatic test asserts | `d10398c` |
+| H17 | TLS loader + empty-file reject | `d790b69` |
+| H18 | ServerVersion parser | `e33f413` |
+| H19 | offset+k boundaries | `087ddba` |
+| H20 | CI PR/push/nightly tiers | `60e85a2` |
+| H21 | SIGTERM + drain timeout | `fa13726` |
+| H22 | smoke bench PR gate | `60e85a2` |
+| H23 | meta tests → tempdir | `486b5c5` |
+| H24 | k=10000 错误率调查 | **filed, not closed** |
+
+---
+
+
 **建档时间**：2026-04-18
 **目的**：在 0.2.0-alpha.1 之后系统性扫清潜在质量问题，作为 0.2-beta 的硬化基础。
 **与 ROADMAP 的关系**：这份计划处理 `ROADMAP_0.2.md §1-2` 在 alpha 之后留下的"窄而深"工作；不覆盖 Layer 2/3 的 Strong-Recommend / Moat 功能项。
