@@ -153,24 +153,48 @@
 
 本 session 完成 H10/H11/H21/H4/H13/H18 共 6 项；叠加上 session 的 Wave 1+2+H23，累计 16/23 硬化项。剩余 7 项 ~17h。
 
-### 波次 4 — 幂等与 CI（8h）
-长线质量与外部门禁。
-14. H3 AddRows 幂等（4h）
-15. H9 Python E2E → CI（2h）
-16. H20 CI 分层（2h）
+### 波次 4+ — 剩余 7 项终局（2026-04-18 重审优化）
 
-### 波次 5 — 性能 / 稳定性验证（5h）
-量化回归与长时测试。
-17. H12 大 k bench（2h）
-18. H13 per-shard 日志（1h）
-19. H17 TLS 错误路径（2h）
+> **重审理由**：H13/H18/H21 已被拉到 Wave 3；剩余项重新按**依赖图 × 价值**排序，而不是按原计划的机械波次。
 
-### 波次 6 — Beta 前收口
-20. H18 proto 版本协商（1h）
-21. H21 graceful shutdown drain（2h）
-22. H22 bench PR gate（2h）
-23. 全量 regression（unit + HA + mixed bench + chaos 20 iter + 2h soak）
-24. 发 0.2.0-beta.1
+| # | Item | 原估 | 依赖 | 风险 | 备注 |
+|---|---|---:|---|---|---|
+| 17 | **H3** AddRows 幂等窗口 | 4h | 无 | 🟡 proto 改动；需设计决策 | 最大一块；闭合 H4 create_table 的 rollback 尾巴 |
+| 18 | **H12** 大 k bench | 2h | 无 | 🟢 仅数据，无代码 | 可复用 `bench_phase17_matrix.py` |
+| 19 | **H17** TLS 错误路径 | 2h | 无 | 🟢 需要 test fixtures（self-signed cert）| 独立模块 |
+| 20 | **H5** ShardState typed error | 3h | 无 | 🔴 内部 API breaking | 最后做，风险隔离 |
+| 21 | **H9** Python E2E → CI | 2h | 无 | 🟡 CI 时长可能翻倍 | 选 2-3 个快的进 PR flow |
+| 22 | **H20** CI PR/nightly 分层 | 2h | H9 | 🟢 纯 ci.yml | 先有 H9 内容再决定分层 |
+| 23 | **H22** Bench PR gate | 2h | H20 | 🟡 需要 baseline fixture | 回归 > 15% block |
+
+**执行顺序（按依赖 + 风险）**：
+- **Round A**（并行独立）：H3（最大）、H12（最快）
+- **Round B**（风险隔离）：H17、H5
+- **Round C**（CI 串行链）：H9 → H20 → H22
+
+**H3 设计决策**（先定再做，否则会反复）：
+- **Scope**：AddRows（round-robin dup）+ UpsertRows（API 一致性，虽然 merge_insert 本身幂等）；CreateTable 暂不做
+- **协议**：可选 `request_id: string` 字段。空串 = 不 dedup（0.1 行为）
+- **存储**：coordinator in-memory HashMap，5 分钟 TTL。不跨 coord 同步；客户端重试在 5min 内 safe，跨 5min 是运维问题
+- **返回**：cached response（不重放写）
+- **向后兼容**：字段可选；旧客户端不传 = 不 dedup，一致行为
+
+**H12 设计**：扩展 `bench_phase17_mixed.py` 或 `bench_phase17_matrix.py`，矩阵加 k ∈ {10, 100, 1000, 10000}。记录每个 k 的 QPS + P99 + 响应字节数；找 IPC 序列化拐点。
+
+**H17 设计**：lib 测试加 `test_load_invalid_tls_cert` / `test_load_expired_cert` 覆盖 cert/key 加载路径的 Err 分支。Self-signed test cert 用 `rcgen` 程序生成（已有 workspace 依赖检查）或简单无效字节串测 parser 拒绝。
+
+**H5 设计**：新 enum `ShardStateError { TableNotFound(String), InvalidMapping(String), StorageError(String) }`；trait 方法 `Result<T, String>` → `Result<T, ShardStateError>`；所有 impl + 调用者一起改。
+
+**H9 选择**：
+- PR-blocking（fast）：`e2e_add_upsert_consistency_test.py`（~30s）+ `e2e_ha_test.py`（~1min）
+- Nightly：`e2e_full_capability_test.py`, `e2e_rebalance_test.py`, `e2e_tls_test.py`, `e2e_enterprise_test.py`
+
+**H22 baseline**：commit `benchmarks/baseline.json` 记录当前测量值；bench 脚本对比当前 vs baseline，偏差 > 15% 且往坏方向 → fail。
+
+**Beta gate 最终收口**（7 项全完后）：
+- 全量 regression：unit + integration + HA + chaos 20 iter + 2h read-only soak
+- 更新 RELEASE_NOTES 标 `0.2.0-beta.1`
+- Tag 动作交用户
 
 **总估工**：~36h（多轮 session）
 
