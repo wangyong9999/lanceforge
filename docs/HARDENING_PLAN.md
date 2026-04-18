@@ -1,0 +1,183 @@
+# 0.2-alpha → 0.2-beta 硬化与覆盖计划
+
+**建档时间**：2026-04-18
+**目的**：在 0.2.0-alpha.1 之后系统性扫清潜在质量问题，作为 0.2-beta 的硬化基础。
+**与 ROADMAP 的关系**：这份计划处理 `ROADMAP_0.2.md §1-2` 在 alpha 之后留下的"窄而深"工作；不覆盖 Layer 2/3 的 Strong-Recommend / Moat 功能项。
+
+## 一、范围与原则
+
+**覆盖范围**（in-scope crates）：
+- `crates/{common, coordinator, meta, proto, worker}`
+- `lance-integration/` 的 Rust + Python 测试层
+
+**不在本计划**：
+- `ballista/*`（已 workspace 隔离）
+- Layer 2/3 ROADMAP 功能（OTEL / async SDK / sparse vectors / M2 SQL）
+- `B2` 混合 RW 的性能工作（`PROFILE_MIXED_RW §8`、`ROADMAP §1.5` 单独跟踪）
+
+**原则**：
+1. **诚实优先于速度**：每一个发现必须能追溯到代码或实验证据
+2. **测试先于修复**：每个 P0/P1 的修复都要带回归测试
+3. **每项独立 commit**：便于 bisect / revert
+4. **多轮审视**：每次 commit 前自审 1 次；每执行 5 个条目做一次 checkpoint review
+
+## 二、审计结果（含已修正）
+
+下表是外部 audit agent 扫描 + 我亲自核对后的事实清单。**斜体**的是 audit 的错误结论或漏项，已在 §2.1 修正/补充。
+
+### 2.1 Audit 修正
+
+1. **🟢 取消警告**：`executor.rs:997 decode_vector(&vq).unwrap()` audit 标为"risky production panic"——实际是在 `#[test] fn test_decode_vector_ok` 内。生产代码 (`execute_on_table` 696 + 743) 用 `decode_vector(vq)?` 正确传播 Result。**production 代码中 `.unwrap()` / `.expect()` 实际为零个有风险的**。
+2. **🟢 取消警告**：audit 把 "Gap A API key rotation" 列为未修——实际 **B1.2.3 (`8cbcbb3`) 已完成**。audit 用的是 STATELESS_INVARIANTS 旧版标记。
+3. **🟡 补充**：audit 遗漏了 RPC cancellation / retry idempotency / 边界值覆盖 / proto 版本协商 等维度。详 §3。
+
+### 2.2 确认的真实发现（按代码位置）
+
+| # | 位置 | 问题 | 严重度 |
+|---|---|---|---|
+| F1 | `crates/common/src/shard_state.rs` ShardState trait 方法 | 返回 `Result<T, String>`（ad-hoc 字符串错误），其他 crate 用 typed error | 🟡 一致性 |
+| F2 | `crates/common/src/config.rs:450-523` validate() | 不校验 `oversample_factor == 0` / `replica_factor == 0` / API key 非空 | 🟡 边界 |
+| F3 | `crates/coordinator/src/service.rs` add_rows / delete_rows / upsert_rows | 无 `audit()` 调用（仅 DDL 有） | 🟡 可观测 |
+| F4 | `crates/coordinator/src/scatter_gather.rs` | 无 per-shard 延迟日志 | 🟢 改进 |
+| F5 | `crates/common/src/shard_state.rs` EtcdShardState watch 循环 | 无 explicit shutdown signal | 🟢 清理 |
+| F6 | `crates/coordinator/src/bin/main.rs` REST metrics server | spawn 后无 shutdown 通道 | 🟢 清理 |
+| F7 | `crates/coordinator/src/scatter_gather.rs` | 49.80% line coverage（lib-only） | 🔴 覆盖 |
+| F8 | `crates/coordinator/src/connection_pool.rs` | 41.93% line coverage（lib-only） | 🔴 覆盖 |
+| F9 | `crates/meta/src/store.rs` | 72.95% line coverage；S3 错误路径未测 | 🟡 覆盖 |
+| F10 | `.github/workflows/ci.yml` CI 配置 | 大部分 `e2e_*.py` 未进 CI（只 e2e_full_system_test）| 🟡 CI gap |
+| F11 | `crates/meta/src/store.rs:713-734` tests | 用 `panic!("...")` 而非 `assert!` | 🟢 test 质量 |
+| F12 | `lance-integration/tests/test_edge_cases.rs:310` | 同上 | 🟢 test 质量 |
+
+## 三、超出 Audit 的补充关注项
+
+这些是我对照生产级分布式系统 checklist 额外识别的 gap，audit 没覆盖。
+
+| # | 位置 / 话题 | 问题 | 严重度 |
+|---|---|---|---|
+| A1 | 所有查询 / 写入 RPC | Client cancel / RPC drop 后 coord 是否 cancel 下游 worker 调用？未测 | 🟡 正确性 |
+| A2 | `add_rows` 无 `on_columns` 路径 | client 重试 AddRows 会产生**重复行**。应至少有**请求 ID 幂等窗口** | 🟡 正确性 |
+| A3 | `offset + k` 边界 | `validate_offset_k` 保证 ≤ `max_k`，但**未测** `offset == max_k - 1` 这类临界值 | 🟢 覆盖 |
+| A4 | `dimension` vs `query_vector.len()` | coord 从 `query_vector.len() / 4` 推导 dimension；如果 client 传 `dimension=5` 但 vector 仅 16 bytes (=4 floats)——行为未测 | 🟡 边界 |
+| A5 | Proto 版本协商 | `HealthCheckResponse.server_version` 字段已加（B3.1），但 client 无"如果版本 <X 则降级"的测试 | 🟢 Beta |
+| A6 | 跨 crate error → gRPC Status 映射 | `ShardState` 返 `String` → coord 手动映射成 Status——缺少统一层 | 🟡 一致性 |
+| A7 | CI wall time | 如果加整套 chaos/soak，单次 CI 从 5min 涨到 30min+。需要分 nightly job 划分 | 🟢 CI 设计 |
+| A8 | 数值溢出 | `offset: u32` + `k: u32`，相加可能溢出。`validate_offset_k` 用的算术未审计 | 🟡 正确性 |
+| A9 | 大 k 性能 | `max_k=10000`，但 `k=10000` 场景未在 bench 矩阵里 | 🟢 性能 |
+| A10 | TLS 错误路径 | cert 过期 / 错误的 CA / 握手失败——行为未测 | 🟡 安全 |
+| A11 | 空/零行 CreateTable | `arrow_ipc_data` 是 0 行的合法 IPC——行为未定义 | 🟢 边界 |
+| A12 | DropTable 并发 | 两个客户端同时 DropTable 同一表——DDL lock 存在（service.rs:60）但未压测 | 🟢 覆盖 |
+
+## 四、优先级列表
+
+### P0（阻塞 beta；上线前必须解决）
+
+目前**为空**。alpha 已关闭所有 security / panic / correctness 级别的重大问题。
+
+### P1（影响生产稳定性 / 合规 / 可维护性）
+
+| ID | 目标 | 验收 | 估工 |
+|---|---|---|---|
+| **H1** | F2 配置 validate 加 bounds | `oversample_factor` / `replica_factor` / `api_keys` 空 + validate() 测试 | 0.5h |
+| **H2** | F3 写 RPC audit 打通 | `add_rows` / `delete_rows` / `upsert_rows` 都调用 `self.audit()`；有日志验证 | 1h |
+| **H3** | A2 AddRows 幂等窗口 | 可选 `request_id` 字段 + coord 侧去重窗口（5min）+ 覆盖测试 | 4h |
+| **H4** | A1 RPC cancellation 穿透 | 客户端 drop 后，coord 的 scatter-gather 的 JoinSet 要能 abort 下游 RPC；加单元或集成测试 | 3h |
+| **H5** | F1 + A6 ShardState String → typed error | 引入 `ShardStateError` enum；全部 `String` 返回改掉；更新调用者 | 3h |
+| **H6** | F7 scatter_gather unit 覆盖补齐 | 覆盖 70%+；error 分支测全（all-fail / partial-fail / prune-to-empty / worker-UNAVAILABLE） | 4h |
+| **H7** | F8 connection_pool unit 覆盖补齐 | 覆盖 70%+；加 endpoint 构建错误、TLS 配置错误、健康检查状态机测试 | 3h |
+| **H8** | F9 meta/store S3 错误路径测试 | CAS 冲突 / NotFound / 网络超时 / 序列化失败 4 个分支 | 2h |
+| **H9** | F10 Python E2E 进 CI | 挑 5 个代表性 E2E 进 CI serial；或 nightly job | 2h |
+| **H10** | A4 + A8 边界值测试 | dimension/query_vector 不一致；offset + k 溢出；max_k 临界 | 2h |
+| **H11** | A11 + A12 边界 DDL 覆盖 | 0 行 CreateTable；并发 DropTable；duplicate CreateTable | 2h |
+| **H12** | A9 bench 加大 k 场景 | bench 矩阵补 k = {10, 100, 1000, 10000}；记录退化拐点 | 2h |
+
+### P2（质量 / 清洁度，可 0.2-beta 或 0.3）
+
+| ID | 目标 | 估工 |
+|---|---|---|
+| **H13** | F4 per-shard 延迟日志 | 1h |
+| **H14** | F5 EtcdShardState shutdown signal | 1h |
+| **H15** | F6 REST metrics server shutdown | 0.5h |
+| **H16** | F11 + F12 test panic → assert | 0.5h |
+| **H17** | A10 TLS 错误路径测试 | 2h |
+| **H18** | A5 proto 版本协商冒烟 | 1h |
+| **H19** | A3 offset+k 边界显式覆盖 | 0.5h |
+| **H20** | A7 CI wall time 分层（PR / nightly）| 2h |
+| **H21** | Graceful shutdown drain — SIGTERM coord 有 in-flight 查询时必须等完或快速 fail 不 hang | 2h |
+| **H22** | Bench PR gate — smoke mixed bench（短窗口）进 CI PR flow，回归 >15% block merge | 2h |
+
+## 五、执行顺序
+
+### 波次 1 — 快速清理（4h）
+最小改动、最高确定性、先压低总体风险面。每项独立 commit。
+1. H1 config bounds（0.5h）
+2. H2 write RPC audit（1h）
+3. H16 test panic → assert（0.5h）
+4. H15 REST metrics shutdown（0.5h）
+5. H19 offset+k 边界测试（0.5h）
+6. H14 EtcdShardState shutdown（1h）
+
+### 波次 2 — 覆盖深度（9h）
+动测试代码多、生产代码少。对应 audit 最大痛点。
+7. H6 scatter_gather 覆盖（4h）
+8. H7 connection_pool 覆盖（3h）
+9. H8 meta/store S3 错误路径（2h）
+
+### 波次 3 — 一致性与边界（10h）
+结构性改动，需要跨 crate 协调。
+10. H5 ShardState typed error（3h）
+11. H10 边界值测试（2h）
+12. H11 DDL 边界覆盖（2h）
+13. H4 RPC cancellation（3h）
+
+### 波次 4 — 幂等与 CI（8h）
+长线质量与外部门禁。
+14. H3 AddRows 幂等（4h）
+15. H9 Python E2E → CI（2h）
+16. H20 CI 分层（2h）
+
+### 波次 5 — 性能 / 稳定性验证（5h）
+量化回归与长时测试。
+17. H12 大 k bench（2h）
+18. H13 per-shard 日志（1h）
+19. H17 TLS 错误路径（2h）
+
+### 波次 6 — Beta 前收口
+20. H18 proto 版本协商（1h）
+21. H21 graceful shutdown drain（2h）
+22. H22 bench PR gate（2h）
+23. 全量 regression（unit + HA + mixed bench + chaos 20 iter + 2h soak）
+24. 发 0.2.0-beta.1
+
+**总估工**：~36h（多轮 session）
+
+## 六、审视循环（每执行 5 项后）
+
+每完成 5 个 H 项：
+1. 跑 `cargo test --lib` 确认不回归
+2. 更新本文件的 "已完成" 栏
+3. 看 `docs/COVERAGE_MATRIX.md` 数字是否上升（未规定必须，但期望 scatter_gather 和 connection_pool 至少涨 10+ %）
+4. 检查是否**新发现** P0/P1 需要加入
+
+## 七、已明确**不做**的事
+
+避免 scope 膨胀，**以下项留给 0.2-beta 或 0.3**（不是"漏了"，是"刻意留"）：
+
+- ROADMAP `B2.3-B2.7` 全部（混合 RW beta 工作）
+- ROADMAP `R1-R7` 全部（OTEL / audit log / encryption-at-rest 等）
+- ROADMAP `M1-M4`（sparse vectors / SQL / lake interop / GPU）
+- 4 模块 ≥ 85% 覆盖**硬目标**（alpha 只 measure；本计划拉到 70%）
+- 24h soak（2h 够 beta，24h 留 GA CI）
+- 任何涉及 lancedb 上游 PR 的工作
+
+## 八、完成定义（Beta-Ready gate）
+
+当以下条件全部满足，可 bump `0.2.0-beta.1`：
+
+- [ ] P1 所有 H 条目全绿（12 项）
+- [ ] `cargo llvm-cov` 4 模块平均 line coverage ≥ 70%
+- [ ] 全量 bench 矩阵（包括大 k）不回归
+- [ ] chaos 20 iter 全绿
+- [ ] 2h read-only soak 全绿
+- [ ] RELEASE_NOTES.md 列 breaking 变更（H5 ShardState error 类型是 internal API breaking）
+
+至此 alpha→beta 的硬化完成，再决定是否进入 R-level 功能推进。

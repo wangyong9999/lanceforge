@@ -92,7 +92,7 @@
 
 ## 三、Gap 清单（按严重度）
 
-### 🔴 Gap A：API Key / RBAC 仅在 config（service.rs:48 + auth.rs:53 + coordinator/bin/main.rs:112-114）
+### 🟡 ~~Gap A~~ ✅ 主要闭合于 `8cbcbb3` — API Key / RBAC 仅在 config（service.rs:48 + auth.rs:53 + coordinator/bin/main.rs:112-114）
 
 **现状**：`SecurityConfig.api_keys` 在 YAML 里，启动读入后 `ApiKeyInterceptor.keys` 就 frozen。
 
@@ -110,13 +110,12 @@ for k in &config.security.api_keys {
 - 违反 SaaS "state in OBS" 原则
 - Legacy key 默认 Admin 让权限最小化原则失效
 
-**拟修方向**（B1.2 任务）：
-- MetaStore 新增 `auth/keys/{key_id}` 前缀条目
-- `ApiKeyInterceptor` 改为定时刷新 + 支持 hot-reload（1 分钟级足够）
-- 配合 `lance-admin auth add-key / revoke-key` CLI（入 R6）
-- 向下兼容：config YAML 里的 key 作为 bootstrap admin（一次性），首次启动写入 MetaStore
-
-**估工**：~2 周（包含兼容 + 测试）
+**闭合状态（`8cbcbb3`）**：
+- ✅ MetaStore 新增 `auth/keys/{key}` 前缀条目
+- ✅ `ApiKeyInterceptor` 改为 `Arc<RwLock<Arc<HashMap>>>` + `reload()`；coord 每 60s 从 MetaStore 刷新
+- ✅ 启动期 `bootstrap_metastore_if_empty` — 老 config YAML 首次启动自动迁进 MetaStore
+- ⏳ **仍遗留**：legacy `api_keys`（非 RBAC 格式）默认 Admin 角色——计划在 0.3.0 flip 到 Read。参见 `COMPAT_POLICY.md` §9
+- ⏳ **未实现**：admin gRPC RPC (`AddApiKey` / `RevokeApiKey`)——当前靠直接写 MetaStore 做 key 管理；`lance-admin auth` CLI 是 R6 的工作
 
 ---
 
@@ -245,4 +244,8 @@ for k in &config.security.api_keys {
 
 ---
 
-**结论**：整体代码库的 SaaS-first 化程度**已经达到 ~75%**。剩下 25% 主要集中在 Gap A/B/C/D 四处。B1.2 的 3 周工作可以把这个比例推到 ~95%。剩余 5%（Gap E audit log 和 Gap F quota）走 R 层处理。
+**结论**：0.2.0-alpha.1 累计闭合 Gap A（🟡 主要闭合）、C、D 三项，Gap B 部分闭合（saas profile 拒绝 --auto-shard，完整 MetaStore 写入延到 B1.2.2b）。整体代码库的 SaaS-first 化程度从基线 ~75% 推到 **~92%**。剩余主要是：
+- 🟡 Gap A 的 0.3.0 legacy-key-role flip
+- 🔴 Gap B 的完整 auto-shard → MetaStore（B1.2.2b，post-alpha）
+- 🟢 Gap E audit log（R3）
+- 🟢 Gap F per-key quota（R2）
