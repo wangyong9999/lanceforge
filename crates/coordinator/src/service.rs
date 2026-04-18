@@ -275,6 +275,48 @@ impl CoordinatorService {
             .unwrap_or_else(|| "no-auth".to_string());
         info!("audit op={} principal={} target={} details={}", op, principal, target, details);
     }
+}
+
+/// Keep audit-log line bounded when the payload contains a long filter
+/// expression or similar. Chars, not bytes — we don't want to split UTF-8.
+fn truncate_for_audit(s: &str) -> String {
+    const MAX_LEN: usize = 200;
+    if s.chars().count() <= MAX_LEN {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(MAX_LEN).collect();
+    format!("{truncated}…(+{} chars)", s.chars().count() - MAX_LEN)
+}
+
+#[cfg(test)]
+mod audit_util_tests {
+    use super::truncate_for_audit;
+
+    #[test]
+    fn passthrough_under_limit() {
+        assert_eq!(truncate_for_audit("short"), "short");
+    }
+
+    #[test]
+    fn truncates_long_ascii() {
+        let s = "a".repeat(250);
+        let out = truncate_for_audit(&s);
+        assert!(out.starts_with(&"a".repeat(200)));
+        assert!(out.contains("+50 chars"));
+    }
+
+    #[test]
+    fn counts_chars_not_bytes_on_unicode() {
+        // 200 '中' characters (3 bytes each in UTF-8) must pass through
+        // without truncation — chars not bytes.
+        let s = "中".repeat(200);
+        assert_eq!(truncate_for_audit(&s), s);
+        let s2 = "中".repeat(201);
+        assert!(truncate_for_audit(&s2).contains("+1 chars"));
+    }
+}
+
+impl CoordinatorService {
 
     /// Acquire a per-table DDL mutex. Prevents concurrent CreateTable/DropTable
     /// on the same table name from racing and creating duplicate shards.
@@ -543,6 +585,11 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::AddRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        let req_ref = request.get_ref();
+        self.audit(&request, "AddRows", &req_ref.table_name,
+                   &format!("bytes={} on_columns={}",
+                            req_ref.arrow_ipc_data.len(),
+                            req_ref.on_columns.join(",")));
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -622,6 +669,9 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::DeleteRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        let req_ref = request.get_ref();
+        self.audit(&request, "DeleteRows", &req_ref.table_name,
+                   &format!("filter={}", truncate_for_audit(&req_ref.filter)));
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
@@ -695,6 +745,11 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::UpsertRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        let req_ref = request.get_ref();
+        self.audit(&request, "UpsertRows", &req_ref.table_name,
+                   &format!("bytes={} on_columns={}",
+                            req_ref.arrow_ipc_data.len(),
+                            req_ref.on_columns.join(",")));
         let req = request.into_inner();
         if req.table_name.is_empty() || req.table_name.len() > 256 {
             return Err(Status::invalid_argument("table_name must be 1-256 characters"));
