@@ -891,7 +891,20 @@ impl LanceSchedulerService for CoordinatorService {
         let mut total_created = 0u64;
         let index_col = if req.index_column.is_empty() { String::new() } else { req.index_column.clone() };
 
-        // Send CreateLocalShard to each worker in parallel
+        // Send CreateLocalShard to each worker in parallel.
+        //
+        // H4 note — this fan-out deliberately uses Vec<JoinHandle>, NOT
+        // JoinSet. Client-side cancellation in the middle of a CreateTable
+        // is a data-integrity problem either way:
+        //   - JoinSet: drops + aborts in-flight lance writes mid-manifest
+        //     → half-written fragments + no rollback → worse orphan state
+        //   - Vec: tasks keep running to completion without rollback →
+        //     orphan shard files but lance state is consistent
+        // The right long-term fix is H3 (request_id idempotency window +
+        // saga rollback on detected abandonment); until that lands, keep
+        // the current pattern so at least the workers reach a consistent
+        // on-disk state. Orphan_gc_loop can clean up the unreferenced
+        // shards if the operator has it enabled.
         let mut handles = Vec::new();
         for (i, partition) in partitions.into_iter().enumerate() {
             let shard_name = format!("{}_shard_{:02}", req.table_name, i);
@@ -1464,8 +1477,9 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
 
-        // Fan out GetByIds to all workers (IDs may be on any shard)
-        let mut handles = Vec::new();
+        // Fan out GetByIds to all workers (IDs may be on any shard).
+        // JoinSet so a client-side cancel drops the fan-out cleanly (H4).
+        let mut tasks = tokio::task::JoinSet::new();
         let statuses = self.pool.worker_statuses().await;
         let healthy: std::collections::HashSet<String> = statuses.iter()
             .filter(|(_, _, _, h, _, _, _)| *h)
@@ -1494,18 +1508,18 @@ impl LanceSchedulerService for CoordinatorService {
                 };
                 let worker_id = wid.clone();
                 let timeout = self.query_timeout;
-                handles.push(tokio::spawn(async move {
+                tasks.spawn(async move {
                     let result = tokio::time::timeout(timeout,
                         client.local_get_by_ids(Request::new(r))).await;
                     (worker_id, result)
-                }));
+                });
             }
         }
 
         // Gather results
         let mut batches = Vec::new();
-        for handle in handles {
-            if let Ok((_, Ok(Ok(resp)))) = handle.await {
+        while let Some(res) = tasks.join_next().await {
+            if let Ok((_, Ok(Ok(resp)))) = res {
                 let r = resp.into_inner();
                 if r.num_rows > 0 && r.error.is_empty()
                     && let Ok(batch) = lance_distributed_common::ipc::ipc_to_record_batch(&r.arrow_ipc_data) {
@@ -1572,7 +1586,8 @@ impl LanceSchedulerService for CoordinatorService {
                 && healthy.contains(sec) { worker_ids.insert(sec.clone()); }
         }
 
-        let mut handles = Vec::new();
+        // JoinSet fan-out: cancellation-safe (H4).
+        let mut tasks = tokio::task::JoinSet::new();
         for wid in &worker_ids {
             if let Ok(mut client) = self.pool.get_healthy_client(wid).await {
                 let r = pb::QueryRequest {
@@ -1583,15 +1598,15 @@ impl LanceSchedulerService for CoordinatorService {
                     columns: req.columns.clone(),
                 };
                 let timeout = self.query_timeout;
-                handles.push(tokio::spawn(async move {
+                tasks.spawn(async move {
                     tokio::time::timeout(timeout, client.local_query(Request::new(r))).await
-                }));
+                });
             }
         }
 
         let mut batches = Vec::new();
-        for handle in handles {
-            if let Ok(Ok(Ok(resp))) = handle.await {
+        while let Some(res) = tasks.join_next().await {
+            if let Ok(Ok(Ok(resp))) = res {
                 let r = resp.into_inner();
                 if r.num_rows > 0 && r.error.is_empty()
                     && let Ok(batch) = lance_distributed_common::ipc::ipc_to_record_batch(&r.arrow_ipc_data) {
@@ -1663,8 +1678,12 @@ impl LanceSchedulerService for CoordinatorService {
             )?;
         }
 
-        // Execute each query in parallel
-        let mut handles = Vec::new();
+        // Execute each query in parallel. H4: JoinSet aborts every
+        // child task on drop, so a client cancelling the batch_search
+        // RPC stops the N scatter-gathers immediately instead of
+        // letting them finish burning worker CPU for queries nobody
+        // is waiting on.
+        let mut tasks = tokio::task::JoinSet::new();
         for qv in &req.query_vectors {
             let local_req = pb::LocalSearchRequest {
                 query_type: 0, // ANN
@@ -1685,16 +1704,16 @@ impl LanceSchedulerService for CoordinatorService {
             let timeout = self.query_timeout;
             let merge_k = k;
 
-            handles.push(tokio::spawn(async move {
+            tasks.spawn(async move {
                 super::scatter_gather::scatter_gather(
                     &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout,
                 ).await
-            }));
+            });
         }
 
         let mut results = Vec::new();
-        for handle in handles {
-            match handle.await {
+        while let Some(res) = tasks.join_next().await {
+            match res {
                 Ok(Ok(resp)) => results.push(resp),
                 Ok(Err(e)) => results.push(pb::SearchResponse {
                     arrow_ipc_data: vec![], num_rows: 0,
