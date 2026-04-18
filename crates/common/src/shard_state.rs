@@ -32,6 +32,34 @@ pub struct TargetState {
 /// Used by the readiness gate to prevent premature promote.
 pub type ExecutorReadiness = HashMap<String, Vec<String>>; // executor_id → loaded shard_names
 
+/// Typed error for `ShardState` operations (H5). Replaces the
+/// `Result<(), String>` the trait used to return so callers (coordinator
+/// service.rs → tonic::Status mapping; the reconciliation loop retry
+/// logic) can match on the specific failure class instead of
+/// substring-matching the error text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShardStateError {
+    /// The requested table has no entry in this state.
+    TableNotFound(String),
+    /// Operation precondition violated (e.g., promote_target with no
+    /// next target set, not-ready readiness gate, invalid mapping).
+    InvalidState(String),
+    /// Backend storage (MetaStore CAS, etcd transaction) failed.
+    StorageError(String),
+}
+
+impl std::fmt::Display for ShardStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TableNotFound(t) => write!(f, "table not found: {t}"),
+            Self::InvalidState(m) => write!(f, "invalid state: {m}"),
+            Self::StorageError(m) => write!(f, "storage error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for ShardStateError {}
+
 /// Trait for shard state backends.
 #[async_trait::async_trait]
 pub trait ShardState: Send + Sync + 'static {
@@ -39,11 +67,11 @@ pub trait ShardState: Send + Sync + 'static {
     async fn get_current_target(&self, table_name: &str) -> Option<ShardMapping>;
 
     /// Set the next target (desired state after rebalancing).
-    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), String>;
+    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), ShardStateError>;
 
     /// Promote NextTarget → CurrentTarget atomically.
     /// Only succeeds if all shards in NextTarget are confirmed loaded by their assigned executors.
-    async fn promote_target(&self, table_name: &str) -> Result<(), String>;
+    async fn promote_target(&self, table_name: &str) -> Result<(), ShardStateError>;
 
     /// Report that an executor has finished loading specific shards.
     /// Called by health check or executor heartbeat.
@@ -246,23 +274,36 @@ impl ShardState for StaticShardState {
         targets.get(table_name).map(|s| s.current.clone())
     }
 
-    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), String> {
+    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), ShardStateError> {
         let mut targets = self.targets.write().await;
         if let Some(state) = targets.get_mut(table_name) {
             state.next = Some(mapping);
             Ok(())
         } else {
-            Err(format!("Table not found: {}", table_name))
+            Err(ShardStateError::TableNotFound(table_name.to_string()))
         }
     }
 
-    async fn promote_target(&self, table_name: &str) -> Result<(), String> {
+    async fn promote_target(&self, table_name: &str) -> Result<(), ShardStateError> {
+        // Existence check first so callers get TableNotFound instead of
+        // a generic "not ready" error for a table that was never registered.
+        {
+            let targets = self.targets.read().await;
+            if !targets.contains_key(table_name) {
+                return Err(ShardStateError::TableNotFound(table_name.to_string()));
+            }
+        }
+
         // Readiness gate: check if all shards are loaded before promoting
         if !self.is_next_target_ready(table_name).await {
-            return Err("NextTarget not ready: not all shards confirmed loaded".to_string());
+            return Err(ShardStateError::InvalidState(
+                "NextTarget not ready: not all shards confirmed loaded".to_string()
+            ));
         }
 
         let mut targets = self.targets.write().await;
+        // SAFETY: existence was checked above; a concurrent remove is
+        // still possible, so we match rather than unwrap.
         if let Some(state) = targets.get_mut(table_name) {
             if let Some(next) = state.next.take() {
                 info!("Promote: table={} v{} → v{}", table_name, state.version, state.version + 1);
@@ -270,10 +311,10 @@ impl ShardState for StaticShardState {
                 state.version += 1;
                 Ok(())
             } else {
-                Err("No next target to promote".to_string())
+                Err(ShardStateError::InvalidState("No next target to promote".to_string()))
             }
         } else {
-            Err(format!("Table not found: {}", table_name))
+            Err(ShardStateError::TableNotFound(table_name.to_string()))
         }
     }
 
@@ -578,14 +619,15 @@ pub mod etcd_state {
             cache.get(table_name).map(|s| s.current.clone())
         }
 
-        async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), String> {
+        async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), ShardStateError> {
             let key = format!("{}/targets/next/{}", self.prefix, table_name);
-            let value = serde_json::to_vec(&mapping).map_err(|e| format!("serialize: {e}"))?;
+            let value = serde_json::to_vec(&mapping)
+                .map_err(|e| ShardStateError::StorageError(format!("serialize: {e}")))?;
 
             let mut client = self.rw_client.lock().await;
             client.put(key.as_bytes(), value, None)
                 .await
-                .map_err(|e| format!("etcd put next: {e}"))?;
+                .map_err(|e| ShardStateError::StorageError(format!("etcd put next: {e}")))?;
 
             let mut cache = self.cache.write().await;
             let entry = cache.entry(table_name.to_string()).or_insert(TargetState {
@@ -597,19 +639,22 @@ pub mod etcd_state {
             Ok(())
         }
 
-        async fn promote_target(&self, table_name: &str) -> Result<(), String> {
+        async fn promote_target(&self, table_name: &str) -> Result<(), ShardStateError> {
             // Read next, write to current, delete next — atomically via etcd txn
             let mut cache = self.cache.write().await;
-            let state = cache.get_mut(table_name).ok_or("Table not found")?;
-            let next = state.next.take().ok_or("No next target")?;
+            let state = cache.get_mut(table_name)
+                .ok_or_else(|| ShardStateError::TableNotFound(table_name.to_string()))?;
+            let next = state.next.take()
+                .ok_or_else(|| ShardStateError::InvalidState("No next target".to_string()))?;
 
             let key = format!("{}/targets/current/{}", self.prefix, table_name);
-            let value = serde_json::to_vec(&next).map_err(|e| format!("serialize: {e}"))?;
+            let value = serde_json::to_vec(&next)
+                .map_err(|e| ShardStateError::StorageError(format!("serialize: {e}")))?;
 
             let mut client = self.rw_client.lock().await;
             client.put(key.as_bytes(), value, None)
                 .await
-                .map_err(|e| format!("etcd put current: {e}"))?;
+                .map_err(|e| ShardStateError::StorageError(format!("etcd put current: {e}")))?;
 
             // Delete next key
             let next_key = format!("{}/targets/next/{}", self.prefix, table_name);
@@ -773,8 +818,18 @@ mod tests {
 
         // Promote should fail — no readiness reported yet
         let result = state.promote_target("t1").await;
-        assert!(result.is_err(), "Should fail without readiness");
-        assert!(result.unwrap_err().contains("not ready"));
+        assert!(
+            matches!(&result, Err(ShardStateError::InvalidState(m)) if m.contains("not ready")),
+            "Should fail without readiness, got: {result:?}"
+        );
+
+        // H5: also confirm typed variants are distinguishable for a
+        // different error class (TableNotFound).
+        let missing = state.promote_target("never_registered").await;
+        assert!(
+            matches!(&missing, Err(ShardStateError::TableNotFound(t)) if t == "never_registered"),
+            "unknown table must produce TableNotFound, got: {missing:?}"
+        );
 
         // Report partial readiness (only e1 loaded s0)
         state.report_loaded("e1", vec!["s0".into(), "s1".into()]).await;

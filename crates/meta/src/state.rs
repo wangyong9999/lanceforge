@@ -49,10 +49,13 @@ impl MetaShardState {
         }
     }
 
-    async fn put_target(&self, table_name: &str, target: &TargetState) -> Result<(), String> {
+    async fn put_target(&self, table_name: &str, target: &TargetState)
+        -> Result<(), lance_distributed_common::shard_state::ShardStateError>
+    {
+        use lance_distributed_common::shard_state::ShardStateError;
         let key = self.table_key(table_name);
         let value = serde_json::to_string(target)
-            .map_err(|e| format!("serialize: {e}"))?;
+            .map_err(|e| ShardStateError::StorageError(format!("serialize: {e}")))?;
 
         // Get current version for CAS
         let current_version = self.store.get(&key).await
@@ -62,7 +65,7 @@ impl MetaShardState {
             .unwrap_or(0);
 
         self.store.put(&key, &value, current_version).await
-            .map_err(|e| format!("put: {e}"))?;
+            .map_err(|e| ShardStateError::StorageError(format!("put: {e}")))?;
         Ok(())
     }
 }
@@ -73,7 +76,9 @@ impl ShardState for MetaShardState {
         self.get_target(table_name).await.map(|t| t.current)
     }
 
-    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping) -> Result<(), String> {
+    async fn set_next_target(&self, table_name: &str, mapping: ShardMapping)
+        -> Result<(), lance_distributed_common::shard_state::ShardStateError>
+    {
         let mut target = self.get_target(table_name).await.unwrap_or(TargetState {
             current: HashMap::new(),
             next: None,
@@ -83,9 +88,12 @@ impl ShardState for MetaShardState {
         self.put_target(table_name, &target).await
     }
 
-    async fn promote_target(&self, table_name: &str) -> Result<(), String> {
+    async fn promote_target(&self, table_name: &str)
+        -> Result<(), lance_distributed_common::shard_state::ShardStateError>
+    {
+        use lance_distributed_common::shard_state::ShardStateError;
         let mut target = self.get_target(table_name).await
-            .ok_or_else(|| format!("table not found: {table_name}"))?;
+            .ok_or_else(|| ShardStateError::TableNotFound(table_name.to_string()))?;
         if let Some(next) = target.next.take() {
             target.current = next;
             target.version += 1;
@@ -334,11 +342,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_promote_missing_table_errors() {
+        use lance_distributed_common::shard_state::ShardStateError;
         let state = test_state().await;
         let err = state.promote_target("no_such_table").await;
-        assert!(err.is_err(), "promoting unknown table must fail");
-        assert!(err.unwrap_err().contains("not found"),
-            "error should mention 'not found' for operator diagnostics");
+        assert!(
+            matches!(err, Err(ShardStateError::TableNotFound(ref t)) if t == "no_such_table"),
+            "promoting unknown table must return TableNotFound(\"no_such_table\"), got: {err:?}"
+        );
     }
 
     #[tokio::test]
