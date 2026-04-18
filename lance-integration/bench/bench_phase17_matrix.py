@@ -86,6 +86,21 @@ SMOKE_MATRIX = {
     'nprobes':     [10],
 }
 
+# H12: large-k IPC-cost sweep. Holds everything else constant and
+# steps k from 10 to 10000 (the server-default max_k) so the IPC +
+# coordinator-side pagination overhead shows up as a distinct curve.
+# Expected shape: monotonic decrease — each multiplication of k by
+# 10 roughly triples per-query P99 once the IPC payload exceeds
+# ~100 KB per shard. Run with `--matrix kk` (see MATRIX_PRESETS).
+LARGE_K_MATRIX = {
+    'scale':       [100_000],
+    'dim':         [128],
+    'shards':      [2],
+    'concurrency': [10],
+    'k':           [10, 100, 1000, 10_000],
+    'nprobes':     [10],
+}
+
 # Per-config measurement parameters
 WARMUP_QUERIES   = 20
 MEASURE_QUERIES  = 200    # per thread (default)
@@ -447,6 +462,9 @@ def main():
     ap.add_argument('--mid', action='store_true', help='Mid matrix: 100K × shards 1/2/4 × conc 1/10/50')
     ap.add_argument('--large', action='store_true', help='Large matrix: 1M × 128d × shards 1/2/4 × conc 10/50')
     ap.add_argument('--nprobes-sweep', action='store_true', help='nprobes recall sweep at 1M')
+    ap.add_argument('--large-k', action='store_true',
+                    help='H12: k-sweep at 100K × 128d × shards=2 × conc=10 '
+                         '(k ∈ {10, 100, 1000, 10000}); reveals IPC/pagination cliff')
     ap.add_argument('--scale', type=int, help='Override: single scale only')
     args = ap.parse_args()
 
@@ -454,6 +472,7 @@ def main():
     elif args.mid: matrix = MID_MATRIX
     elif args.large: matrix = LARGE_MATRIX
     elif args.nprobes_sweep: matrix = NPROBES_MATRIX
+    elif args.large_k: matrix = LARGE_K_MATRIX
     else: matrix = FULL_MATRIX
     if args.scale:
         matrix['scale'] = [args.scale]

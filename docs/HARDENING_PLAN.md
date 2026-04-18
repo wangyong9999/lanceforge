@@ -105,6 +105,7 @@
 | **H21** | Graceful shutdown drain — SIGTERM coord 有 in-flight 查询时必须等完或快速 fail 不 hang | 2h |
 | **H22** | Bench PR gate — smoke mixed bench（短窗口）进 CI PR flow，回归 >15% block merge | 2h |
 | **H23** | 测试路径去 /tmp 共享，用 tempfile::tempdir — 消除 meta 并行 flake | 2h |
+| **H24** | k=10000 查询 60% 错误率调查（H12 副产品）— 响应大小 / timeout / merge 边界 | 3h |
 
 ## 五、执行顺序
 
