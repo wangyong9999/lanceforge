@@ -9,7 +9,6 @@ use lance_distributed_coordinator::ha::HaConfig;
 use lance_distributed_coordinator::service::CoordinatorService;
 use lance_distributed_proto::lance_scheduler_service_server::LanceSchedulerServiceServer;
 use log::{info, warn};
-use tokio::signal;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
@@ -268,17 +267,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server = server.tls_config(tls_config)?;
     }
 
-    server
-        .add_service(svc)
-        .serve_with_shutdown(addr, async {
-            signal::ctrl_c().await.ok();
+    // Graceful shutdown (H21). Listen for both SIGINT (Ctrl+C, local dev)
+    // and SIGTERM (K8s pod termination). Fire bg_shutdown as soon as the
+    // signal arrives so background tasks (REST, auth reload, orphan GC,
+    // health-check loop) can begin draining *in parallel* with the gRPC
+    // in-flight drain — otherwise they hog the tokio runtime while the
+    // gRPC server is waiting on them.
+    //
+    // Additionally, bound the total shutdown window at
+    // `2 × query_timeout + 5s` so a stuck in-flight RPC can't trap the
+    // pod longer than K8s's terminationGracePeriodSeconds budget. The
+    // per-query `query_timeout` inside scatter_gather ensures no single
+    // RPC takes longer than that anyway; this is a seatbelt.
+    let bg_shutdown_for_signal = bg_shutdown.clone();
+    let query_timeout = Duration::from_secs(server_cfg.query_timeout_secs);
+    let max_shutdown = query_timeout.saturating_mul(2).saturating_add(Duration::from_secs(5));
+    let shutdown_signal = async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received — draining in-flight requests..."),
+                _ = sigterm.recv() => info!("SIGTERM received — draining in-flight requests..."),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
             info!("Shutdown signal received — draining in-flight requests...");
-        })
-        .await?;
+        }
+        // Fire bg_shutdown the moment we know we're shutting down so
+        // background tasks start exiting in parallel with the gRPC drain.
+        bg_shutdown_for_signal.notify_waiters();
+    };
 
-    // Stop all background tasks (health check loop, reconciliation, orphan GC)
+    let serve_fut = server.add_service(svc).serve_with_shutdown(addr, shutdown_signal);
+    match tokio::time::timeout(max_shutdown, serve_fut).await {
+        Ok(result) => result?,
+        Err(_) => {
+            warn!(
+                "Graceful shutdown exceeded {}s budget; forcing exit. \
+                 In-flight queries may have been abandoned — check metrics / logs.",
+                max_shutdown.as_secs()
+            );
+        }
+    }
+
+    // Stop remaining handles. bg_shutdown was fired above on signal, but
+    // re-notify to cover the rare case where serve completed without ever
+    // firing the signal path (e.g. test harness using a mock future).
     shutdown_handle.shutdown();
     bg_shutdown.notify_waiters();
-    info!("Server stopped — all background tasks signalled, in-flight requests completed");
+    info!("Server stopped — all background tasks signalled");
     Ok(())
 }
