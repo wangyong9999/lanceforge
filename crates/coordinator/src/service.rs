@@ -2282,6 +2282,76 @@ mod tests {
         assert_eq!(parts.len(), 3);
     }
 
+    // ── H11: DDL boundary cases ──
+
+    #[test]
+    fn test_split_batch_zero_rows_n_one_preserves_schema() {
+        // n<=1 short-circuit: caller sees a single empty batch that still
+        // carries the schema. This path is what CreateTable hits when
+        // num_rows=0 and n_shards=1 (< 1000 rows heuristic).
+        let batch = make_i32_batch(vec![]);
+        let parts = split_batch(&batch, 1);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].num_rows(), 0);
+        assert_eq!(parts[0].schema().fields().len(), batch.schema().fields().len());
+    }
+
+    #[test]
+    fn test_split_batch_zero_rows_n_gt_one_returns_empty() {
+        // Asymmetric: with n > 1 and zero rows, every partition would be
+        // empty and the filter drops them all. Callers must guard against
+        // an empty Vec, not assume `n` partitions are returned.
+        let batch = make_i32_batch(vec![]);
+        let parts = split_batch(&batch, 4);
+        assert!(parts.is_empty(),
+                "0-row batch with n>1 returns Vec::new() after the empty-batch filter");
+    }
+
+    #[test]
+    fn test_split_batch_single_row_multi_shards() {
+        // 1 row / 4 shards → only the first partition carries the row;
+        // the other 3 are dropped by the filter. Confirms no panic on
+        // `chunk_size=1` + `n=4`.
+        let batch = make_i32_batch(vec![42]);
+        let parts = split_batch(&batch, 4);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_partition_batch_by_hash_zero_rows() {
+        // Hash-partition of an empty batch with n=3 should return an empty
+        // Vec (callers rely on this to short-circuit AddRows on 0 rows
+        // without creating empty shards).
+        let batch = make_i32_batch(vec![]);
+        let out = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        assert!(out.iter().all(|b| b.num_rows() == 0),
+                "each partition is empty or dropped");
+    }
+
+    #[test]
+    fn test_split_batch_exactly_1000_rows_boundary() {
+        // CreateTable's n_shards heuristic is `if num_rows < 1000 { 1 }`.
+        // Test the boundary: 1000 rows (not <1000) would get the workers-
+        // count path. split_batch directly with n=3: even 334+333+333.
+        let rows: Vec<i32> = (0..1000).collect();
+        let batch = make_i32_batch(rows);
+        let parts = split_batch(&batch, 3);
+        assert_eq!(parts.len(), 3);
+        let total: usize = parts.iter().map(|p| p.num_rows()).sum();
+        assert_eq!(total, 1000);
+    }
+
+    #[test]
+    fn test_split_batch_n_zero_treated_as_one() {
+        // Defensive: n=0 must not divide-by-zero. Current code short-
+        // circuits at n<=1 → single-batch clone.
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let parts = split_batch(&batch, 0);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].num_rows(), 3);
+    }
+
     #[test]
     fn test_partition_batch_by_hash_single_shard() {
         let batch = make_i32_batch(vec![1, 2, 3]);
