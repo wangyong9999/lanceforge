@@ -134,18 +134,24 @@
   **影响**：CI 偶发 flake；debug 成本上升。
   **修法**：每个测试用 `tempfile::tempdir()` 或 pid+test_name 唯一化路径；审计所有 `/tmp/` 字面量。
 
-### 波次 3 — 一致性与边界（10h）
+### 波次 3 — 一致性与边界（10h）— ✅ correctness 部分完成 2026-04-18
 结构性改动，需要跨 crate 协调。
 
 **2026-04-18 收盘重排**（详见 `SESSION_HANDOFF.md` §2.2）：
 把 H5（内部 API 破坏性改动）**延后到 Wave 3 末尾**，先处理 correctness 类。
-实际执行顺序建议：
-10. H10 边界值测试（2h）← 下个 session 第一个
-11. H11 DDL 边界覆盖（2h）
-12. H21 Graceful shutdown drain（2h，从 Wave 6 提前）
-13. H4 RPC cancellation（3h）
-14. H3 AddRows 幂等（4h，从 Wave 4 提前）
-15. H5 ShardState typed error（3h，破坏性改动，**最后**做）
+
+10. H10 边界值测试（2h）— ✅ `2e890cc`（dimension vs query_vector 一致性，+7 tests）
+11. H11 DDL 边界覆盖（2h）— ✅ `5e2defc`（split_batch 0-row/1-row/boundary，+6 tests）
+12. H21 Graceful shutdown drain（2h）— ✅ `fa13726`（SIGTERM + drain timeout + parallel bg cleanup）
+13. H4 RPC cancellation（3h）— ✅ `d6d8b51`（3 RPCs → JoinSet；create_table 保留 + 文档化）
+14. H13 Per-shard 延迟日志（1h，P2 提前）— ✅ `fed72e6`（straggler detect at 2×median）
+15. H18 Proto 版本协商（1h，P2 提前）— ✅ `e33f413`（ServerVersion parser + at_least, +11 tests）
+16. H3 AddRows 幂等（4h，从 Wave 4 提前） — ⏳ 下次 session
+17. H5 ShardState typed error（3h，破坏性改动）— ⏳ 下次 session
+
+**Checkpoint 数字**：workspace lib 测试 269 → **280**（+11 from this session）。
+
+本 session 完成 H10/H11/H21/H4/H13/H18 共 6 项；叠加上 session 的 Wave 1+2+H23，累计 16/23 硬化项。剩余 7 项 ~17h。
 
 ### 波次 4 — 幂等与 CI（8h）
 长线质量与外部门禁。
