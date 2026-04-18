@@ -1,3 +1,37 @@
+# LanceForge Release Notes
+
+## 0.2.0-pre.1 — 2026-04-18
+
+Opens the 0.2 / SaaS-first cycle. Backward compatible with 0.1.0 on
+wire and on disk; pins the plumbing every later step needs.
+
+**Highlights**:
+- `deployment_profile` config field with startup-time guards
+  (`saas` rejects local `metadata_path`; `self_hosted` requires
+  explicit MetaStore).
+- MetaStore JSON snapshot now version-stamped (`schema_version=1`);
+  reads auto-upgrade from pre-0.2 snapshots, forward-version
+  snapshots rejected.
+- `HealthCheckResponse` advertises `server_version`.
+- Connection-pool flake fixed: stale tonic Channel is now replaced
+  whenever a worker transitions back from unhealthy.
+- Ballista logically isolated from the default `cargo build` /
+  `test` / `clippy` path via `default-members`; still buildable with
+  explicit `--workspace`.
+
+**Not yet**: the remaining 0.2 Blockers (B2 mixed-RW cache tiering,
+B4 critical-path coverage matrix, B5 chaos framework, B6 24h soak)
+are tracked in `docs/ROADMAP_0.2.md`. This is a **pre-alpha** — it's
+safe to adopt on 0.1 workloads that already run here, not yet
+recommended for net-new production deployments.
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md). Forward plan:
+[`docs/ROADMAP_0.2.md`](./docs/ROADMAP_0.2.md). Honest limitation
+inventory: [`docs/LIMITATIONS.md`](./docs/LIMITATIONS.md) +
+[`docs/STATELESS_INVARIANTS.md`](./docs/STATELESS_INVARIANTS.md).
+
+---
+
 # LanceForge 1.0-rc Release Notes
 
 **Release date**: 2026-04-15

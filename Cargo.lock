@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "lance-distributed-common"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "lance-distributed-coordinator"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "lance-distributed-meta"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "async-trait",
  "fs4",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "lance-distributed-proto"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "prost",
  "tonic",
@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "lance-distributed-worker"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "arrow",
  "datafusion",
@@ -4623,7 +4623,7 @@ dependencies = [
 
 [[package]]
 name = "lanceforge"
-version = "0.1.0"
+version = "0.2.0-pre.1"
 dependencies = [
  "arrow",
  "async-trait",
