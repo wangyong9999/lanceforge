@@ -2084,6 +2084,58 @@ mod tests {
         assert_eq!(fetch, 60, "with oversample=2, fetch is (offset+k)*2");
     }
 
+    // ── H19: explicit boundary coverage around max_k ──
+
+    #[test]
+    fn test_validate_offset_k_exact_max_k() {
+        // offset + k == max_k must succeed (upper bound is inclusive).
+        let (total, _) = validate_offset_k(50, 50, 100, 1).unwrap();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_validate_offset_k_one_past_max_k() {
+        // offset + k == max_k + 1 must fail.
+        assert!(validate_offset_k(50, 51, 100, 1).is_err());
+        assert!(validate_offset_k(51, 50, 100, 1).is_err());
+    }
+
+    #[test]
+    fn test_validate_offset_k_zero_offset_full_k() {
+        // offset=0, k=max_k is the "first page to the limit" scenario.
+        let (total, _) = validate_offset_k(0, 100, 100, 1).unwrap();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_validate_offset_k_max_offset_k_one() {
+        // offset = max_k - 1, k = 1 — last single row at the limit.
+        let (total, _) = validate_offset_k(99, 1, 100, 1).unwrap();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_validate_offset_k_oversample_at_boundary() {
+        // At the exact max_k boundary with oversample > 1, the fetch size
+        // grows but the total (offset + k) is what's capped.
+        let (total, fetch) = validate_offset_k(40, 60, 100, 3).unwrap();
+        assert_eq!(total, 100);
+        assert_eq!(fetch, 300, "oversample should multiply fetch, not cap");
+    }
+
+    #[test]
+    fn test_validate_offset_k_k_only_at_max() {
+        // No offset pagination, k = max_k is legal.
+        let (total, _) = validate_offset_k(0, 10_000, 10_000, 1).unwrap();
+        assert_eq!(total, 10_000);
+    }
+
+    #[test]
+    fn test_validate_offset_k_offset_at_max_without_k_fails() {
+        // offset = max_k with k = 1 would need row max_k+1 — reject.
+        assert!(validate_offset_k(100, 1, 100, 1).is_err());
+    }
+
     #[test]
     fn test_split_batch_n_le_one() {
         let batch = make_i32_batch(vec![1, 2, 3, 4, 5]);
