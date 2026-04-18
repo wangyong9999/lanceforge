@@ -225,10 +225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start REST/metrics HTTP server on port+1
+    // Start REST/metrics HTTP server on port+1. Shares bg_shutdown so a
+    // SIGTERM to the coordinator drains REST in lockstep with gRPC instead
+    // of leaving a stale `/healthz` answering 200 OK after the rest of
+    // the stack has already exited (H15 hardening).
     let rest_port = port + 1;
+    let rest_shutdown = bg_shutdown.clone();
     tokio::spawn(async move {
-        lance_distributed_coordinator::rest::start_rest_server(metrics, rest_port, port).await;
+        lance_distributed_coordinator::rest::start_rest_server(
+            metrics, rest_port, port, rest_shutdown,
+        ).await;
     });
 
     // Raise gRPC message limits: default tonic caps are 4 MiB, which is hit

@@ -13,9 +13,19 @@ use tokio::net::TcpListener;
 use lance_distributed_common::metrics::Metrics;
 use lance_distributed_proto::generated::lance_distributed as pb;
 
-/// Start the REST HTTP server.
+/// Start the REST HTTP server. Runs until `shutdown` is notified.
+///
 /// `grpc_port` is the coordinator's gRPC port for loopback search proxying.
-pub async fn start_rest_server(metrics: Arc<Metrics>, port: u16, grpc_port: u16) {
+/// `shutdown` lets the coordinator drain this server in lockstep with the
+/// gRPC server on SIGTERM — without it, the REST listener would outlive
+/// the gRPC server and keep reporting "healthy" after the rest of the
+/// stack has already exited. (H15 hardening.)
+pub async fn start_rest_server(
+    metrics: Arc<Metrics>,
+    port: u16,
+    grpc_port: u16,
+    shutdown: Arc<tokio::sync::Notify>,
+) {
     let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -34,7 +44,21 @@ pub async fn start_rest_server(metrics: Arc<Metrics>, port: u16, grpc_port: u16)
     info!("  POST /v1/tables       — List tables");
 
     loop {
-        if let Ok((mut stream, _)) = listener.accept().await {
+        let accept = listener.accept();
+        let shutdown_wait = shutdown.notified();
+        let (mut stream, _) = tokio::select! {
+            result = accept => match result {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            },
+            _ = shutdown_wait => {
+                info!("REST server stopping (shutdown)");
+                return;
+            }
+        };
+        // The original code had `if let Ok((mut stream, _)) = ...`; keep the
+        // rest of the block identical by re-binding here.
+        {
             let metrics = metrics.clone();
             let gport = grpc_port;
             tokio::spawn(async move {
