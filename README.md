@@ -154,8 +154,12 @@ Each Worker uses the **lancedb Table API** directly -- vector search, FTS, hybri
 | **Health Check** | `/healthz` for load balancers and K8s probes |
 | **Backpressure** | Semaphore-based admission control (configurable max concurrent) |
 | **Failover** | Primary/secondary executor routing per shard |
+| **Read/Write Split** *(0.2)* | Soft role preference per worker — isolates query traffic from write load (see `docs/LIMITATIONS.md` §11 for the recommended config) |
 | **Auto-Shard** | CreateTable automatically distributes data across all workers |
 | **Metadata Persistence** | Shard state + URIs survive coordinator restart (file / S3) |
+| **Runtime Key Rotation** *(0.2)* | API key registry lives in MetaStore and hot-reloads every 60 s — no coordinator restart required |
+| **SaaS Deployment Guard** *(0.2)* | `deployment_profile: saas` rejects any local-disk MetaStore at startup so pod replacement stays stateless |
+| **Schema Versioning** *(0.2)* | MetaStore snapshots carry `schema_version`; older versions auto-upgrade on write, future versions fail closed |
 | **Structured Logging** | JSON (production) / pretty (dev) via tracing |
 | **Graceful Shutdown** | All background tasks cooperatively stop on SIGTERM |
 

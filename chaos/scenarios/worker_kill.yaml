@@ -1,0 +1,29 @@
+# Chaos scenario: single-worker SIGKILL survival.
+#
+# Invariant being tested: with replica_factor=2, killing one worker
+# during active query traffic must not produce permanent query errors.
+# Recovery time is expected under 10s (health check tick + connection
+# pool warm-up).
+
+name: worker_kill
+description: |
+  Kill worker w1 mid-flight. Verify queries to the surviving cluster
+  succeed within the invariant window.
+
+cluster:
+  workers: 2
+  replica_factor: 2
+
+fault:
+  type: sigkill
+  target: w1
+  at_second: 5     # kill 5s into the 10s test window
+
+invariant:
+  # Verify during the fault window that at least 90% of search attempts
+  # succeed (the remaining 10% budget covers the brief UNAVAILABLE
+  # window before the connection pool reroutes to the surviving worker).
+  min_query_success_rate: 0.90
+  max_recovery_seconds: 10
+  queries_per_second: 20
+  duration_seconds: 10

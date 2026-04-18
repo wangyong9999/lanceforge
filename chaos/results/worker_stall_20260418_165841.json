@@ -1,0 +1,45 @@
+{
+  "scenario": "worker_stall",
+  "iterations": 3,
+  "passed": 3,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "results": [
+    {
+      "iteration": 1,
+      "timestamp": "2026-04-18T16:58:04.720922",
+      "attempts": 142,
+      "successes": 141,
+      "failures": 1,
+      "success_rate": 0.9929577464788732,
+      "min_required": 0.85,
+      "passed": true,
+      "p50_ms": 3.460015999735333,
+      "p99_ms": 20.3032327990513
+    },
+    {
+      "iteration": 2,
+      "timestamp": "2026-04-18T16:58:22.849489",
+      "attempts": 142,
+      "successes": 141,
+      "failures": 1,
+      "success_rate": 0.9929577464788732,
+      "min_required": 0.85,
+      "passed": true,
+      "p50_ms": 3.392194994376041,
+      "p99_ms": 23.27991080237551
+    },
+    {
+      "iteration": 3,
+      "timestamp": "2026-04-18T16:58:40.958386",
+      "attempts": 142,
+      "successes": 141,
+      "failures": 1,
+      "success_rate": 0.9929577464788732,
+      "min_required": 0.85,
+      "passed": true,
+      "p50_ms": 3.544325998518616,
+      "p99_ms": 21.08598960912785
+    }
+  ]
+}

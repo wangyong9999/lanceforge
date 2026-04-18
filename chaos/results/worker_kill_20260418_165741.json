@@ -1,0 +1,45 @@
+{
+  "scenario": "worker_kill",
+  "iterations": 3,
+  "passed": 3,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "results": [
+    {
+      "iteration": 1,
+      "timestamp": "2026-04-18T16:57:04.705184",
+      "attempts": 104,
+      "successes": 104,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.6955169998691417,
+      "p99_ms": 2003.8052692840574
+    },
+    {
+      "iteration": 2,
+      "timestamp": "2026-04-18T16:57:22.789708",
+      "attempts": 109,
+      "successes": 109,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 4.3308129970682785,
+      "p99_ms": 2005.281795670744
+    },
+    {
+      "iteration": 3,
+      "timestamp": "2026-04-18T16:57:40.413670",
+      "attempts": 112,
+      "successes": 112,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.5055230036959983,
+      "p99_ms": 2002.1308291832975
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+# Chaos scenario: single-worker SIGSTOP / SIGCONT freeze.
+#
+# Invariant being tested: if a worker becomes unresponsive (not dead
+# — just stuck), queries should fail over to the replica quickly
+# without hanging the coordinator. SIGSTOP simulates a frozen process
+# without triggering the TCP reset that SIGKILL does.
+
+name: worker_stall
+description: |
+  SIGSTOP worker w1 for 5 seconds, then SIGCONT. Verify queries keep
+  succeeding against the surviving replica while w1 is frozen.
+
+cluster:
+  workers: 2
+  replica_factor: 2
+
+fault:
+  type: sigstop
+  target: w1
+  at_second: 3
+  resume_after_seconds: 5
+
+invariant:
+  min_query_success_rate: 0.85
+  max_recovery_seconds: 15
+  queries_per_second: 20
+  duration_seconds: 12

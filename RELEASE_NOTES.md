@@ -1,5 +1,75 @@
 # LanceForge Release Notes
 
+## 0.2.0-alpha.1 — 2026-04-18
+
+**First alpha on the SaaS-first track.** Meets every gate in
+`docs/ROADMAP_0.2.md` §3.3 (alpha exit criteria) at minimum-viable
+depth. Backward compatible with 0.1.0 on wire and on disk.
+
+### Highlights beyond 0.2.0-pre.1
+
+- **B1.2.3 runtime API-key rotation** (closes `STATELESS_INVARIANTS`
+  Gap A). When a MetaStore is configured, the coordinator bootstraps
+  config keys into `auth/keys/` and a 60 s background task swaps the
+  live registry atomically. Adding or revoking a key no longer
+  requires a rolling restart.
+- **B2.2 read/write role routing**. New `ExecutorRole::{Either,
+  ReadPrimary, WritePrimary}` config knob; coordinator picks the
+  best-matching worker per request. Combined with `read_consistency_
+  secs=60` and `replica_factor=2`, the 10 QPS writes mixed workload
+  recovers to **82.5% of read-only baseline** (up from 38% on
+  0.1.0). Recommended production config is in `docs/LIMITATIONS.md`
+  §11.
+- **B3.1 / B3.2 version advertising** (already in pre.1): clients can
+  discover server version via `HealthCheckResponse.server_version`;
+  MetaStore JSON snapshots carry `schema_version = 1` with a
+  forward-version reject gate and an auto-upgrade-on-write path for
+  pre-0.2 snapshots.
+- **B3.5 compatibility policy** — `docs/COMPAT_POLICY.md` formalises
+  the three-dimensional contract (wire / persistence / config),
+  deprecation windows, and break procedure.
+- **B4-min coverage matrix** — `docs/COVERAGE_MATRIX.md` measures
+  branch coverage on the four critical modules (scatter_gather /
+  merge / metastore / connection_pool) and pins baselines that only
+  ratchet up.
+- **B5-min chaos framework** — `chaos/runner.py` + two scenarios
+  (`worker_kill`, `worker_stall`), 10 iterations each, 100% pass
+  rate required for alpha. Result archives in `chaos/results/`.
+- **B6-min soak harness** — `soak/run.py` runs a light mixed
+  workload and samples RSS / open-fd drift per minute. The alpha
+  gate is 2 h with < 3 % drift; a 15-minute smoke run ships with
+  this release.
+
+### Not yet in alpha
+
+- B2.2 does not yet close the 50 QPS writes scenario (still -81 %
+  of baseline). That needs fragment-level cache invalidation and
+  is a 0.2-beta item.
+- B4's full ≥ 85 % branch coverage on the four modules — we ratchet
+  per-release, the current numbers are the honest baseline.
+- B5 full chaos fault library (net partition / OOM / S3 throttle /
+  clock skew) and the nightly 100-iter CI job — beta.
+- B6 nightly 24 h soak CI job — beta. The 2 h run is a release-
+  time human-triggered gate for alpha.
+- B3.3 `lance-admin migrate` CLI — deferred until we have a real
+  schema migration to dispatch (probably 0.3).
+
+### Upgrade notes (from 0.2.0-pre.1 or 0.1.0)
+
+- Adding `deployment_profile: saas` to production configs will
+  start rejecting local `metadata_path` values at boot. If your
+  cluster is on `file://` MetaStore today, either keep
+  `deployment_profile: self_hosted` (or unset — defaults to `dev`)
+  or migrate the JSON to S3 first.
+- Existing YAML with no `deployment_profile` continues to work.
+- Legacy `api_keys` (non-RBAC format) still default to `Admin` in
+  0.2.x. The flip to `Read` is scheduled for 0.3.0; see
+  `COMPAT_POLICY.md` §9.
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## 0.2.0-pre.1 — 2026-04-18
 
 Opens the 0.2 / SaaS-first cycle. Backward compatible with 0.1.0 on

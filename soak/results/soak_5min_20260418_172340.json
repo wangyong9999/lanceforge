@@ -1,0 +1,103 @@
+{
+  "duration_minutes": 5,
+  "total_samples": 6,
+  "reads_ok": 16020,
+  "reads_err": 0,
+  "writes_ok": 0,
+  "writes_err": 0,
+  "drift_pct": {
+    "coord_rss": 1.4917024053701287,
+    "coord_fd": 0.0,
+    "w0_rss": 2.1646254628311024,
+    "w0_fd": 0.0,
+    "w1_rss": 1.2014061913375884,
+    "w1_fd": 0.0
+  },
+  "samples": [
+    {
+      "at_minute": 0.0,
+      "timestamp": "2026-04-18T17:18:39.557329",
+      "reads_ok": 1435,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 112352,
+      "w0_fd": 13,
+      "w1_rss_kb": 117196,
+      "w1_fd": 13,
+      "coord_rss_kb": 42904,
+      "coord_fd": 14
+    },
+    {
+      "at_minute": 1.0,
+      "timestamp": "2026-04-18T17:19:38.762822",
+      "reads_ok": 4295,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 113120,
+      "w0_fd": 13,
+      "w1_rss_kb": 118092,
+      "w1_fd": 13,
+      "coord_rss_kb": 43160,
+      "coord_fd": 14
+    },
+    {
+      "at_minute": 2.0,
+      "timestamp": "2026-04-18T17:20:37.311237",
+      "reads_ok": 7160,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 113632,
+      "w0_fd": 13,
+      "w1_rss_kb": 118348,
+      "w1_fd": 13,
+      "coord_rss_kb": 43288,
+      "coord_fd": 14
+    },
+    {
+      "at_minute": 3.0,
+      "timestamp": "2026-04-18T17:21:36.112157",
+      "reads_ok": 10025,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 114016,
+      "w0_fd": 13,
+      "w1_rss_kb": 118476,
+      "w1_fd": 13,
+      "coord_rss_kb": 43288,
+      "coord_fd": 14
+    },
+    {
+      "at_minute": 4.0,
+      "timestamp": "2026-04-18T17:22:34.799115",
+      "reads_ok": 12885,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 114400,
+      "w0_fd": 13,
+      "w1_rss_kb": 118604,
+      "w1_fd": 13,
+      "coord_rss_kb": 43544,
+      "coord_fd": 14
+    },
+    {
+      "at_minute": 5.0,
+      "timestamp": "2026-04-18T17:23:34.178161",
+      "reads_ok": 15760,
+      "reads_err": 0,
+      "writes_ok": 0,
+      "writes_err": 0,
+      "w0_rss_kb": 114784,
+      "w0_fd": 13,
+      "w1_rss_kb": 118604,
+      "w1_fd": 13,
+      "coord_rss_kb": 43544,
+      "coord_fd": 14
+    }
+  ],
+  "workload": "read-only"
+}

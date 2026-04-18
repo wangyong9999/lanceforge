@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha.1] - 2026-04-18
+
+First alpha on the SaaS-first track. Closes every alpha gate in
+`docs/ROADMAP_0.2.md` §3.3 at minimum-viable depth. Backward
+compatible with 0.1.0 configs and persistence.
+
+### Added
+- Runtime API-key rotation (B1.2.3). When `metadata_path` is
+  configured the coordinator bootstraps config keys into the
+  MetaStore and reloads the live registry every 60 s. Rotating a
+  key no longer requires a coordinator restart.
+- Read/write role routing (B2.2). New `ExecutorRole` config field
+  (`either` / `read_primary` / `write_primary`); coordinator routes
+  queries toward `ReadPrimary` and writes toward `WritePrimary`
+  with a soft-preference fallback. Recommended high-write config
+  (`replica_factor: 2` + `read_consistency_secs: 60` + role split)
+  recovers mixed-RW read QPS to 82.5 % of the read-only baseline
+  (was 38 % on 0.1.0).
+- Compatibility policy (`docs/COMPAT_POLICY.md`, B3.5). Three-
+  dimensional contract covering wire / persistence / config evolution
+  rules.
+- Branch-coverage baseline on the four critical modules
+  (`docs/COVERAGE_MATRIX.md`, B4-min). Numbers are the honest
+  starting point; future PRs may only ratchet upward.
+- Chaos harness (`chaos/runner.py`, B5-min) with two scenarios:
+  `worker_kill` (SIGKILL during traffic) and `worker_stall`
+  (SIGSTOP for 5 s). Ten iterations each, 100 % pass gate.
+- Soak harness (`soak/run.py`, B6-min). Samples per-process RSS
+  and open-fd count every 60 s; alpha gate is 2 h run with < 3 %
+  drift.
+
+### Changed
+- `ApiKeyInterceptor.keys` moved from `Arc<HashMap>` to
+  `Arc<RwLock<Arc<HashMap>>>` so reloads atomically swap the
+  registry without blocking request handlers.
+- `docs/LIMITATIONS.md` §11 now carries the B2.2 numbers and the
+  recommended production config explicitly.
+
+### Notes for Operators
+- If you've pinned `deployment_profile: saas` in 0.2.0-pre.1, no
+  further action needed — the key hot-reload activates as soon as
+  you restart against the 0.2.0-alpha.1 binary.
+- Legacy `api_keys` (non-RBAC form) still default to `Admin`; flip
+  to `Read` is scheduled for 0.3.0. `COMPAT_POLICY.md` §9 tracks it.
+
 ## [0.2.0-pre.1] - 2026-04-18
 
 **Pre-alpha on the SaaS-first track.** Opens the 0.2 cycle with the
