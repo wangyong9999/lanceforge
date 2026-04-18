@@ -8,3 +8,4 @@ pub mod ipc;
 pub mod metrics;
 pub mod shard_pruning;
 pub mod shard_state;
+pub mod version;
