@@ -145,7 +145,32 @@ async fn scatter_gather_inner(
             continue;
         }
 
-        let idx = READ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % healthy_executors.len();
+        // B2.2: role-aware selection — reads prefer ReadPrimary > Either >
+        // WritePrimary, so a mixed-RW workload can isolate a write-primary
+        // worker and keep query traffic off of it. Falls back to round-
+        // robin when all candidates tie (the 0.1.x default where every
+        // worker is Either).
+        let idx = match pool.pick_by_role(&healthy_executors, /*for_reads=*/ true).await {
+            Some(i) => {
+                // If best role ties across multiple candidates, round-robin
+                // amongst them to preserve load balance. We detect a tie by
+                // checking whether another candidate shares the winner's role.
+                let winner_role = pool.role_of(&healthy_executors[i]).await;
+                let mut tied: Vec<usize> = Vec::new();
+                for (j, wid) in healthy_executors.iter().enumerate() {
+                    if pool.role_of(wid).await == winner_role {
+                        tied.push(j);
+                    }
+                }
+                if tied.len() > 1 {
+                    let rr = READ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % tied.len();
+                    tied[rr]
+                } else {
+                    i
+                }
+            }
+            None => 0,
+        };
         worker_shards.entry(healthy_executors[idx].clone()).or_default().push(shard.clone());
     }
 

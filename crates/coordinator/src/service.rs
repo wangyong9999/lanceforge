@@ -89,6 +89,18 @@ impl CoordinatorService {
         self.meta_state.as_ref().map(|ms| ms.store())
     }
 
+    /// Install per-worker role preferences from the cluster config (B2.2).
+    /// Call once at startup after the service is built and before the
+    /// gRPC server starts serving.
+    pub async fn install_executor_roles(
+        &self,
+        executors: &[lance_distributed_common::config::ExecutorConfig],
+    ) {
+        let map: std::collections::HashMap<String, lance_distributed_common::config::ExecutorRole> =
+            executors.iter().map(|e| (e.id.clone(), e.role)).collect();
+        self.pool.set_roles(map).await;
+    }
+
     /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
     /// Supports both file paths and S3 URIs (s3://bucket/path/metadata.json).
     pub async fn with_meta_state(
@@ -557,15 +569,28 @@ impl LanceSchedulerService for CoordinatorService {
 
         let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % routing.len();
         let (shard_name, primary, secondary) = &routing[idx];
-        // Try primary, fall back to secondary
-        let worker_id = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary
-        } else if let Some(sec) = secondary {
-            if self.pool.get_healthy_client(sec).await.is_ok() { sec }
-            else { return Err(Status::unavailable(format!("No healthy worker for shard {}", shard_name))); }
-        } else {
+
+        // B2.2: write-path role preference. Build the healthy candidate list
+        // (primary + optional secondary) and pick the one most suited to
+        // writes: WritePrimary > Either > ReadPrimary. Defaults behave
+        // exactly like the old primary-first code when every worker is
+        // Either — no behavioural change for 0.1.x configs.
+        let mut candidates: Vec<String> = Vec::new();
+        if self.pool.get_healthy_client(primary).await.is_ok() {
+            candidates.push(primary.clone());
+        }
+        if let Some(sec) = secondary
+            && self.pool.get_healthy_client(sec).await.is_ok()
+        {
+            candidates.push(sec.clone());
+        }
+        if candidates.is_empty() {
             return Err(Status::unavailable(format!("No healthy worker for shard {}", shard_name)));
-        };
+        }
+        let pick = self.pool.pick_by_role(&candidates, /*for_reads=*/ false).await
+            .expect("candidates non-empty above");
+        let worker_id = candidates[pick].clone();
+        let worker_id = &worker_id;
         let mut client = self.pool.get_healthy_client(worker_id).await?;
 
         let local_req = pb::LocalWriteRequest {
@@ -1922,6 +1947,7 @@ mod tests {
                 id: "w0".to_string(),
                 host: "127.0.0.1".to_string(),
                 port: 59999,
+                role: Default::default(),
             }],
             ..Default::default()
         }

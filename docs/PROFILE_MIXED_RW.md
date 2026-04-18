@@ -178,30 +178,59 @@ cache 粒度：**整张表 × 整体 dataset_version**。任意写 → version++
 
 **B2.1 验收**：产出一份 "where the 62% goes" 报告，假设树每个假设标为证实/证伪/待测，给 B2.2 的分层设计方案提供定量依据。
 
-## 七、B2.2 设计方向（基于实验数据更新）
+## 七、B2.2 已落地 + 实验验证
 
-实验更新 H1 排名后，设计方向**重排**：
+### 7.1 实现（commit TBD）
 
-1. **写读物理分离（当前数据下最值钱）** ← 从 #3 升为 #1
-   - 实验表明即使 cache 稳定，写路径本身仍严重阻塞读（-48% @ 10 QPS, -97% @ 50 QPS）
-   - 把"写只打 primary worker，reader 只打 replica worker"做成正式调度策略
-   - 不要求 cache 重写，不动 lancedb
-   - 预期效果：reader 端完全隔离写压力，QPS 接近 read-only 基线
-   - 工程量：~1 周（scheduler 路由逻辑 + 配置 + 文档）
+- `ExecutorConfig.role: ExecutorRole` 枚举：`Either`（默认）/`ReadPrimary`/`WritePrimary`
+- `ConnectionPool::pick_by_role(candidates, for_reads)`：
+  - 读偏好：ReadPrimary > Either > WritePrimary
+  - 写偏好：WritePrimary > Either > ReadPrimary
+  - 单候选 / 全 Either 场景行为保持 0.1.x 原样（向下兼容）
+- `scatter_gather`（读路径）和 `add_rows`（写路径）都调用 `pick_by_role`
+- 6 个 unit 测试 + 向后兼容测试
 
-2. **Cache key 去 version 化（中长期正道）**
-   - IVF 索引重建频率低，即使数据变也不动索引
-   - 配套 delta-search 对增量 fragments，然后合并
-   - 复杂度高，2-3 周工程量
-   - 但它解决的问题 H1 只贡献 25%，ROI 不如 #1
+### 7.2 关键实验：路由 + rc_secs 组合效果
 
-3. **Fragment-level 失效（依赖 lancedb API）**
-   - 风险大，放后面
-   - 需要 lancedb 暴露"写影响哪些 fragments"的信息
+实验配置：100K × 128d × IVF_FLAT-32，10 readers + N QPS writer，30s 持续；w0=WritePrimary，w1=ReadPrimary，rebalance 后每 shard 两个 replica。
 
-**当前判断**：B2.2 先落 #1（读写物理分离路由）；同步给 H2/H6 加 tracing 做根因定位（§6.2）；#2 暂不启动，ROI 不划算。
+| 配置 | read-only baseline | +10 QPS 写 Read QPS | 与 baseline 比 |
+|---|---:|---:|---:|
+| 无 split, rc=3（0.1 基线）| 2345 | 887 | **38%** (-62%) |
+| 无 split, rc=30 | 2136 | 1103 | 52% (-48%) |
+| **split + rc=3** | 2526 | 967 | 38% (-62%) |
+| **split + rc=30** | 2435 | 1834 | **75%** (-25%) |
+| **split + rc=60** | 2440 | **2014** | **82.5%** ✅ (-17.5%) |
 
-**短期 mitigation（docs）**：让用户在 LIMITATIONS §11 的基础上知道可以调 `cache.read_consistency_secs` 拿回部分 QPS（10 QPS 写场景 +25%）。已反映在 LIMITATIONS §11。
+**关键发现**：
+1. **split 单独无效**——因为两个 worker 打开**同一个** `.lance` 目录，w0 的写入通过共享 manifest 依然 invalidate w1 的 cache（H2/H6 确认，共享存储是主因）
+2. **split + 长 rc** 才生效——split 把写压集中在 w0，rc=60 让 w1 最多每 60s 刷一次 manifest，期间 cache 保持稳定
+3. **50 QPS 写场景**：split + rc=60 下仍 -81%，但比基线 -97% 提升 8×。进一步改善需要 fragment-level invalidation（B2 post-alpha 工作）
+
+### 7.3 alpha gate 达成
+
+ROADMAP §3.3 B2.2 要求"10 QPS 写场景 Read QPS ≥ 80% baseline"。**split + rc=60 的配置下 82.5%，超标**。
+
+### 7.4 推荐生产配置
+
+对于**中频写入场景（1-10 QPS）**：
+```yaml
+replica_factor: 2
+executors:
+  - { id: w0, role: write_primary, ... }
+  - { id: w1, role: read_primary, ... }
+cache:
+  read_consistency_secs: 60   # 读端容忍 60s 内的数据延迟
+```
+然后启动时调用 `Rebalance()` 确保每个 shard 复制到两个 worker。
+
+**高频写入场景（> 10 QPS）**：当前 alpha 未能达到 80% 目标（-81%）。建议多副本读负载均衡（replica_factor=3，2 个 ReadPrimary + 1 个 WritePrimary）或推迟到 beta 的 cache-key 去 version 化方案。
+
+### 7.5 post-alpha 工作
+
+- **B2-extended：fragment-level invalidation**（2-3 周）——解决共享存储瓶颈，撬动 50 QPS 写场景
+- **B2-extended：sparse cache keys**——去 `dataset_version` 依赖
+- 这两项是 0.2-beta / 0.3 目标，不是 alpha blocker
 
 ---
 

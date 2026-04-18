@@ -703,8 +703,8 @@ mod tests {
                 ],
             }],
             executors: vec![
-                ExecutorConfig { id: "e0".into(), host: "h0".into(), port: 100 },
-                ExecutorConfig { id: "e1".into(), host: "h1".into(), port: 101 },
+                ExecutorConfig { id: "e0".into(), host: "h0".into(), port: 100, role: Default::default() },
+                ExecutorConfig { id: "e1".into(), host: "h1".into(), port: 101, role: Default::default() },
             ],
             ..Default::default()
         }

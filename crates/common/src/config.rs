@@ -398,6 +398,29 @@ pub struct ExecutorConfig {
     pub host: String,
     /// gRPC port
     pub port: u16,
+    /// Physical read/write role preference (ROADMAP_0.2 §B2.2).
+    /// Defaults to `Either` — the worker accepts both reads and writes,
+    /// preserving 0.1.x behaviour. When `replica_factor >= 2`, operators
+    /// can dedicate distinct workers: `WritePrimary` absorbs write I/O,
+    /// `ReadPrimary` serves query traffic unchallenged. Role is a soft
+    /// preference — if only one role is healthy for a shard, it still
+    /// accepts both kinds of traffic as a fallback.
+    #[serde(default)]
+    pub role: ExecutorRole,
+}
+
+/// Soft routing preference for an executor. Applied by the coordinator
+/// when more than one worker serves the same shard: readers prefer
+/// `ReadPrimary` > `Either` > `WritePrimary`; writers prefer
+/// `WritePrimary` > `Either` > `ReadPrimary`. Single-candidate shards
+/// ignore the preference entirely.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorRole {
+    #[default]
+    Either,
+    ReadPrimary,
+    WritePrimary,
 }
 
 impl ClusterConfig {

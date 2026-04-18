@@ -143,6 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     service = service.with_auth(auth_arc.clone());
+
+    // B2.2: install per-worker role preferences so the scatter-gather and
+    // write paths can split read vs write traffic across replicas. No-op
+    // when every executor uses the default `Either` role.
+    service.install_executor_roles(&config.executors).await;
+
     let metrics = service.metrics();
     // Keep handles for graceful shutdown
     let shutdown_handle = service.pool_shutdown_handle();

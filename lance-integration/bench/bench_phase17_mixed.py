@@ -47,9 +47,18 @@ def start_cluster():
     # empirically test whether cache-key version churn is the dominant
     # cause of mixed-RW QPS degradation.
     rc_secs = int(os.environ.get("LANCEFORGE_RC_SECS", "3"))
+    # B2.2 read/write split: LANCEFORGE_RW_SPLIT=1 pins w0 as write-primary
+    # and w1 as read-primary. Default keeps both Either for 0.1.x parity.
+    rw_split = os.environ.get("LANCEFORGE_RW_SPLIT", "0") == "1"
+    executors = []
+    for i in range(2):
+        entry = {'id': f'w{i}', 'host': '127.0.0.1', 'port': WORKER_PORTS[i]}
+        if rw_split:
+            entry['role'] = 'write_primary' if i == 0 else 'read_primary'
+        executors.append(entry)
     cfg = {
         'tables': [],
-        'executors': [{'id': f'w{i}', 'host': '127.0.0.1', 'port': WORKER_PORTS[i]} for i in range(2)],
+        'executors': executors,
         'default_table_path': BASE,
         'server': {'max_k': 50_000, 'slow_query_ms': 0},
         'cache': {'read_consistency_secs': rc_secs},
@@ -97,6 +106,15 @@ def setup_table(stub, table, n_rows):
     ir = stub.CreateIndex(pb.CreateIndexRequest(
         table_name=table, column="vector", index_type="IVF_FLAT", num_partitions=32))
     if ir.error: print(f"WARN index: {ir.error}")
+    # B2.2: trigger Rebalance so each shard is replicated to replica_factor
+    # workers (default 2). Without this, CreateTable produces a 1:1 shard→
+    # worker assignment, which makes the read/write role preference a no-op
+    # because there's only one candidate per shard.
+    if os.environ.get("LANCEFORGE_RW_SPLIT", "0") == "1":
+        rb = stub.Rebalance(pb.RebalanceRequest())
+        if rb.error: print(f"WARN rebalance: {rb.error}")
+        else: print(f"  [rw_split] rebalance moved {rb.shards_moved} shard-slot(s)")
+        time.sleep(2)  # give workers a moment to finish loading replicas
     return n_rows
 
 

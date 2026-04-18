@@ -59,6 +59,10 @@ pub struct ConnectionPool {
     keepalive_timeout_secs: u64,
     /// Shard URI registry (shared with CoordinatorService for recovery).
     shard_uris: Option<Arc<tokio::sync::RwLock<HashMap<String, String>>>>,
+    /// Per-worker role preference (B2.2). Defaults to `Either` for any
+    /// worker not explicitly configured. Stored behind RwLock so
+    /// RegisterWorker can add entries at runtime.
+    roles: Arc<RwLock<HashMap<String, lance_distributed_common::config::ExecutorRole>>>,
 }
 
 impl ConnectionPool {
@@ -82,7 +86,62 @@ impl ConnectionPool {
             keepalive_interval_secs: server_config.keepalive_interval_secs,
             keepalive_timeout_secs: server_config.keepalive_timeout_secs,
             shard_uris: None,
+            roles: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Install the per-worker role preference map built from config. B2.2.
+    pub async fn set_roles(
+        &self,
+        roles: HashMap<String, lance_distributed_common::config::ExecutorRole>,
+    ) {
+        *self.roles.write().await = roles;
+    }
+
+    /// Look up a worker's role preference. Defaults to `Either` for any
+    /// worker not explicitly configured (covers RegisterWorker-added
+    /// workers and keeps 0.1.x round-robin behaviour when no operator
+    /// pins roles).
+    pub async fn role_of(&self, worker_id: &str) -> lance_distributed_common::config::ExecutorRole {
+        self.roles.read().await
+            .get(worker_id)
+            .copied()
+            .unwrap_or(lance_distributed_common::config::ExecutorRole::Either)
+    }
+
+    /// Pick the best-matched candidate from a list of healthy workers
+    /// given the desired role. Preference order (B2.2):
+    ///   - `for_reads=true`:  ReadPrimary > Either > WritePrimary
+    ///   - `for_reads=false`: WritePrimary > Either > ReadPrimary
+    /// Single-candidate shards and all-`Either` clusters are unaffected.
+    /// Returns an index into `candidates` or None if the slice is empty.
+    pub async fn pick_by_role(&self, candidates: &[String], for_reads: bool) -> Option<usize> {
+        use lance_distributed_common::config::ExecutorRole::*;
+        if candidates.is_empty() {
+            return None;
+        }
+        let roles = self.roles.read().await;
+        let score = |r: lance_distributed_common::config::ExecutorRole| -> u8 {
+            match (for_reads, r) {
+                (true,  ReadPrimary)  => 3,
+                (true,  Either)       => 2,
+                (true,  WritePrimary) => 1,
+                (false, WritePrimary) => 3,
+                (false, Either)       => 2,
+                (false, ReadPrimary)  => 1,
+            }
+        };
+        let mut best_idx = 0usize;
+        let mut best_score = 0u8;
+        for (i, wid) in candidates.iter().enumerate() {
+            let role = roles.get(wid).copied().unwrap_or(Either);
+            let s = score(role);
+            if s > best_score {
+                best_score = s;
+                best_idx = i;
+            }
+        }
+        Some(best_idx)
     }
 
     /// Signal the health check loop to stop.
@@ -441,6 +500,88 @@ mod tests {
         assert_eq!(statuses[0].0, "w_new");
         assert_eq!(statuses[0].1, "10.0.0.1");
         assert_eq!(statuses[0].2, 50100);
+    }
+
+    // ── B2.2: role-aware routing ──
+
+    #[tokio::test]
+    async fn test_role_of_defaults_to_either() {
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
+        use lance_distributed_common::config::ExecutorRole;
+        // No roles configured → Either for every worker.
+        assert_eq!(pool.role_of("w0").await, ExecutorRole::Either);
+        assert_eq!(pool.role_of("never-seen").await, ExecutorRole::Either);
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_role_reads_prefer_read_primary() {
+        let pool = make_pool(vec![
+            ("w0", "127.0.0.1", 50100),
+            ("w1", "127.0.0.1", 50101),
+        ]);
+        use lance_distributed_common::config::ExecutorRole::*;
+        let mut roles = HashMap::new();
+        roles.insert("w0".to_string(), WritePrimary);
+        roles.insert("w1".to_string(), ReadPrimary);
+        pool.set_roles(roles).await;
+
+        // Reads should pick w1 (ReadPrimary) over w0 (WritePrimary).
+        let candidates = vec!["w0".to_string(), "w1".to_string()];
+        let idx = pool.pick_by_role(&candidates, true).await.unwrap();
+        assert_eq!(candidates[idx], "w1");
+
+        // Writes should pick w0 (WritePrimary) over w1 (ReadPrimary).
+        let idx = pool.pick_by_role(&candidates, false).await.unwrap();
+        assert_eq!(candidates[idx], "w0");
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_role_either_beats_opposite() {
+        let pool = make_pool(vec![
+            ("w0", "127.0.0.1", 50100),
+            ("w1", "127.0.0.1", 50101),
+        ]);
+        use lance_distributed_common::config::ExecutorRole::*;
+        let mut roles = HashMap::new();
+        roles.insert("w0".to_string(), WritePrimary);
+        roles.insert("w1".to_string(), Either);
+        pool.set_roles(roles).await;
+
+        // For reads: Either (w1) should beat WritePrimary (w0).
+        let candidates = vec!["w0".to_string(), "w1".to_string()];
+        let idx = pool.pick_by_role(&candidates, true).await.unwrap();
+        assert_eq!(candidates[idx], "w1");
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_role_falls_back_to_opposite() {
+        let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
+        use lance_distributed_common::config::ExecutorRole::*;
+        let mut roles = HashMap::new();
+        roles.insert("w0".to_string(), WritePrimary);
+        pool.set_roles(roles).await;
+
+        // Reads with only WritePrimary available — must still route there,
+        // role is a preference, not a hard constraint.
+        let candidates = vec!["w0".to_string()];
+        let idx = pool.pick_by_role(&candidates, true).await.unwrap();
+        assert_eq!(candidates[idx], "w0");
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_role_empty() {
+        let pool = make_pool(vec![]);
+        assert!(pool.pick_by_role(&[], true).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pick_by_role_all_either_picks_first() {
+        // 0.1.x default: every worker is Either. Picker returns index 0;
+        // the round-robin in scatter_gather handles load balance.
+        let pool = make_pool(vec![("w0", "", 1), ("w1", "", 2), ("w2", "", 3)]);
+        let candidates = vec!["w0".to_string(), "w1".to_string(), "w2".to_string()];
+        assert_eq!(pool.pick_by_role(&candidates, true).await.unwrap(), 0);
+        assert_eq!(pool.pick_by_role(&candidates, false).await.unwrap(), 0);
     }
 
     #[tokio::test]

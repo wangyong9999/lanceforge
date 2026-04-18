@@ -102,9 +102,18 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 **当前对策**：
 - 写入低频（< 1 QPS）场景影响可忽略
-- 中频写入场景（1-10 QPS）：调高 `cache.read_consistency_secs`（例如 30s），容忍稍旧读
-- 高频写入场景（> 10 QPS）：物理读写分离（replica_factor=2，约定 read-only worker）
-- 0.2 目标：10 QPS 写场景读 QPS 恢复到 ≥ 80% 基线
+- **中频写入场景（1-10 QPS）推荐配置**（0.2-alpha 起支持，B2.2 验收）：
+  ```yaml
+  replica_factor: 2
+  executors:
+    - { id: w0, role: write_primary, ... }
+    - { id: w1, role: read_primary, ... }
+  cache:
+    read_consistency_secs: 60
+  ```
+  启动后调用 `Rebalance()` 把每 shard 复制到两个 worker。实测 **Read QPS = 82.5% × baseline**（超过 0.2 的 80% 目标）。
+- 高频写入场景（> 10 QPS）：当前 0.2-alpha 仍有 ~80% 降级（vs baseline），建议用 replica_factor ≥ 3 做读负载均衡，或等 0.2-beta 的 fragment-level invalidation 修复
+- 实现细节与多组实验数据见 `docs/PROFILE_MIXED_RW.md` §7
 
 ## 12. 性能拐点（参考 BENCHMARK.md）
 
