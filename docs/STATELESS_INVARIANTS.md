@@ -138,7 +138,7 @@ for k in &config.security.api_keys {
 
 ---
 
-### 🟡 Gap C：FileMetaStore 仍可在生产模式启用（store.rs:84-87 整个 impl）
+### 🟡 ~~Gap C~~ ✅ 闭合于 `d31d3de` — FileMetaStore 仍可在生产模式启用（store.rs:84-87 整个 impl）
 
 **现状**：`metadata_path` 如果是本地路径就走 FileMetaStore。没有守卫机制。
 
@@ -156,7 +156,7 @@ for k in &config.security.api_keys {
 
 ---
 
-### 🟡 Gap D：StaticShardState 仍是默认兜底（shard_state.rs:113-117）
+### 🟡 ~~Gap D~~ ✅ 闭合于 `d31d3de` — StaticShardState 仍是默认兜底（shard_state.rs:113-117）
 
 **现状**：如果没配 `metadata_path`，默认用 StaticShardState，所有 rebalance / MoveShard 在 coord 重启后丢失。
 
