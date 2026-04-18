@@ -136,10 +136,16 @@
 
 ### 波次 3 — 一致性与边界（10h）
 结构性改动，需要跨 crate 协调。
-10. H5 ShardState typed error（3h）
-11. H10 边界值测试（2h）
-12. H11 DDL 边界覆盖（2h）
+
+**2026-04-18 收盘重排**（详见 `SESSION_HANDOFF.md` §2.2）：
+把 H5（内部 API 破坏性改动）**延后到 Wave 3 末尾**，先处理 correctness 类。
+实际执行顺序建议：
+10. H10 边界值测试（2h）← 下个 session 第一个
+11. H11 DDL 边界覆盖（2h）
+12. H21 Graceful shutdown drain（2h，从 Wave 6 提前）
 13. H4 RPC cancellation（3h）
+14. H3 AddRows 幂等（4h，从 Wave 4 提前）
+15. H5 ShardState typed error（3h，破坏性改动，**最后**做）
 
 ### 波次 4 — 幂等与 CI（8h）
 长线质量与外部门禁。
