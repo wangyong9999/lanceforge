@@ -149,6 +149,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bg_shutdown = service.bg_shutdown();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
+    // B1.2.3: MetaStore-backed key registry.
+    //
+    // If a MetaStore is configured:
+    //   (a) Bootstrap — on first run, copy config-provided keys into the
+    //       store so multi-coordinator deployments don't need synchronized
+    //       YAML. Idempotent: subsequent calls see a populated prefix.
+    //   (b) Hot reload — every 60s pull the registry back out and swap it
+    //       into the interceptor atomically. New keys added via direct
+    //       MetaStore write (or a future admin RPC) become live within the
+    //       reload window; revoked keys stop authenticating within the same
+    //       window. Request handling keeps running against the last
+    //       successful snapshot if the MetaStore is transiently unreachable.
+    //
+    // No MetaStore → keys stay config-frozen (0.1.x behaviour).
+    if let Some(store) = service.meta_store() {
+        match lance_distributed_coordinator::auth::bootstrap_metastore_if_empty(
+            store.as_ref(), &role_map
+        ).await {
+            Ok(n) if n > 0 => info!("auth: bootstrapped {} key(s) into MetaStore", n),
+            Ok(_) => info!("auth: MetaStore auth/keys/ already populated; skipping bootstrap"),
+            Err(e) => warn!("auth: MetaStore bootstrap failed: {} (continuing with config keys)", e),
+        }
+
+        let reload_store = store.clone();
+        let reload_auth = auth_arc.clone();
+        let reload_stop = bg_shutdown.clone();
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(60);
+            let mut tick = tokio::time::interval(interval);
+            tick.tick().await; // skip immediate tick; bootstrap already seeded
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = reload_stop.notified() => {
+                        info!("auth reload task stopping (shutdown)");
+                        return;
+                    }
+                }
+                match lance_distributed_coordinator::auth::load_from_metastore(reload_store.as_ref()).await {
+                    Ok(keys) => {
+                        let n = keys.len();
+                        reload_auth.reload(keys);
+                        log::debug!("auth: reloaded {} key(s) from MetaStore", n);
+                    }
+                    Err(e) => log::warn!(
+                        "auth: reload from MetaStore failed, keeping last snapshot: {}", e
+                    ),
+                }
+            }
+        });
+        info!("auth: hot-reload task running (60s interval)");
+    } else if !role_map.is_empty() {
+        warn!(
+            "auth: MetaStore not configured — api_keys are frozen at startup. \
+             Set `metadata_path` to enable runtime key rotation."
+        );
+    }
+
     // Start orphan GC loop (opt-in, disabled by default — destructive).
     if config.orphan_gc.enabled {
         info!("Orphan GC enabled (interval={}s, min_age={}s)",

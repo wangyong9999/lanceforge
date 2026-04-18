@@ -27,6 +27,12 @@ impl MetaShardState {
         }
     }
 
+    /// Expose the underlying MetaStore so callers (auth hot-reload, admin
+    /// CLI, etc.) can use the same backend without rebuilding it.
+    pub fn store(&self) -> Arc<dyn MetaStore> {
+        self.store.clone()
+    }
+
     fn table_key(&self, table_name: &str) -> String {
         format!("{}/tables/{}", self.prefix, table_name)
     }

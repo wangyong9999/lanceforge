@@ -47,33 +47,61 @@ impl Permission {
 }
 
 /// API key validator + role lookup. Checks "authorization" metadata header.
+///
+/// Keys live behind an `Arc<RwLock<Arc<HashMap>>>` so `reload()` can swap the
+/// entire registry atomically — the sync-path `authenticate()` snapshots an
+/// `Arc` under a read lock and releases the lock immediately, so a concurrent
+/// reload never blocks request handling. ROADMAP_0.2 §B1.2.3.
 #[derive(Clone)]
 pub struct ApiKeyInterceptor {
     /// Map from key → role. Empty map = no auth required (all allowed as Admin).
-    keys: Arc<HashMap<String, Role>>,
+    keys: Arc<std::sync::RwLock<Arc<HashMap<String, Role>>>>,
 }
 
 impl ApiKeyInterceptor {
     /// Legacy constructor: all keys granted Admin role (backward compatible).
+    ///
+    /// **Security note (will flip in 0.3.0)**: legacy `api_keys` without an
+    /// explicit role are granted `Admin` today. This is retained for 0.1 →
+    /// 0.2 compatibility; 0.3.0 will default to `Read`. See
+    /// `docs/COMPAT_POLICY.md` §9.
     pub fn new(keys: Vec<String>) -> Self {
         let map: HashMap<String, Role> =
             keys.into_iter().map(|k| (k, Role::Admin)).collect();
-        Self { keys: Arc::new(map) }
+        Self { keys: Arc::new(std::sync::RwLock::new(Arc::new(map))) }
     }
 
     /// New constructor with explicit role assignment.
     pub fn with_roles(keys: HashMap<String, Role>) -> Self {
-        Self { keys: Arc::new(keys) }
+        Self { keys: Arc::new(std::sync::RwLock::new(Arc::new(keys))) }
+    }
+
+    /// Replace the live key registry atomically. Callers: the hot-reload
+    /// task in `coordinator/bin/main.rs`. Zero-downtime swap — in-flight
+    /// requests holding an `Arc` snapshot complete against the old map.
+    pub fn reload(&self, new_keys: HashMap<String, Role>) {
+        *self.keys.write().expect("auth registry lock poisoned") = Arc::new(new_keys);
+    }
+
+    /// Snapshot the current registry. Cheap (Arc clone).
+    fn snapshot(&self) -> Arc<HashMap<String, Role>> {
+        self.keys.read().expect("auth registry lock poisoned").clone()
+    }
+
+    /// Current key count, for metrics / logs.
+    pub fn key_count(&self) -> usize {
+        self.snapshot().len()
     }
 
     /// Returns true if authentication is required (non-empty key list).
     pub fn auth_required(&self) -> bool {
-        !self.keys.is_empty()
+        !self.snapshot().is_empty()
     }
 
     /// Validate key only (no permission check). Returns the role if valid.
     pub fn authenticate<T>(&self, req: &Request<T>) -> Result<Role, Status> {
-        if self.keys.is_empty() {
+        let keys = self.snapshot();
+        if keys.is_empty() {
             return Ok(Role::Admin); // No auth configured — allow everything
         }
         let key = req.metadata()
@@ -81,7 +109,7 @@ impl ApiKeyInterceptor {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
         match key {
-            Some(k) => self.keys.get(k).copied()
+            Some(k) => keys.get(k).copied()
                 .ok_or_else(|| Status::unauthenticated("Invalid API key")),
             None => Err(Status::unauthenticated("Missing authorization header")),
         }
@@ -108,7 +136,7 @@ impl ApiKeyInterceptor {
     /// Extract a short, non-secret principal identifier for audit logs.
     /// Returns the prefix of the API key (first 8 chars) or "anonymous".
     pub fn principal<T>(&self, req: &Request<T>) -> String {
-        if self.keys.is_empty() {
+        if !self.auth_required() {
             return "anonymous".to_string();
         }
         req.metadata()
@@ -121,6 +149,93 @@ impl ApiKeyInterceptor {
             })
             .unwrap_or_else(|| "missing".to_string())
     }
+}
+
+// ════════════════════════════════════════════
+// MetaStore-backed key registry (B1.2.3)
+// ════════════════════════════════════════════
+
+/// Prefix under which API key → role mappings live in the MetaStore.
+/// Individual keys land at `auth/keys/{key}`; value is a JSON `{ "role": "Read|Write|Admin" }`.
+pub const AUTH_KEYS_PREFIX: &str = "auth/keys/";
+
+/// JSON value stored in MetaStore for each key. Kept minimal so future
+/// additions (labels, quota, rotation-due) are additive.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeyEntry {
+    role: String,
+}
+
+/// Load the live key registry from a MetaStore instance.
+///
+/// Returns a (possibly empty) HashMap. Missing / malformed entries are
+/// logged and skipped rather than failing the whole load — a single
+/// broken entry must not lock out every other key.
+pub async fn load_from_metastore(
+    store: &dyn lance_distributed_meta::store::MetaStore,
+) -> Result<HashMap<String, Role>, lance_distributed_meta::store::MetaError> {
+    let all = store.get_prefix(AUTH_KEYS_PREFIX).await?;
+    let mut out = HashMap::new();
+    for (full_key, versioned) in all {
+        let key = full_key
+            .strip_prefix(AUTH_KEYS_PREFIX)
+            .unwrap_or(&full_key)
+            .to_string();
+        match serde_json::from_str::<KeyEntry>(&versioned.value) {
+            Ok(entry) => match Role::parse(&entry.role) {
+                Some(role) => {
+                    out.insert(key, role);
+                }
+                None => log::warn!(
+                    "auth: skipping key '{}' in MetaStore: unknown role '{}'",
+                    full_key, entry.role
+                ),
+            },
+            Err(e) => log::warn!(
+                "auth: skipping key '{}' in MetaStore: {}",
+                full_key, e
+            ),
+        }
+    }
+    Ok(out)
+}
+
+/// Bootstrap the MetaStore with the config-provided keys **if and only if**
+/// `auth/keys/` is currently empty. Used on first-run to migrate a 0.1-style
+/// config-baked-in key list into the durable runtime-rotatable store.
+///
+/// Returns the number of keys written. Idempotent: later calls are no-ops
+/// because the second check sees a populated prefix.
+pub async fn bootstrap_metastore_if_empty(
+    store: &dyn lance_distributed_meta::store::MetaStore,
+    seed_keys: &HashMap<String, Role>,
+) -> Result<usize, lance_distributed_meta::store::MetaError> {
+    if seed_keys.is_empty() {
+        return Ok(0);
+    }
+    let existing = store.list_keys(AUTH_KEYS_PREFIX).await?;
+    if !existing.is_empty() {
+        return Ok(0);
+    }
+    let mut written = 0usize;
+    for (key, role) in seed_keys {
+        let entry = KeyEntry { role: format!("{:?}", role) };
+        let payload = serde_json::to_string(&entry)
+            .map_err(|e| lance_distributed_meta::store::MetaError::StorageError(
+                format!("auth bootstrap serialize: {e}")
+            ))?;
+        let full_key = format!("{AUTH_KEYS_PREFIX}{key}");
+        // expected_version=0 is "create only"; if it races with another
+        // coordinator doing the same bootstrap we just skip that key.
+        match store.put(&full_key, &payload, 0).await {
+            Ok(_) => written += 1,
+            Err(lance_distributed_meta::store::MetaError::VersionConflict { .. }) => {
+                log::debug!("auth bootstrap: key '{}' already created by another coordinator", full_key);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -231,5 +346,142 @@ mod tests {
         assert_eq!(Role::parse("WRITE"), Some(Role::Write));
         assert_eq!(Role::parse("Admin"), Some(Role::Admin));
         assert_eq!(Role::parse("bogus"), None);
+    }
+
+    // ── B1.2.3: hot-reload tests ──
+
+    #[test]
+    fn test_reload_atomic_replace() {
+        // Start with one key, reload with a different one, verify the
+        // old one no longer authenticates and the new one does.
+        let ic = ApiKeyInterceptor::new(vec!["old".into()]);
+        assert!(ic.check(make_request_with_key("old")).is_ok());
+
+        let mut new_map = HashMap::new();
+        new_map.insert("new".to_string(), Role::Admin);
+        ic.reload(new_map);
+
+        assert!(ic.check(make_request_with_key("old")).is_err(),
+                "old key must be rejected after reload");
+        assert!(ic.check(make_request_with_key("new")).is_ok(),
+                "new key must authenticate after reload");
+    }
+
+    #[test]
+    fn test_reload_changes_role() {
+        // Confirm reload is not just adding keys — it can also demote them.
+        let mut m = HashMap::new();
+        m.insert("k".to_string(), Role::Admin);
+        let ic = ApiKeyInterceptor::with_roles(m);
+        assert!(ic.authorize(&make_request_with_key("k"), Permission::Admin).is_ok());
+
+        let mut demoted = HashMap::new();
+        demoted.insert("k".to_string(), Role::Read);
+        ic.reload(demoted);
+        assert!(ic.authorize(&make_request_with_key("k"), Permission::Admin).is_err(),
+                "role demotion must take effect immediately");
+        assert!(ic.authorize(&make_request_with_key("k"), Permission::Read).is_ok());
+    }
+
+    #[test]
+    fn test_reload_to_empty_disables_auth() {
+        let ic = ApiKeyInterceptor::new(vec!["sekret".into()]);
+        assert!(ic.auth_required());
+        ic.reload(HashMap::new());
+        assert!(!ic.auth_required(),
+                "empty reload disables auth (matches startup behavior)");
+    }
+
+    #[test]
+    fn test_key_count() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), Role::Read);
+        m.insert("b".to_string(), Role::Write);
+        let ic = ApiKeyInterceptor::with_roles(m);
+        assert_eq!(ic.key_count(), 2);
+    }
+
+    // ── B1.2.3: MetaStore integration ──
+
+    async fn make_test_metastore() -> (
+        std::sync::Arc<dyn lance_distributed_meta::store::MetaStore>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
+        let store = lance_distributed_meta::store::FileMetaStore::new(&path).await.unwrap();
+        (std::sync::Arc::new(store), dir)
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_metastore_writes_when_empty() {
+        let (store, _dir) = make_test_metastore().await;
+        let mut seed = HashMap::new();
+        seed.insert("admin-key".to_string(), Role::Admin);
+        seed.insert("reader".to_string(), Role::Read);
+
+        let n = bootstrap_metastore_if_empty(store.as_ref(), &seed).await.unwrap();
+        assert_eq!(n, 2);
+        // Second call is a no-op because the prefix is populated.
+        let n2 = bootstrap_metastore_if_empty(store.as_ref(), &seed).await.unwrap();
+        assert_eq!(n2, 0);
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_no_op_on_empty_seed() {
+        let (store, _dir) = make_test_metastore().await;
+        let n = bootstrap_metastore_if_empty(store.as_ref(), &HashMap::new()).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_from_metastore_roundtrip() {
+        let (store, _dir) = make_test_metastore().await;
+        let mut seed = HashMap::new();
+        seed.insert("k1".to_string(), Role::Admin);
+        seed.insert("k2".to_string(), Role::Write);
+        seed.insert("k3".to_string(), Role::Read);
+        bootstrap_metastore_if_empty(store.as_ref(), &seed).await.unwrap();
+
+        let loaded = load_from_metastore(store.as_ref()).await.unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.get("k1"), Some(&Role::Admin));
+        assert_eq!(loaded.get("k2"), Some(&Role::Write));
+        assert_eq!(loaded.get("k3"), Some(&Role::Read));
+    }
+
+    #[tokio::test]
+    async fn test_load_from_metastore_skips_malformed() {
+        let (store, _dir) = make_test_metastore().await;
+        // Good entry.
+        store.put(&format!("{AUTH_KEYS_PREFIX}good"), r#"{"role":"Admin"}"#, 0).await.unwrap();
+        // Unknown role — should be skipped with a warn log.
+        store.put(&format!("{AUTH_KEYS_PREFIX}bad_role"), r#"{"role":"Overlord"}"#, 0).await.unwrap();
+        // Malformed JSON — should be skipped.
+        store.put(&format!("{AUTH_KEYS_PREFIX}bad_json"), "not-json-at-all", 0).await.unwrap();
+
+        let loaded = load_from_metastore(store.as_ref()).await.unwrap();
+        assert_eq!(loaded.len(), 1, "only 'good' survives");
+        assert!(loaded.contains_key("good"));
+    }
+
+    #[tokio::test]
+    async fn test_end_to_end_bootstrap_then_reload() {
+        // Simulate full flow: coord has config keys, bootstrap writes them to
+        // MetaStore, a subsequent load from MetaStore produces the same map,
+        // interceptor.reload() makes it live.
+        let (store, _dir) = make_test_metastore().await;
+        let mut config_keys = HashMap::new();
+        config_keys.insert("bootstrap-admin".to_string(), Role::Admin);
+
+        let ic = ApiKeyInterceptor::with_roles(HashMap::new());
+        assert!(!ic.auth_required());
+
+        bootstrap_metastore_if_empty(store.as_ref(), &config_keys).await.unwrap();
+        let loaded = load_from_metastore(store.as_ref()).await.unwrap();
+        ic.reload(loaded);
+
+        assert!(ic.auth_required());
+        assert!(ic.check(make_request_with_key("bootstrap-admin")).is_ok());
     }
 }

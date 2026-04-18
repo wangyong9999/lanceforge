@@ -82,6 +82,13 @@ impl CoordinatorService {
         self.bg_shutdown.clone()
     }
 
+    /// Expose the underlying MetaStore if one is configured. Returns None
+    /// when the service runs in Static (no-persistence) mode. Used by the
+    /// auth hot-reload task (B1.2.3) to share the same backend.
+    pub fn meta_store(&self) -> Option<Arc<dyn lance_distributed_meta::store::MetaStore>> {
+        self.meta_state.as_ref().map(|ms| ms.store())
+    }
+
     /// Create with MetaStore-backed metadata (survives restarts, CAS-safe).
     /// Supports both file paths and S3 URIs (s3://bucket/path/metadata.json).
     pub async fn with_meta_state(
