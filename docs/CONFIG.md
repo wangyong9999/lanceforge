@@ -185,6 +185,20 @@ embedding:
 - `/path/to/meta.json`：本地文件 + fsync + CAS。**仅单 coordinator**
 - `s3://bucket/prefix/meta.json`：对象存储 CAS，**支持多 coordinator HA**
 
+## `deployment_profile`（0.2 新增）
+
+启动期硬校验选择的"状态位置"是否符合部署形态。配置错位会在启动时 fail-fast。
+
+| 值 | 要求 | 适用 |
+|---|---|---|
+| `dev`（默认） | 无约束 | 单机开发、单元测试 |
+| `self_hosted` | `metadata_path` 必须设置（local 或 OBS 均可）| 客户自部署；默认 FileMetaStore 也可 |
+| `saas` | `metadata_path` 必须是 OBS URI（`s3://` / `gs://` / `az://`）| 公有云多租户托管；pod 完全无状态 |
+
+**推荐**：生产部署显式设 `deployment_profile: saas` 或 `self_hosted`，避免因 `metadata_path` 漏配导致 silent 的 StaticShardState 兜底。
+
+细节与背景：`ROADMAP_0.2.md` §0.1-0.2，`STATELESS_INVARIANTS.md` Gap C / D。
+
 ## `default_table_path`
 
 `CreateTable` RPC 创建的表放哪里。支持本地路径或 `s3://bucket/prefix/`。

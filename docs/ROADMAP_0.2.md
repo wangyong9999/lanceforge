@@ -402,8 +402,8 @@
 | L0.4 | 归档 PLAN.md / PHASE17_SUMMARY.md | ✅ `87df6b0` |
 | L0.5 | 本 ROADMAP commit | ✅ `87df6b0` |
 | B1.1 | 持久状态审计，出 STATELESS_INVARIANTS.md | ✅ `e4bf58e` |
-| L0.6 | Ballista workspace 逻辑隔离（default-members） | ✅ `TBD` |
-| B1.2.1 | `deployment_profile` 启动守卫（闭 Gap C + D） | ⏳ ~2d |
+| L0.6 | Ballista workspace 逻辑隔离（default-members） | ✅ `21147f0` |
+| B1.2.1 | `deployment_profile` 启动守卫（闭 Gap C + D） | ✅ 当次 commit |
 | B1.2.2 | auto-shard config → MetaStore（闭 Gap B） | ⏳ ~1w |
 | B1.2.3 | API key registry → MetaStore + hot-reload（闭 Gap A） | ⏳ ~2w |
 | B1.2.4 | 升级兼容测试 | ⏳ ~3d |

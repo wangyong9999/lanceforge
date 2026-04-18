@@ -53,10 +53,44 @@ pub struct ClusterConfig {
     /// Coordinator-side orphan storage GC.
     #[serde(default)]
     pub orphan_gc: OrphanGcConfig,
+    /// Deployment profile — selects which invariants are enforced at startup.
+    /// See `DeploymentProfile` docs. Defaults to `Dev` for backward
+    /// compatibility; production deployments should pin this explicitly.
+    #[serde(default)]
+    pub deployment_profile: DeploymentProfile,
 }
 
 impl ClusterConfig {
     fn default_replica_factor() -> usize { 2 }
+}
+
+/// Deployment profile — hints which statelessness invariants are required.
+/// Selected per `ROADMAP_0.2.md` §0.1-0.2.
+///
+/// - `Dev`: no checks. Backward-compatible default. FileMetaStore allowed,
+///   missing `metadata_path` allowed (falls back to StaticShardState).
+/// - `SelfHosted`: `metadata_path` must be set; file:// and OBS URIs both
+///   allowed. Multi-coordinator HA requires OBS but we don't force it here.
+/// - `Saas`: `metadata_path` must be set AND must be an object-storage URI
+///   (`s3://`, `gs://`, `az://`, or explicit `memory://` for tests). No
+///   local-disk truth. Any violation is a startup fail-fast.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentProfile {
+    #[default]
+    Dev,
+    SelfHosted,
+    Saas,
+}
+
+impl DeploymentProfile {
+    /// OBS URI schemes that satisfy SaaS statelessness. `memory://` is the
+    /// in-process store used by tests; `file://` and bare local paths do not
+    /// qualify.
+    fn is_obs_scheme(path: &str) -> bool {
+        const OBS_SCHEMES: &[&str] = &["s3://", "gs://", "az://", "azure://", "memory://"];
+        OBS_SCHEMES.iter().any(|s| path.starts_with(s))
+    }
 }
 
 /// Server-level tuning parameters (coordinator + worker).
@@ -432,6 +466,32 @@ impl ClusterConfig {
         if self.server.max_k == 0 {
             errors.push("server.max_k must be > 0".to_string());
         }
+        // Deployment profile invariants (ROADMAP_0.2 §0.1-0.2).
+        match self.deployment_profile {
+            DeploymentProfile::Dev => {}
+            DeploymentProfile::SelfHosted => {
+                if self.metadata_path.is_none() {
+                    errors.push(
+                        "deployment_profile=self_hosted requires metadata_path to be set \
+                         (FileMetaStore for single-coord, OBS URI for multi-coord HA)".to_string()
+                    );
+                }
+            }
+            DeploymentProfile::Saas => {
+                match &self.metadata_path {
+                    None => errors.push(
+                        "deployment_profile=saas requires metadata_path to be an OBS URI \
+                         (s3://, gs://, az://); local paths are not allowed because any \
+                         pod replacement would lose truth".to_string()
+                    ),
+                    Some(p) if !DeploymentProfile::is_obs_scheme(p) => errors.push(format!(
+                        "deployment_profile=saas requires metadata_path to use an OBS scheme \
+                         (s3://, gs://, az://), got: {}", p
+                    )),
+                    _ => {}
+                }
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -673,6 +733,101 @@ executors:
   - {id: w0, host: "127.0.0.1", port: 0}
 "#;
         let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    fn saas_base_yaml() -> &'static str {
+        r#"
+tables: []
+executors:
+  - {id: w0, host: "127.0.0.1", port: 50100}
+"#
+    }
+
+    #[test]
+    fn test_deployment_profile_default_is_dev() {
+        let config: ClusterConfig = serde_yaml::from_str(saas_base_yaml()).unwrap();
+        assert_eq!(config.deployment_profile, DeploymentProfile::Dev);
+    }
+
+    #[test]
+    fn test_profile_dev_allows_missing_metadata() {
+        // Default (dev) path must stay permissive — backward compat.
+        let yaml = format!("{}\ndeployment_profile: dev\n", saas_base_yaml());
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_profile_self_hosted_requires_metadata_path() {
+        let yaml = format!("{}\ndeployment_profile: self_hosted\n", saas_base_yaml());
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("self_hosted"), "got: {err}");
+        assert!(err.contains("metadata_path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_profile_self_hosted_accepts_local_metadata() {
+        let yaml = format!(
+            "{}\ndeployment_profile: self_hosted\nmetadata_path: /data/meta.json\n",
+            saas_base_yaml()
+        );
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_profile_saas_rejects_missing_metadata() {
+        let yaml = format!("{}\ndeployment_profile: saas\n", saas_base_yaml());
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("saas"), "got: {err}");
+        assert!(err.contains("OBS"), "got: {err}");
+    }
+
+    #[test]
+    fn test_profile_saas_rejects_local_metadata() {
+        let yaml = format!(
+            "{}\ndeployment_profile: saas\nmetadata_path: /data/meta.json\n",
+            saas_base_yaml()
+        );
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("saas"), "got: {err}");
+        assert!(err.contains("/data/meta.json"), "got: {err}");
+    }
+
+    #[test]
+    fn test_profile_saas_accepts_s3() {
+        let yaml = format!(
+            "{}\ndeployment_profile: saas\nmetadata_path: s3://bucket/meta.json\n",
+            saas_base_yaml()
+        );
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_profile_saas_accepts_gs_and_azure() {
+        for path in ["gs://bucket/meta.json", "az://container/meta.json", "azure://container/meta.json"] {
+            let yaml = format!(
+                "{}\ndeployment_profile: saas\nmetadata_path: {}\n",
+                saas_base_yaml(), path
+            );
+            let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert!(config.validate().is_ok(), "scheme rejected: {path}");
+        }
+    }
+
+    #[test]
+    fn test_profile_saas_rejects_file_scheme() {
+        // file:// is explicitly not OBS — local disk with a different name.
+        let yaml = format!(
+            "{}\ndeployment_profile: saas\nmetadata_path: file:///data/meta.json\n",
+            saas_base_yaml()
+        );
+        let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
         assert!(config.validate().is_err());
     }
 }
