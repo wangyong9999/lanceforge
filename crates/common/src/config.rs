@@ -337,6 +337,13 @@ pub struct ApiKeyEntry {
     pub key: String,
     /// "read", "write", or "admin" (case-insensitive).
     pub role: String,
+    /// Optional per-key QPS cap (G6). 0 or absent = unlimited. When set,
+    /// the coordinator enforces a token-bucket rate limit on this key and
+    /// returns `ResourceExhausted` when the bucket is empty. Sized to the
+    /// raw RPC call rate, not per-query cost — a client making 100
+    /// CreateIndex/s is rate-limited the same as 100 AnnSearch/s.
+    #[serde(default)]
+    pub qps_limit: u32,
 }
 
 impl SecurityConfig {

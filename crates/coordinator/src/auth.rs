@@ -46,16 +46,67 @@ impl Permission {
     }
 }
 
+/// Per-key QPS rate-limit token bucket (G6). One bucket per API key that
+/// declares a `qps_limit`. Refill at `qps_limit` tokens per second, capacity
+/// = `qps_limit` (burst allowance of one second). Keys with limit=0 or
+/// absent skip this path entirely.
+#[derive(Debug)]
+struct RateBucket {
+    qps_limit: u32,
+    /// Number of tokens left × 1000 (milli-tokens) so fractional refill
+    /// between requests doesn't get lost to integer truncation.
+    tokens_milli: std::sync::Mutex<(u64, std::time::Instant)>,
+}
+
+impl RateBucket {
+    fn new(qps_limit: u32) -> Self {
+        let cap = (qps_limit as u64) * 1000;
+        Self {
+            qps_limit,
+            tokens_milli: std::sync::Mutex::new((cap, std::time::Instant::now())),
+        }
+    }
+
+    /// Try to consume one token. Returns true if the request is allowed,
+    /// false if the bucket is empty. Thread-safe; bucket is refilled
+    /// in place proportional to elapsed time since the last call.
+    fn try_consume(&self) -> bool {
+        let cap = (self.qps_limit as u64) * 1000;
+        if cap == 0 { return true; }
+        let mut guard = self.tokens_milli.lock().expect("rate bucket lock poisoned");
+        let (ref mut tokens, ref mut last) = *guard;
+        let now = std::time::Instant::now();
+        let elapsed_ms = now.duration_since(*last).as_millis() as u64;
+        // Refill: qps_limit tokens/s × elapsed_ms/1000 × 1000 milli-tokens
+        //       = qps_limit × elapsed_ms milli-tokens.
+        let refill = (self.qps_limit as u64).saturating_mul(elapsed_ms);
+        *tokens = (*tokens + refill).min(cap);
+        *last = now;
+        if *tokens >= 1000 {
+            *tokens -= 1000;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// API key validator + role lookup. Checks "authorization" metadata header.
 ///
 /// Keys live behind an `Arc<RwLock<Arc<HashMap>>>` so `reload()` can swap the
 /// entire registry atomically — the sync-path `authenticate()` snapshots an
 /// `Arc` under a read lock and releases the lock immediately, so a concurrent
 /// reload never blocks request handling. ROADMAP_0.2 §B1.2.3.
+///
+/// Per-key QPS quotas (G6) live in a parallel map keyed by the same API
+/// key. Updated by `reload()` alongside the role map.
 #[derive(Clone)]
 pub struct ApiKeyInterceptor {
     /// Map from key → role. Empty map = no auth required (all allowed as Admin).
     keys: Arc<std::sync::RwLock<Arc<HashMap<String, Role>>>>,
+    /// Map from key → rate bucket. Only keys with qps_limit > 0 appear here;
+    /// unrated keys are allowed through without a bucket lookup cost.
+    buckets: Arc<std::sync::RwLock<Arc<HashMap<String, Arc<RateBucket>>>>>,
 }
 
 impl ApiKeyInterceptor {
@@ -68,12 +119,31 @@ impl ApiKeyInterceptor {
     pub fn new(keys: Vec<String>) -> Self {
         let map: HashMap<String, Role> =
             keys.into_iter().map(|k| (k, Role::Admin)).collect();
-        Self { keys: Arc::new(std::sync::RwLock::new(Arc::new(map))) }
+        Self {
+            keys: Arc::new(std::sync::RwLock::new(Arc::new(map))),
+            buckets: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
+        }
     }
 
     /// New constructor with explicit role assignment.
     pub fn with_roles(keys: HashMap<String, Role>) -> Self {
-        Self { keys: Arc::new(std::sync::RwLock::new(Arc::new(keys))) }
+        Self {
+            keys: Arc::new(std::sync::RwLock::new(Arc::new(keys))),
+            buckets: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
+        }
+    }
+
+    /// Install per-key QPS quotas (G6). Keys with qps_limit=0 are omitted.
+    /// Called once at startup from `coordinator/bin/main.rs` after the
+    /// interceptor is constructed from config.
+    pub fn set_rate_limits(&self, limits: HashMap<String, u32>) {
+        let mut buckets = HashMap::new();
+        for (key, qps) in limits {
+            if qps > 0 {
+                buckets.insert(key, Arc::new(RateBucket::new(qps)));
+            }
+        }
+        *self.buckets.write().expect("auth buckets lock poisoned") = Arc::new(buckets);
     }
 
     /// Replace the live key registry atomically. Callers: the hot-reload
@@ -86,6 +156,24 @@ impl ApiKeyInterceptor {
     /// Snapshot the current registry. Cheap (Arc clone).
     fn snapshot(&self) -> Arc<HashMap<String, Role>> {
         self.keys.read().expect("auth registry lock poisoned").clone()
+    }
+
+    /// Snapshot the current rate-limit map. Cheap (Arc clone).
+    fn buckets_snapshot(&self) -> Arc<HashMap<String, Arc<RateBucket>>> {
+        self.buckets.read().expect("auth buckets lock poisoned").clone()
+    }
+
+    /// Check rate limit for a key. Returns Ok(()) if the request is
+    /// allowed, Err(ResourceExhausted) if the bucket is empty.
+    /// Keys without a configured rate limit always pass.
+    pub fn check_rate_limit(&self, api_key: &str) -> Result<(), Status> {
+        let buckets = self.buckets_snapshot();
+        match buckets.get(api_key) {
+            Some(b) if !b.try_consume() => Err(Status::resource_exhausted(
+                format!("API key quota exceeded: {} QPS limit", b.qps_limit)
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Current key count, for metrics / logs.
@@ -121,16 +209,29 @@ impl ApiKeyInterceptor {
         Ok(req)
     }
 
-    /// Authenticate and authorize for a required permission level.
+    /// Authenticate and authorize for a required permission level. Also
+    /// charges the per-key rate limit bucket (G6) after successful auth.
+    /// Rate-limit failure returns `ResourceExhausted`; auth failures keep
+    /// returning `Unauthenticated`/`PermissionDenied` so operators can
+    /// diagnose the difference from error codes alone.
     pub fn authorize<T>(&self, req: &Request<T>, needed: Permission) -> Result<(), Status> {
         let role = self.authenticate(req)?;
-        if needed.satisfied_by(role) {
-            Ok(())
-        } else {
-            Err(Status::permission_denied(format!(
+        if !needed.satisfied_by(role) {
+            return Err(Status::permission_denied(format!(
                 "{:?} permission required (role={:?})", needed, role
-            )))
+            )));
         }
+        // G6 rate limit. Extract the raw key (same logic as authenticate)
+        // and charge the bucket. Missing header / anonymous / no buckets
+        // configured → no charge, no denial.
+        if let Some(key) = req.metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))
+        {
+            self.check_rate_limit(key)?;
+        }
+        Ok(())
     }
 
     /// Extract a short, non-secret principal identifier for audit logs.
@@ -483,5 +584,110 @@ mod tests {
 
         assert!(ic.auth_required());
         assert!(ic.check(make_request_with_key("bootstrap-admin")).is_ok());
+    }
+
+    // ── G6: per-key QPS quota ──
+
+    #[test]
+    fn test_rate_limit_burst_and_block() {
+        // Key with qps_limit=3: first 3 requests pass, the 4th is blocked.
+        let mut keys = HashMap::new();
+        keys.insert("limited".to_string(), Role::Read);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut limits = HashMap::new();
+        limits.insert("limited".to_string(), 3u32);
+        ic.set_rate_limits(limits);
+
+        // First 3 should all pass (bucket capacity = qps_limit = 3).
+        for i in 0..3 {
+            assert!(ic.check_rate_limit("limited").is_ok(), "request {i} should pass");
+        }
+        // Fourth is blocked.
+        let err = ic.check_rate_limit("limited").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        assert!(err.message().contains("3 QPS"), "error must mention the limit: {}", err.message());
+    }
+
+    #[test]
+    fn test_rate_limit_unconfigured_key_allowed() {
+        // A key that's not in the rate-limit map passes through unchecked.
+        let ic = ApiKeyInterceptor::with_roles(HashMap::new());
+        assert!(ic.check_rate_limit("anything").is_ok());
+        // Even if other keys have limits, this one doesn't.
+        let mut limits = HashMap::new();
+        limits.insert("other".to_string(), 1u32);
+        ic.set_rate_limits(limits);
+        for _ in 0..10 {
+            assert!(ic.check_rate_limit("anything").is_ok(),
+                    "unconfigured key always passes");
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_zero_limit_is_unlimited() {
+        // qps_limit=0 in config means "no limit", so set_rate_limits
+        // filters it out and check_rate_limit returns Ok.
+        let ic = ApiKeyInterceptor::with_roles(HashMap::new());
+        let mut limits = HashMap::new();
+        limits.insert("unlimited".to_string(), 0u32);
+        ic.set_rate_limits(limits);
+        for _ in 0..100 {
+            assert!(ic.check_rate_limit("unlimited").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_refills_over_time() {
+        // After exhausting the bucket, waiting > 1/qps seconds should
+        // let one request through again.
+        let ic = ApiKeyInterceptor::with_roles(HashMap::new());
+        let mut limits = HashMap::new();
+        limits.insert("k".to_string(), 2u32);  // 2 qps = 500 ms per token
+        ic.set_rate_limits(limits);
+        // Drain.
+        assert!(ic.check_rate_limit("k").is_ok());
+        assert!(ic.check_rate_limit("k").is_ok());
+        assert!(ic.check_rate_limit("k").is_err(), "3rd immediate should block");
+        // Wait 600ms — refill ≈ 2 × 0.6 = 1.2 tokens.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(ic.check_rate_limit("k").is_ok(), "after refill one request should pass");
+    }
+
+    #[test]
+    fn test_rate_limit_independent_per_key() {
+        // Exhausting one key's bucket must not starve another.
+        let mut keys = HashMap::new();
+        keys.insert("a".to_string(), Role::Read);
+        keys.insert("b".to_string(), Role::Read);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut limits = HashMap::new();
+        limits.insert("a".to_string(), 1u32);
+        limits.insert("b".to_string(), 5u32);
+        ic.set_rate_limits(limits);
+        // Drain a.
+        assert!(ic.check_rate_limit("a").is_ok());
+        assert!(ic.check_rate_limit("a").is_err());
+        // b is still fully available.
+        for _ in 0..5 {
+            assert!(ic.check_rate_limit("b").is_ok());
+        }
+    }
+
+    #[test]
+    fn test_authorize_charges_rate_limit() {
+        // End-to-end: a rate-limited key doing RPCs via authorize() should
+        // see ResourceExhausted after the burst.
+        let mut keys = HashMap::new();
+        keys.insert("rate".to_string(), Role::Read);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut limits = HashMap::new();
+        limits.insert("rate".to_string(), 2u32);
+        ic.set_rate_limits(limits);
+
+        assert!(ic.authorize(&make_request_with_key("rate"), Permission::Read).is_ok());
+        assert!(ic.authorize(&make_request_with_key("rate"), Permission::Read).is_ok());
+        let err = ic.authorize(&make_request_with_key("rate"), Permission::Read).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted,
+                   "3rd request must get ResourceExhausted, got: {err:?}");
     }
 }

@@ -124,9 +124,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use lance_distributed_coordinator::auth::Role;
     use std::collections::HashMap as StdMap;
     let mut role_map: StdMap<String, Role> = StdMap::new();
+    // G6: build per-key QPS limits in the same pass so they stay in sync
+    // with the role map.
+    let mut rate_map: StdMap<String, u32> = StdMap::new();
     for e in &config.security.api_keys_rbac {
         if let Some(r) = Role::parse(&e.role) {
             role_map.insert(e.key.clone(), r);
+            if e.qps_limit > 0 {
+                rate_map.insert(e.key.clone(), e.qps_limit);
+            }
         } else {
             warn!("Ignoring api_keys_rbac entry with invalid role: {}", e.role);
         }
@@ -141,6 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ApiKeyInterceptor::with_roles(role_map.clone())
         }
     );
+    if !rate_map.is_empty() {
+        info!("auth: enforcing per-key QPS limits on {} key(s)", rate_map.len());
+        auth_arc.set_rate_limits(rate_map);
+    }
     service = service.with_auth(auth_arc.clone());
 
     // B2.2: install per-worker role preferences so the scatter-gather and
