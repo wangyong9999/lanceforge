@@ -560,6 +560,108 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    // ── H8: MetaStore error-path coverage ──
+
+    #[tokio::test]
+    async fn test_s3_store_invalid_uri_fails_fast() {
+        // Unparseable URI ("foo" with no scheme) must surface a storage
+        // error at construction, not panic and not proceed silently.
+        let err = S3MetaStore::new("not-a-valid-uri-at-all", std::iter::empty::<(String, String)>()).await.err();
+        assert!(
+            matches!(&err, Some(MetaError::StorageError(_))),
+            "expected StorageError for bad URI, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cas_reject_stale_expected_version() {
+        // Arrange: key at v1. Attempt update at v1-1 (stale) must error
+        // with VersionConflict carrying the true {expected, actual}.
+        let path = format!("/tmp/lanceforge_cas_stale_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let store = FileMetaStore::new(&path).await.unwrap();
+        let v1 = store.put("k", "v1", 0).await.unwrap();
+        // Client holds a stale version (pretend it's 0)
+        let err = store.put("k", "v2", 0).await;
+        match err {
+            Err(MetaError::VersionConflict { expected, actual }) => {
+                assert_eq!(expected, 0);
+                assert_eq!(actual, v1, "conflict must report the actual version so clients can re-sync");
+            }
+            other => panic!("expected VersionConflict, got {other:?}"),
+        }
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_key_is_ok() {
+        // Per trait contract (store.rs:60), delete of an absent key
+        // returns Ok(()). This covers the NotFound handling branch.
+        let path = format!("/tmp/lanceforge_del_absent_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let store = FileMetaStore::new(&path).await.unwrap();
+        assert!(store.delete("never-existed").await.is_ok(),
+                "delete of absent key must be a no-op success");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_file_store_corrupted_snapshot_rejected() {
+        // A half-written JSON blob in the MetaStore file must surface
+        // as a parse error at load, not deserialize to partial state.
+        let path = format!("/tmp/lanceforge_corrupt_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+        tokio::fs::write(&path, b"{this is not valid json at all").await.unwrap();
+
+        let err = FileMetaStore::new(&path).await.err();
+        assert!(
+            matches!(&err, Some(MetaError::StorageError(m)) if m.contains("parse")),
+            "corrupted snapshot must be rejected with a parse error, got: {err:?}"
+        );
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_s3_store_bootstraps_at_nonexistent_path() {
+        // S3MetaStore at a path that doesn't exist yet must create a
+        // fresh empty store, not error out.
+        let dir = format!("/tmp/lanceforge_s3_fresh_{}", std::process::id());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let uri = format!("file://{}/metadata.json", dir);
+
+        let store = S3MetaStore::new(&uri, std::iter::empty::<(String, String)>()).await.unwrap();
+        assert!(store.get("no-such-key").await.unwrap().is_none());
+        // Confirm we can successfully write to it after a fresh-start load.
+        store.put("first", "value", 0).await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_keys_empty_and_populated() {
+        let path = format!("/tmp/lanceforge_list_{}.json", std::process::id());
+        let _ = tokio::fs::remove_file(&path).await;
+
+        let store = FileMetaStore::new(&path).await.unwrap();
+        assert!(store.list_keys("").await.unwrap().is_empty(),
+                "empty store must return empty key list");
+
+        store.put("ns/a", "x", 0).await.unwrap();
+        store.put("ns/b", "y", 0).await.unwrap();
+        store.put("other", "z", 0).await.unwrap();
+
+        let mut ns_keys = store.list_keys("ns/").await.unwrap();
+        ns_keys.sort();
+        assert_eq!(ns_keys, vec!["ns/a".to_string(), "ns/b".to_string()]);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
     // ── FileMetaStore tests ──
 
     #[tokio::test]
