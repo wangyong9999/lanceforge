@@ -428,6 +428,10 @@ pub mod etcd_state {
         cache: Arc<RwLock<HashMap<String, TargetState>>>,
         /// Readiness tracking (in-memory, not persisted to etcd)
         readiness: Arc<RwLock<super::ExecutorReadiness>>,
+        /// Shutdown signal for the watch loop (H14 hardening).
+        /// Held by the state so dropping it doesn't silently leak a
+        /// background task; `shutdown()` fires it explicitly.
+        shutdown: Arc<tokio::sync::Notify>,
     }
 
     impl EtcdShardState {
@@ -445,6 +449,7 @@ pub mod etcd_state {
                 prefix: prefix.to_string(),
                 cache: Arc::new(RwLock::new(HashMap::new())),
                 readiness: Arc::new(RwLock::new(HashMap::new())),
+                shutdown: Arc::new(tokio::sync::Notify::new()),
             };
 
             state.sync_from_etcd().await?;
@@ -453,11 +458,20 @@ pub mod etcd_state {
             let cache = state.cache.clone();
             let watch_client = Arc::new(tokio::sync::Mutex::new(watch_client));
             let prefix_clone = state.prefix.clone();
+            let stop = state.shutdown.clone();
             tokio::spawn(async move {
-                Self::watch_loop(watch_client, prefix_clone, cache).await;
+                Self::watch_loop(watch_client, prefix_clone, cache, stop).await;
             });
 
             Ok(state)
+        }
+
+        /// Stop the background watch loop. Call this before dropping the
+        /// state in tests or on coordinator shutdown — otherwise the task
+        /// keeps an Arc to the cache alive until the whole tokio runtime
+        /// shuts down.
+        pub fn shutdown(&self) {
+            self.shutdown.notify_waiters();
         }
 
         async fn sync_from_etcd(&self) -> Result<(), String> {
@@ -492,43 +506,65 @@ pub mod etcd_state {
             client: Arc<tokio::sync::Mutex<Client>>,
             prefix: String,
             cache: Arc<RwLock<HashMap<String, TargetState>>>,
+            shutdown: Arc<tokio::sync::Notify>,
         ) {
             loop {
-                let result = {
-                    let mut c = client.lock().await;
-                    let key = format!("{}/targets/", prefix);
-                    c.watch(key.as_bytes(), Some(etcd_client::WatchOptions::new().with_prefix()))
-                        .await
-                };
-
-                match result {
-                    Ok((_, mut stream)) => {
-                        while let Some(resp) = stream.message().await.ok().flatten() {
-                            for event in resp.events() {
-                                if let Some(kv) = event.kv() {
-                                    let key_str = kv.key_str().unwrap_or_default();
-                                    if let Some(table) = key_str.strip_prefix(
-                                        &format!("{}/targets/current/", prefix),
-                                    ) {
-                                        if let Ok(mapping) = serde_json::from_slice::<ShardMapping>(kv.value()) {
-                                            let mut c = cache.write().await;
-                                            let entry = c.entry(table.to_string()).or_insert(TargetState {
-                                                current: ShardMapping::new(),
-                                                next: None,
-                                                version: 0,
-                                            });
-                                            entry.current = mapping;
-                                            entry.version = kv.mod_revision() as u64;
-                                            info!("etcd watch: updated table={} v{}", table, entry.version);
+                tokio::select! {
+                    _ = shutdown.notified() => {
+                        info!("etcd watch loop stopping (shutdown)");
+                        return;
+                    }
+                    result = async {
+                        let mut c = client.lock().await;
+                        let key = format!("{}/targets/", prefix);
+                        c.watch(key.as_bytes(), Some(etcd_client::WatchOptions::new().with_prefix()))
+                            .await
+                    } => {
+                        match result {
+                            Ok((_, mut stream)) => {
+                                loop {
+                                    tokio::select! {
+                                        _ = shutdown.notified() => {
+                                            info!("etcd watch loop stopping mid-stream (shutdown)");
+                                            return;
+                                        }
+                                        msg = stream.message() => {
+                                            let resp = match msg.ok().flatten() {
+                                                Some(r) => r,
+                                                None => break,
+                                            };
+                                            for event in resp.events() {
+                                                if let Some(kv) = event.kv() {
+                                                    let key_str = kv.key_str().unwrap_or_default();
+                                                    if let Some(table) = key_str.strip_prefix(
+                                                        &format!("{}/targets/current/", prefix),
+                                                    ) {
+                                                        if let Ok(mapping) = serde_json::from_slice::<ShardMapping>(kv.value()) {
+                                                            let mut c = cache.write().await;
+                                                            let entry = c.entry(table.to_string()).or_insert(TargetState {
+                                                                current: ShardMapping::new(),
+                                                                next: None,
+                                                                version: 0,
+                                                            });
+                                                            entry.current = mapping;
+                                                            entry.version = kv.mod_revision() as u64;
+                                                            info!("etcd watch: updated table={} v{}", table, entry.version);
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Err(e) => {
+                                warn!("etcd watch error: {}, retrying in 5s", e);
+                                tokio::select! {
+                                    _ = shutdown.notified() => return,
+                                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                                }
+                            }
                         }
-                    }
-                    Err(e) => {
-                        warn!("etcd watch error: {}, retrying in 5s", e);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
             }
