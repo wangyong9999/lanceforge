@@ -5,6 +5,14 @@ on:
     branches: [lance-main, lanceforge-clean]
   pull_request:
     branches: [lance-main, lanceforge-clean]
+  # H20: nightly-tier jobs run on schedule. Covers the full Python E2E
+  # matrix + extended bench regression; these are too expensive for
+  # every PR but catch slow drifts between releases.
+  schedule:
+    - cron: '17 3 * * *'  # daily at 03:17 UTC — off-peak, avoids the
+                          # top-of-hour spike when every CI pipeline
+                          # on earth runs
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -192,6 +200,153 @@ jobs:
         run: |
           cd lance-integration/tools
           PYTHONPATH=. python e2e_full_system_test.py
+
+  # H9 PR-blocking tier: two fast Python E2E scripts that exercise
+  # cross-process wiring (coord + workers + metadata round-trip +
+  # failure recovery). Runs on every PR, unlike the push-only
+  # minio-e2e / benchmark-regression jobs above. Budget: ~3 minutes
+  # total so PR feedback stays fast.
+  python-e2e-fast:
+    name: Python E2E (Fast, PR-blocking)
+    runs-on: ubuntu-latest
+    needs: [crate-unit-tests]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker
+
+      - name: Install Python deps
+        run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
+
+      - name: Generate proto stubs
+        run: |
+          cd lance-integration/tools
+          python -m grpc_tools.protoc -I../../crates/proto/proto \
+            --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
+
+      - name: e2e_ha_test.py (coord + worker restart survival)
+        timeout-minutes: 5
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_ha_test.py
+
+      - name: e2e_add_upsert_consistency_test.py (Add/Upsert dedup routing)
+        timeout-minutes: 3
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_add_upsert_consistency_test.py
+
+      # H22 smoke bench: runs the 10K × {1,2}-shard × {1,10}-conc matrix
+      # (bench_phase17_matrix.py --smoke, ~2 min). The numbers get
+      # archived as a workflow artifact so reviewers can diff against
+      # `benchmarks/baseline.json`. Baseline enforcement (fail-on-regression)
+      # is intentionally deferred: picking the right threshold needs a few
+      # cycles of real-world variance data, and doing it wrong produces
+      # spurious CI failures that erode trust in the gate.
+      - name: Smoke benchmark (2 min)
+        timeout-minutes: 5
+        run: |
+          cd lance-integration/bench
+          LANCEFORGE_BIN=$(pwd)/../../target/release \
+            python bench_phase17_matrix.py --smoke
+
+      - name: Check bench vs baseline (warning-only for now)
+        run: |
+          cd lance-integration/bench
+          if [ -f ../../benchmarks/baseline.json ]; then
+            python ../../benchmarks/check_regression.py \
+              --baseline ../../benchmarks/baseline.json \
+              --current results/phase17/ \
+              --threshold-pct 15 \
+              --warn-only || echo "::warning::Smoke bench regression above threshold (not blocking yet)"
+          else
+            echo "::notice::No benchmarks/baseline.json committed yet; skipping regression check"
+          fi
+
+      - name: Archive smoke bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-bench-${{ github.sha }}
+          path: lance-integration/bench/results/phase17/
+
+  # H9 + H20: nightly-only extended E2E. Runs the longer tests (TLS,
+  # rebalance, full capability matrix, enterprise RBAC). Any of these
+  # failing doesn't block PRs but does surface as a nightly alert.
+  python-e2e-nightly:
+    name: Python E2E (Nightly Extended)
+    runs-on: ubuntu-latest
+    needs: [crate-unit-tests]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            -p lance-distributed-coordinator \
+            -p lance-distributed-worker
+
+      - name: Install Python deps
+        run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
+
+      - name: Generate proto stubs
+        run: |
+          cd lance-integration/tools
+          python -m grpc_tools.protoc -I../../crates/proto/proto \
+            --python_out=. --grpc_python_out=. ../../crates/proto/proto/lance_service.proto
+
+      # Each test is independently gated so a single hang doesn't eat
+      # the whole 6-hour GitHub timeout.
+      - name: e2e_full_capability_test.py
+        timeout-minutes: 10
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_full_capability_test.py
+
+      - name: e2e_rebalance_test.py
+        timeout-minutes: 10
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_rebalance_test.py
+
+      - name: e2e_tls_test.py
+        timeout-minutes: 5
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_tls_test.py
+
+      - name: e2e_enterprise_test.py
+        timeout-minutes: 5
+        run: cd lance-integration/tools && LANCEFORGE_BIN=$(pwd)/../../target/release python e2e_enterprise_test.py
 
   benchmark-regression:
     name: Benchmark Regression (Quick)

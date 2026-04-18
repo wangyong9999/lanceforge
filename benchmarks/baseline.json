@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "generated_at": "2026-04-18",
+    "generator": "bench_phase17_matrix.py --smoke",
+    "threshold_pct": 15,
+    "note": "Smoke bench baseline (10K rows × 128d × IVF_FLAT-32). Values are conservative lower bounds for QPS and upper bounds for P99ms, set slightly below the 2026-04-18 measured values so normal CI variance (±5-10%) doesn't produce false regressions. Tighten over time as variance is characterized. See docs/HARDENING_PLAN.md §H22 and benchmarks/check_regression.py."
+  },
+  "configs": [
+    {
+      "scale": 10000, "dim": 128, "shards": 1, "k": 10, "conc": 1,
+      "min_qps": 300, "max_p99_ms": 15,
+      "comment": "Single-shard happy path; the simplest configuration. If this fails the whole cluster is sick."
+    },
+    {
+      "scale": 10000, "dim": 128, "shards": 1, "k": 10, "conc": 10,
+      "min_qps": 1400, "max_p99_ms": 20,
+      "comment": "Parallelism headroom check."
+    },
+    {
+      "scale": 10000, "dim": 128, "shards": 2, "k": 10, "conc": 1,
+      "min_qps": 300, "max_p99_ms": 20,
+      "comment": "Multi-shard scatter-gather overhead baseline."
+    },
+    {
+      "scale": 10000, "dim": 128, "shards": 2, "k": 10, "conc": 10,
+      "min_qps": 1100, "max_p99_ms": 25,
+      "comment": "Concurrent multi-shard — the common case for real workloads."
+    }
+  ]
+}
