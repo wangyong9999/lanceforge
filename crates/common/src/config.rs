@@ -489,6 +489,39 @@ impl ClusterConfig {
         if self.server.max_k == 0 {
             errors.push("server.max_k must be > 0".to_string());
         }
+        if self.server.oversample_factor == 0 {
+            errors.push("server.oversample_factor must be > 0 \
+                         (1 = no oversample, the default 2 = fetch 2*k per shard)".to_string());
+        }
+        if self.server.max_concurrent_queries == 0 {
+            errors.push("server.max_concurrent_queries must be > 0 \
+                         (a 0-sized semaphore permanently blocks every query)".to_string());
+        }
+        // Cluster-wide bounds (H1 hardening).
+        if self.replica_factor == 0 {
+            errors.push("replica_factor must be >= 1 \
+                         (0 would leave every shard unassigned)".to_string());
+        }
+        if self.health_check.interval_secs == 0 {
+            errors.push("health_check.interval_secs must be > 0 \
+                         (a 0-interval health loop would hot-spin)".to_string());
+        }
+        // Security: empty-string keys are almost certainly a config bug and
+        // would authenticate any client that happens to send `Bearer `.
+        for (idx, k) in self.security.api_keys.iter().enumerate() {
+            if k.is_empty() {
+                errors.push(format!(
+                    "security.api_keys[{idx}] is an empty string — remove it or assign a non-empty secret"
+                ));
+            }
+        }
+        for (idx, entry) in self.security.api_keys_rbac.iter().enumerate() {
+            if entry.key.is_empty() {
+                errors.push(format!(
+                    "security.api_keys_rbac[{idx}].key is empty — remove it or assign a non-empty secret"
+                ));
+            }
+        }
         // Deployment profile invariants (ROADMAP_0.2 §0.1-0.2).
         match self.deployment_profile {
             DeploymentProfile::Dev => {}
@@ -871,6 +904,99 @@ executors:
             let config: ClusterConfig = serde_yaml::from_str(&yaml).unwrap();
             assert!(config.validate().is_ok(), "scheme rejected: {path}");
         }
+    }
+
+    // ── H1: bounds-validation hardening ──
+
+    #[test]
+    fn test_validate_rejects_zero_oversample_factor() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+server:
+  oversample_factor: 0
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("oversample_factor"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_concurrent_queries() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+server:
+  max_concurrent_queries: 0
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("max_concurrent_queries"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_replica_factor() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+replica_factor: 0
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("replica_factor"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_health_check_interval() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+health_check:
+  interval_secs: 0
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("health_check.interval_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_api_key_legacy() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+security:
+  api_keys: ["real-key", ""]
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("api_keys[1]"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_api_key_rbac() {
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+security:
+  api_keys_rbac:
+    - {key: "real", role: "read"}
+    - {key: "", role: "admin"}
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("api_keys_rbac[1]"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_ok_sane_defaults() {
+        // Regression: the default config must continue to pass validate().
+        let yaml = r#"
+tables: []
+executors: [{id: w0, host: "127.0.0.1", port: 50100}]
+"#;
+        let config: ClusterConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok(),
+                "default config must validate after bounds hardening");
     }
 
     #[test]
