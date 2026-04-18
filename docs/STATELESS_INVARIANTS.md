@@ -92,14 +92,23 @@
 
 ## 三、Gap 清单（按严重度）
 
-### 🔴 Gap A：API Key / RBAC 仅在 config（service.rs:48 + auth.rs:53）
+### 🔴 Gap A：API Key / RBAC 仅在 config（service.rs:48 + auth.rs:53 + coordinator/bin/main.rs:112-114）
 
 **现状**：`SecurityConfig.api_keys` 在 YAML 里，启动读入后 `ApiKeyInterceptor.keys` 就 frozen。
+
+**⚠️ 严重性加乘**：`coordinator/bin/main.rs:112-114` 把 legacy `api_keys`（非 RBAC 格式）**默认赋 Admin 角色**：
+```rust
+for k in &config.security.api_keys {
+    role_map.entry(k.clone()).or_insert(Role::Admin);
+}
+```
+这意味着：**轮换一个旧格式 key 等于发放管理员权限**。B1.2.3 里要同步修这个语义默认（改为 ReadOnly，或要求显式指定）。
 
 **SaaS 影响**：
 - 无法运行时添加/撤销 key → 客户要求轮换 key 时必须滚动重启
 - 多 coord 部署下，key 变更需要同步所有 coord 的 config 文件
 - 违反 SaaS "state in OBS" 原则
+- Legacy key 默认 Admin 让权限最小化原则失效
 
 **拟修方向**（B1.2 任务）：
 - MetaStore 新增 `auth/keys/{key_id}` 前缀条目

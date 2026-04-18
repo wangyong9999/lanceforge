@@ -25,6 +25,8 @@
 - 目的是**冷冻保存**未来 SQL 分析能力的底座，而不是让它腐化或污染主路径
 - 0.2 验收标准：默认 build `cargo build --workspace` 不编译 ballista；feature-gated `--features sql-analytics` 下仍可编译
 
+**当前状态（2026-04-18）**：Ballista **仍在默认 members**（`Cargo.toml:20-34`）—— `ballista-cli`、`ballista/{client,core,executor,scheduler}`、`benchmarks`（ballista-benchmarks）、`examples`（ballista-examples）7 个 crate 全在。已验证 `crates/*` 对 `ballista/*` 零依赖，隔离可行。对应行动项 **L0.6**（见 §4）。
+
 ### 0.4 对 PHASE17_SUMMARY §十的推翻
 
 原"self-hosted + 等客户需求"框架下的"明确不做"清单，在 SaaS-first 下反转：
@@ -390,14 +392,19 @@
 
 ## 4. 本周启动顺序（具体动作）
 
-| 序 | 动作 | 预期时间 |
+| 序 | 动作 | 状态 |
 |---|---|---|
-| 1 | 跑 e2e_ha_test.py 验证 A1 → commit | 运行中 |
-| 2 | A3 删 persistent_state.rs（562 LOC） | 30 min |
-| 3 | A2 profile 混合 RW，出 PROFILE_MIXED_RW.md | 2h |
-| 4 | 归档 PLAN.md / PHASE17_SUMMARY.md | 10 min |
-| 5 | 本 ROADMAP commit | （含在本次）|
-| 6 | 进 B1.1 持久状态审计 | 下周 |
+| L0.1 | 跑 e2e_ha_test.py 验证 A1 → commit | ✅ `1a30f5e` |
+| L0.2 | A3 删 persistent_state.rs（562 LOC） | ✅ `0818949` |
+| L0.3 | A2 profile 混合 RW，出 PROFILE_MIXED_RW.md | ✅ `8798480` |
+| L0.4 | 归档 PLAN.md / PHASE17_SUMMARY.md | ✅ `87df6b0` |
+| L0.5 | 本 ROADMAP commit | ✅ `87df6b0` |
+| B1.1 | 持久状态审计，出 STATELESS_INVARIANTS.md | ✅ `e4bf58e` |
+| **L0.6** | **Ballista workspace 物理隔离**（见 §0.3 当前状态） | ⏳ ~1d，预期 B1.2.1 前做 |
+| B1.2.1 | `deployment_profile` 启动守卫（闭 Gap C + D） | ⏳ ~2d |
+| B1.2.2 | auto-shard config → MetaStore（闭 Gap B） | ⏳ ~1w |
+| B1.2.3 | API key registry → MetaStore + hot-reload（闭 Gap A） | ⏳ ~2w |
+| B1.2.4 | 升级兼容测试 | ⏳ ~3d |
 
 ---
 

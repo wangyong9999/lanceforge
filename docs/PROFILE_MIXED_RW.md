@@ -104,6 +104,20 @@ cache 粒度：**整张表 × 整体 dataset_version**。任意写 → version++
 - writer 的 S3 PUT await 期间，调度器可能给 readers 让路不均
 - **可证伪**：tokio-console 打 runtime metrics
 
+### H5（中置信）IVF 索引延迟重建 / fragment 累积
+- Bench 30s × 10 QPS × 100 rows/batch = 30K 新增行 × 100 次 fragment 创建
+- lancedb 可能触发 fragment metadata 重组 或 索引延迟重建
+- 索引重建涉及读全量新增数据 + 写索引文件，CPU + I/O 都重
+- **可证伪**：检查 lancedb 版本相关的 auto-compact / index-rebuild 配置；
+  关掉 `CompactionConfig` 自动压实看 QPS 变化
+
+### H6（中置信）存储 I/O fsync contention
+- Writer 每 batch 写 lance fragment + 更新 manifest，含 fsync
+- Reader 的 cache miss 会读 fragment 数据文件
+- 本地 fs 上 fsync 对整盘都有影响（ext4 write barrier）
+- **可证伪**：strace -c writer/reader 进程，看 fsync/write 计数分布；
+  或切 tmpfs（牺牲持久性）重跑 bench
+
 ## 六、B2.1 Profile 任务清单
 
 按先易后难排序，每项单独 commit：
@@ -133,7 +147,15 @@ cache 粒度：**整张表 × 整体 dataset_version**。任意写 → version++
 - 跑 30s 抓 manifest 相关日志条数
 - 对比 read-only vs +10qps 看 reload 频率
 
-### 6.5 火焰图（后置）
+### 6.5 tmpfs 对比（H6 证伪）
+- 把 BASE 从 `/tmp/lanceforge_bench17_mixed` 换到 `tmpfs` 挂载点
+- 跑同 bench；若 mixed QPS 显著回升 → 磁盘 fsync 是主因
+
+### 6.6 关闭 CompactionConfig（H5 证伪）
+- `config.compaction.enabled=false`
+- 跑同 bench；若无改善 → H5 排除
+
+### 6.7 火焰图（后置）
 - `cargo build --release` 带 debuginfo
 - `perf record -g` 跑 30s bench
 - `perf script | stackcollapse | flamegraph.pl`
