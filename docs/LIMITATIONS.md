@@ -157,6 +157,25 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 具体数据见 [BENCHMARK.md](./BENCHMARK.md)。
 
+## 13. Worker RSS 在 sustained-read 下的周期性 warmup
+
+**实测**（G4 beta soak，见 `soak/results/soak_60min_20260419_130316.json`）：
+
+- 20K 行表 × 64d × IVF_FLAT-16，5 readers × ~10 QPS，60 min 持续
+- **Coord**：RSS +2.91%、fd +0.00% —— 稳
+- **Worker**：RSS +15~17%、fd 13→15（两个 worker 各 +2 fd）
+
+Worker 的增长**不是线性泄漏**：sampling 序列 0→30 min 属于初始 cache warmup（RSS 缓慢上升约 +3%），30→55 min 完全平（±0），55→60 min **一个 14 MB + 2 fd 的 step** —— 两个 worker 同步发生 —— 是 Lance 背景 fragment reload 事件，典型的"cache 命中一个新 segment 并把 file handle 保留"。
+
+**与 alpha 对比**：alpha 15 min soak 的 w0/w1 RSS 增长为 +228%/+231%（H25 修复前的粗放 cache 管理）。beta 在 4 倍时长下只增 +15~17%，已经好 15 倍，但 3% 门槛对 warmup 事件太严。
+
+**生产建议**：
+- 先用 10-15 MB/worker/hour 作为"可接受 warmup 上限"规划 pod memory limit，留 20~30% headroom。
+- 如果 4h+ 运行后 RSS 仍在线性上涨（而不是阶梯式 + 长时间持平），那就是真漏了，需要抓火焰图。
+- Coord 的 3% 门槛**仍然是硬约束** —— coord 是 stateless scatter-gather，不应该有任何漏。
+
+**计划**：0.3 把 soak 扩到 4h 并按 Welford 方法计算"阶梯高度 / 阶梯间隔"两个维度，区分 warmup 与泄漏。
+
 ---
 
 ## 如何上报新发现的限制
