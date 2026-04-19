@@ -239,21 +239,24 @@ mod tests {
     use super::*;
     use crate::store::FileMetaStore;
 
-    async fn test_state() -> MetaShardState {
-        let path = format!("/tmp/lanceforge_metastate_test_{}.json", rand_id());
-        let _ = tokio::fs::remove_file(&path).await;
+    /// Create a `MetaShardState` backed by a per-test temp dir. The
+    /// returned `TempDir` must be bound to a variable so the directory
+    /// lives for the duration of the test — dropping it deletes the
+    /// on-disk metastore. Previous versions of this helper used
+    /// hardcoded `/tmp/lanceforge_metastate_*.json` paths keyed by
+    /// nanosecond wall clock; under cargo's default multi-thread test
+    /// runner two `#[tokio::test]`s could pick the same nanosecond and
+    /// collide on the FileMetaStore advisory lock (see H23).
+    async fn test_state() -> (MetaShardState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
         let store = Arc::new(FileMetaStore::new(&path).await.unwrap());
-        MetaShardState::new(store, "test")
-    }
-
-    fn rand_id() -> u64 {
-        use std::time::SystemTime;
-        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64
+        (MetaShardState::new(store, "test"), dir)
     }
 
     #[tokio::test]
     async fn test_register_and_query_table() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         let mut mapping = HashMap::new();
         mapping.insert("s0".to_string(), vec!["w0".to_string()]);
         state.register_table("products", mapping).await;
@@ -268,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_executor() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         state.register_executor("w0", "127.0.0.1", 50100).await;
         state.register_executor("w1", "127.0.0.1", 50101).await;
 
@@ -278,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_executor() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         state.register_executor("w0", "127.0.0.1", 50100).await;
         state.register_executor("w1", "127.0.0.1", 50101).await;
         state.remove_executor("w0").await;
@@ -290,8 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_shard_state_survives_new_instance() {
-        let path = format!("/tmp/lanceforge_metastate_survive_{}.json", rand_id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
 
         // Instance 1: register table
         {
@@ -310,14 +313,12 @@ mod tests {
             assert!(tables.contains(&"my_table".to_string()),
                 "Table should survive across instances: {:?}", tables);
         }
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 
     // set_next_target → promote_target flips current and bumps version.
     #[tokio::test]
     async fn test_set_next_then_promote() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
 
         let mut initial = HashMap::new();
         initial.insert("s0".to_string(), vec!["w0".to_string()]);
@@ -343,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn test_promote_missing_table_errors() {
         use lance_distributed_common::shard_state::ShardStateError;
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         let err = state.promote_target("no_such_table").await;
         assert!(
             matches!(err, Err(ShardStateError::TableNotFound(ref t)) if t == "no_such_table"),
@@ -353,7 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_shard_routing_primary_and_secondary() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         let mut m = HashMap::new();
         m.insert("s0".to_string(), vec!["primary_w".to_string(), "secondary_w".to_string()]);
         m.insert("s1".to_string(), vec!["solo_w".to_string()]);
@@ -377,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_executors_for_table_dedup_and_missing() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         let mut m = HashMap::new();
         m.insert("s0".to_string(), vec!["w0".to_string(), "w1".to_string()]);
         m.insert("s1".to_string(), vec!["w0".to_string()]);
@@ -392,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_executor_idempotent() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
         state.register_executor("w0", "h", 1).await;
         state.register_executor("w0", "h", 1).await;
         state.register_executor("w0", "different_host", 2).await; // also idempotent by id
@@ -404,7 +405,7 @@ mod tests {
     // needs to remember their Lance dataset URIs across coordinator restarts).
     #[tokio::test]
     async fn test_shard_uri_lifecycle() {
-        let state = test_state().await;
+        let (state, _dir) = test_state().await;
 
         assert!(state.get_shard_uris().await.is_empty(), "fresh state has no URIs");
 
@@ -436,8 +437,8 @@ mod tests {
         // MetaShardState prefixes keys with "{prefix}/tables/". Using a
         // different prefix on the same store must not see tables from
         // the first namespace — multi-tenant isolation at the state level.
-        let path = format!("/tmp/lanceforge_metastate_ns_{}.json", rand_id());
-        let _ = tokio::fs::remove_file(&path).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("meta.json").to_string_lossy().to_string();
         let store: Arc<dyn MetaStore> = Arc::new(FileMetaStore::new(&path).await.unwrap());
 
         let ns_a = MetaShardState::new(store.clone(), "tenant_a");
@@ -451,7 +452,5 @@ mod tests {
         let b_tables = ns_b.all_tables().await;
         assert!(a_tables.contains(&"a_table".to_string()));
         assert!(b_tables.is_empty(), "tenant_b must not see tenant_a's tables");
-
-        let _ = tokio::fs::remove_file(&path).await;
     }
 }

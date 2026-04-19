@@ -1,0 +1,23 @@
+# Local build defaults for the lance-ballista workspace.
+#
+# Incremental compilation is on by default in cargo; pinning it here makes it
+# explicit so CI env overrides don't silently turn it off. The `jobs` key is
+# intentionally not set — cargo picks a sensible default based on $(nproc).
+[build]
+incremental = true
+
+# Enable sparse registry protocol (cuts `cargo update` index fetch time ~10x).
+[registries.crates-io]
+protocol = "sparse"
+
+# Hygiene aliases to keep target/ from ballooning over long dev cycles.
+# `cargo small` runs a routine lib-test sweep under the `ci` profile which
+# already strips debuginfo — ~150 MB integration-test binaries instead of
+# ~1.5 GB under dev.
+#
+# `cargo prune` drops everything except release/ and the llvm-cov coverage
+# sandbox. Run it at the end of each phase (or whenever `du -sh target`
+# crosses a few tens of GB).
+[alias]
+small = "test --profile ci --lib"
+prune = "clean --profile dev"
