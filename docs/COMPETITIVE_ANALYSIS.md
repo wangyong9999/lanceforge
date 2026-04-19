@@ -130,6 +130,6 @@
 
 **一句话结论**：**LanceForge 0.2-beta 可以以"**简单、OBS-native、开源、面向 AI RAG 场景**"** 为定位打包发布，**但必须补齐 Severity 1 的 6 个 Gap 才对得起"商用"这个词**。Severity 2 是"beta→GA 之间做"，Severity 3 是"0.3 roadmap"。
 
-## 五、见表 `RELEASE_PLAN_0.2_BETA.md`
+## 五、见表 `docs/archive/RELEASE_PLAN_0.2_BETA.md`
 
-具体实施计划（估工、顺序、验收）在独立文档。本文件只讲**为什么**做这些，那份讲**怎么**做。
+具体实施计划（估工、顺序、验收）落在归档目录。本文件讲**为什么**做这些；实施细节与完成情况见 `RELEASE_NOTES.md` 里 0.2.0-beta.1 条目。
