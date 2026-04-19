@@ -309,21 +309,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server = server.tls_config(tls_config)?;
     }
 
-    // Graceful shutdown (H21). Listen for both SIGINT (Ctrl+C, local dev)
-    // and SIGTERM (K8s pod termination). Fire bg_shutdown as soon as the
-    // signal arrives so background tasks (REST, auth reload, orphan GC,
-    // health-check loop) can begin draining *in parallel* with the gRPC
-    // in-flight drain — otherwise they hog the tokio runtime while the
-    // gRPC server is waiting on them.
+    // Graceful shutdown (H21, fixed H25). Listen for both SIGINT
+    // (Ctrl+C, local dev) and SIGTERM (K8s pod termination). Fire
+    // `bg_shutdown` as soon as the signal arrives so background tasks
+    // (REST, auth reload, orphan GC, health-check loop) begin draining
+    // *in parallel* with the gRPC in-flight drain — otherwise they hog
+    // the tokio runtime while the gRPC server is waiting on them.
     //
-    // Additionally, bound the total shutdown window at
-    // `2 × query_timeout + 5s` so a stuck in-flight RPC can't trap the
-    // pod longer than K8s's terminationGracePeriodSeconds budget. The
-    // per-query `query_timeout` inside scatter_gather ensures no single
-    // RPC takes longer than that anyway; this is a seatbelt.
+    // A separate seatbelt task caps the drain window at
+    // `2 × query_timeout + 5s`: once `bg_shutdown` fires the seatbelt
+    // waits that long and then `std::process::exit(1)`. This keeps a
+    // stuck in-flight RPC from trapping the pod longer than K8s's
+    // `terminationGracePeriodSeconds` budget. The per-query
+    // `query_timeout` inside scatter_gather ensures no single RPC takes
+    // longer than that anyway; this is belt-and-braces.
+    //
+    // **Why the seatbelt is a separate task, not
+    // `tokio::time::timeout(max_shutdown, serve_fut)`**:
+    // wrapping `serve_fut` in a timeout makes the *entire* server
+    // lifetime budget-bound, not just the drain — without a shutdown
+    // signal the coord would die at `max_shutdown` seconds flat. H21
+    // originally shipped that shape and it silently limited every
+    // coordinator pod to 65 s of uptime; the 60 min read-only soak in
+    // G4 re-surfaced it. The fix is to bind the budget only to the
+    // drain window, which starts when `bg_shutdown` is notified.
     let bg_shutdown_for_signal = bg_shutdown.clone();
+    let bg_shutdown_for_seatbelt = bg_shutdown.clone();
     let query_timeout = Duration::from_secs(server_cfg.query_timeout_secs);
     let max_shutdown = query_timeout.saturating_mul(2).saturating_add(Duration::from_secs(5));
+    tokio::spawn(async move {
+        bg_shutdown_for_seatbelt.notified().await;
+        tokio::time::sleep(max_shutdown).await;
+        warn!(
+            "Graceful shutdown exceeded {}s budget; forcing exit. \
+             In-flight queries may have been abandoned — check metrics / logs.",
+            max_shutdown.as_secs()
+        );
+        std::process::exit(1);
+    });
+
     let shutdown_signal = async move {
         #[cfg(unix)]
         {
@@ -341,21 +365,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Shutdown signal received — draining in-flight requests...");
         }
         // Fire bg_shutdown the moment we know we're shutting down so
-        // background tasks start exiting in parallel with the gRPC drain.
+        // background tasks start exiting in parallel with the gRPC drain
+        // AND the seatbelt starts its force-exit countdown.
         bg_shutdown_for_signal.notify_waiters();
     };
 
-    let serve_fut = server.add_service(svc).serve_with_shutdown(addr, shutdown_signal);
-    match tokio::time::timeout(max_shutdown, serve_fut).await {
-        Ok(result) => result?,
-        Err(_) => {
-            warn!(
-                "Graceful shutdown exceeded {}s budget; forcing exit. \
-                 In-flight queries may have been abandoned — check metrics / logs.",
-                max_shutdown.as_secs()
-            );
-        }
-    }
+    server.add_service(svc).serve_with_shutdown(addr, shutdown_signal).await?;
 
     // Stop remaining handles. bg_shutdown was fired above on signal, but
     // re-notify to cover the rare case where serve completed without ever
