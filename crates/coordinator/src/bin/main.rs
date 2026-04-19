@@ -127,11 +127,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // G6: build per-key QPS limits in the same pass so they stay in sync
     // with the role map.
     let mut rate_map: StdMap<String, u32> = StdMap::new();
+    // G5: per-key namespace bindings. Collected in the same pass so the
+    // auth interceptor has one consistent view of every key's role, quota,
+    // and namespace when it hot-reloads.
+    let mut ns_map: StdMap<String, String> = StdMap::new();
     for e in &config.security.api_keys_rbac {
         if let Some(r) = Role::parse(&e.role) {
             role_map.insert(e.key.clone(), r);
             if e.qps_limit > 0 {
                 rate_map.insert(e.key.clone(), e.qps_limit);
+            }
+            if let Some(ns) = e.namespace.as_ref().filter(|s| !s.is_empty()) {
+                ns_map.insert(e.key.clone(), ns.clone());
             }
         } else {
             warn!("Ignoring api_keys_rbac entry with invalid role: {}", e.role);
@@ -151,7 +158,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("auth: enforcing per-key QPS limits on {} key(s)", rate_map.len());
         auth_arc.set_rate_limits(rate_map);
     }
+    if !ns_map.is_empty() {
+        info!("auth: binding {} key(s) to namespaces (G5)", ns_map.len());
+        auth_arc.set_namespaces(ns_map);
+    }
     service = service.with_auth(auth_arc.clone());
+
+    // Grab the background-shutdown notify handle before any subsystem that
+    // needs it is wired up. The audit sink (G7) and the metastore / meta
+    // refresh tasks below all hang off this same signal.
+    let bg_shutdown = service.bg_shutdown();
+
+    // G7: persistent audit sink. Spawned before the service moves into
+    // the gRPC server so the sender is in place when the first request
+    // arrives. Skip entirely when the operator hasn't configured a path
+    // — keeps 0.1 stdout-only behaviour for dev clusters.
+    if let Some(ref audit_path) = config.security.audit_log_path {
+        let audit_sink = lance_distributed_common::audit::AuditSink::spawn(
+            audit_path.clone(),
+            bg_shutdown.clone(),
+        );
+        service = service.with_audit_sink(audit_sink);
+    }
 
     // B2.2: install per-worker role preferences so the scatter-gather and
     // write paths can split read vs write traffic across replicas. No-op
@@ -161,7 +189,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = service.metrics();
     // Keep handles for graceful shutdown
     let shutdown_handle = service.pool_shutdown_handle();
-    let bg_shutdown = service.bg_shutdown();
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     // B1.2.3: MetaStore-backed key registry.

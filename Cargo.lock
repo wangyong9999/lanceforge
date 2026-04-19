@@ -4038,6 +4038,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lance-admin"
+version = "0.2.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "clap 4.6.1",
+ "env_logger",
+ "lance-distributed-common",
+ "lance-distributed-meta",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lance-arrow"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

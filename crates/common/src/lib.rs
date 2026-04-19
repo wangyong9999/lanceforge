@@ -2,6 +2,7 @@
 // Lance Distributed Common — shared config, state, pruning, metrics, IPC utils.
 #![allow(unexpected_cfgs)]
 
+pub mod audit;
 pub mod auto_shard;
 pub mod config;
 pub mod ipc;

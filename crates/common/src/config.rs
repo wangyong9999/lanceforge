@@ -309,6 +309,17 @@ impl Default for HealthCheckConfig {
 /// TLS and authentication configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityConfig {
+    /// Optional path or OBS URI where a persistent audit log is appended
+    /// (G7). Each DDL / write RPC produces one JSONL record
+    /// `{timestamp,op,principal,target,details}`. Empty = keep the
+    /// stdout-only 0.1 behaviour. Supported schemes: local filesystem,
+    /// `s3://`, `gs://`, `az://`.
+    ///
+    /// Rotation / retention is out of scope — operators can use logrotate
+    /// for local files or S3 lifecycle rules for OBS. We append, we never
+    /// rewrite.
+    #[serde(default)]
+    pub audit_log_path: Option<String>,
     /// Path to PEM-encoded server certificate (enables TLS when set).
     #[serde(default)]
     pub tls_cert: Option<String>,
@@ -344,6 +355,13 @@ pub struct ApiKeyEntry {
     /// CreateIndex/s is rate-limited the same as 100 AnnSearch/s.
     #[serde(default)]
     pub qps_limit: u32,
+    /// Optional namespace binding (G5). When set, the coordinator requires
+    /// every table name this key references to begin with `{namespace}/`
+    /// and filters `ListTables` output to that prefix. Keys without a
+    /// namespace retain 0.1 behaviour (see every table). Admin-role keys
+    /// without a namespace keep operator / break-glass access.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 impl SecurityConfig {

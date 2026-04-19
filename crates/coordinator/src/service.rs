@@ -64,6 +64,10 @@ pub struct CoordinatorService {
     /// known id replay the cached response without re-executing the write.
     /// Empty request_id skips the cache entirely — 0.1 behaviour.
     write_dedup: Arc<tokio::sync::RwLock<std::collections::HashMap<String, (std::time::Instant, pb::WriteResponse)>>>,
+    /// Optional persistent audit sink (G7). When set, every `audit()` call
+    /// also appends a JSONL record to the configured path (local file or
+    /// OBS URI).
+    audit_sink: Option<lance_distributed_common::audit::AuditSink>,
 }
 
 /// How long a completed write's request_id stays deduplicatable.
@@ -258,7 +262,17 @@ impl CoordinatorService {
             meta_state: None,
             ddl_locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             write_dedup: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            audit_sink: None,
         }
+    }
+
+    /// Install a persistent audit sink (G7). Every subsequent `audit()`
+    /// call writes a JSONL record to the sink in addition to the usual
+    /// info! log line. Call once at startup before the gRPC server takes
+    /// ownership.
+    pub fn with_audit_sink(mut self, sink: lance_distributed_common::audit::AuditSink) -> Self {
+        self.audit_sink = Some(sink);
+        self
     }
 
     /// Attach an auth interceptor for RBAC enforcement at method level.
@@ -284,14 +298,68 @@ impl CoordinatorService {
         Ok(())
     }
 
+    /// Enforce API-key ↔ namespace binding (G5). Called after `check_perm`
+    /// on every RPC that names a table. Callers whose key has no namespace
+    /// binding (or no auth configured) pass through; callers bound to a
+    /// namespace get `PermissionDenied` unless the table name begins with
+    /// `{namespace}/`. This is a name-prefix boundary, not a storage-layer
+    /// one — see `docs/SECURITY.md` §5 for scope.
+    fn check_ns<T>(&self, req: &Request<T>, table: &str) -> Result<(), Status> {
+        if let Some(a) = &self.auth {
+            a.check_namespace(req, table)?;
+        }
+        Ok(())
+    }
+
     /// Emit an audit log line for a sensitive action (write/admin). Level=info.
-    /// Format: `audit op=<op> principal=<short_key> target=<table> details=<...>`
+    /// Format: `audit op=<op> principal=<short_key> target=<table> details=<...>`.
+    /// Also submits a structured JSONL record to the configured audit sink
+    /// (G7) when one is installed, so DDL + write events are durably
+    /// archived for SIEM ingestion.
+    ///
+    /// If the caller passed a W3C `traceparent` metadata header (G10) the
+    /// extracted trace_id is added to both the stdout line and the JSONL
+    /// record so cross-process log correlation works without a full OTEL
+    /// exporter pipeline.
     fn audit<T>(&self, req: &Request<T>, op: &str, target: &str, details: &str) {
         let principal = self.auth.as_ref()
             .map(|a| a.principal(req))
             .unwrap_or_else(|| "no-auth".to_string());
-        info!("audit op={} principal={} target={} details={}", op, principal, target, details);
+        let trace_id = extract_trace_id(req);
+        let trace_fragment = match &trace_id {
+            Some(t) => format!(" trace_id={t}"),
+            None => String::new(),
+        };
+        info!("audit op={} principal={} target={} details={}{}",
+              op, principal, target, details, trace_fragment);
+        if let Some(ref sink) = self.audit_sink {
+            let details_with_trace = match &trace_id {
+                Some(t) => format!("{details} trace_id={t}"),
+                None => details.to_string(),
+            };
+            sink.submit(lance_distributed_common::audit::AuditRecord::new(
+                op, &principal, target, &details_with_trace,
+            ));
+        }
     }
+}
+
+/// Parse the W3C `traceparent` metadata header and return the middle
+/// `trace_id` segment (32 hex chars). Returns None when the header is
+/// missing or doesn't match the shape `version-trace-span-flags`.
+/// Version byte is not validated — every caller that emits a traceparent
+/// uses `00` today, but a future `01` should still be parseable here.
+/// Corrupt shapes return None instead of panicking — we treat bad
+/// traceparent as "no tracing" rather than failing the RPC.
+fn extract_trace_id<T>(req: &Request<T>) -> Option<String> {
+    let raw = req.metadata().get("traceparent")?.to_str().ok()?;
+    let mut parts = raw.split('-');
+    parts.next()?;                  // version
+    let trace = parts.next()?;      // 32 hex chars
+    if trace.len() != 32 || !trace.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(trace.to_string())
 }
 
 /// Keep audit-log line bounded when the payload contains a long filter
@@ -494,6 +562,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<AnnSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!(
                 "Too many concurrent queries (max {})", self.max_concurrent_queries
@@ -555,6 +624,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<FtsSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -590,6 +660,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<HybridSearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -663,6 +734,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::AddRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let req_ref = request.get_ref();
         self.audit(&request, "AddRows", &req_ref.table_name,
                    &format!("bytes={} on_columns={} request_id={}",
@@ -759,6 +831,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::DeleteRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let req_ref = request.get_ref();
         self.audit(&request, "DeleteRows", &req_ref.table_name,
                    &format!("filter={}", truncate_for_audit(&req_ref.filter)));
@@ -835,6 +908,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::UpsertRowsRequest>,
     ) -> Result<Response<pb::WriteResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Write)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let req_ref = request.get_ref();
         self.audit(&request, "UpsertRows", &req_ref.table_name,
                    &format!("bytes={} on_columns={} request_id={}",
@@ -943,7 +1017,8 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CreateTableRequest>,
     ) -> Result<Response<pb::CreateTableResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
-        self.audit(&request, "CreateTable", "<inline>", "");
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        self.audit(&request, "CreateTable", &request.get_ref().table_name, "");
         let req = request.into_inner();
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
@@ -1117,6 +1192,13 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<pb::ListTablesResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         let tables = self.shard_state.all_tables().await;
+        // G5: filter by caller's namespace so tenant A doesn't learn the
+        // table names of tenant B. Callers with no namespace binding get
+        // the full list (operator / break-glass path).
+        let tables = match &self.auth {
+            Some(a) => a.filter_namespace(&request, tables),
+            None => tables,
+        };
         Ok(Response::new(pb::ListTablesResponse {
             table_names: tables,
             error: String::new(),
@@ -1128,6 +1210,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::DropTableRequest>,
     ) -> Result<Response<pb::DropTableResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         self.audit(&request, "DropTable", &request.get_ref().table_name, "");
         let req = request.into_inner();
         if req.table_name.is_empty() {
@@ -1185,6 +1268,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CreateIndexRequest>,
     ) -> Result<Response<pb::CreateIndexResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         self.audit(&request, "CreateIndex",
             &request.get_ref().table_name,
             &format!("column={} type={}", request.get_ref().column, request.get_ref().index_type));
@@ -1230,6 +1314,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::GetSchemaRequest>,
     ) -> Result<Response<pb::GetSchemaResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let req = request.into_inner();
         let executors = self.shard_state.executors_for_table(&req.table_name).await;
         if executors.is_empty() {
@@ -1257,6 +1342,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::CountRowsRequest>,
     ) -> Result<Response<pb::CountRowsResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let req = request.into_inner();
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
@@ -1556,6 +1642,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::GetByIdsRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -1654,6 +1741,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::QueryRequest>,
     ) -> Result<Response<pb::SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -1754,6 +1842,7 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::BatchSearchRequest>,
     ) -> Result<Response<pb::BatchSearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -2696,5 +2785,83 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let arr: ArrayRef = Arc::new(Int32Array::from(values));
         arrow::array::RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
+
+    // ── G10: traceparent parsing ──
+
+    #[test]
+    fn test_extract_trace_id_w3c_shape() {
+        use tonic::metadata::MetadataValue;
+        let mut req = Request::new(());
+        req.metadata_mut().insert(
+            "traceparent",
+            MetadataValue::try_from("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").unwrap(),
+        );
+        let tid = extract_trace_id(&req).expect("well-formed traceparent must parse");
+        assert_eq!(tid, "4bf92f3577b34da6a3ce929d0e0e4736");
+    }
+
+    #[test]
+    fn test_extract_trace_id_missing_header_returns_none() {
+        let req = Request::new(());
+        assert!(extract_trace_id(&req).is_none());
+    }
+
+    #[test]
+    fn test_extract_trace_id_rejects_bad_shape() {
+        use tonic::metadata::MetadataValue;
+        let mut req = Request::new(());
+        // Too short — not 32 hex chars.
+        req.metadata_mut().insert(
+            "traceparent",
+            MetadataValue::try_from("00-deadbeef-00f067aa0ba902b7-01").unwrap(),
+        );
+        assert!(extract_trace_id(&req).is_none(),
+                "malformed traceparent must return None, not panic");
+    }
+
+    // ── G7: persistent audit sink end-to-end ──
+    //
+    // Verifies that `CoordinatorService::audit()` actually writes a JSONL
+    // record to the configured sink. The audit.rs unit tests already cover
+    // the sink in isolation; this test covers the wiring between the
+    // service layer and the sink, which is what would break silently if a
+    // future refactor drops the `with_audit_sink` call site.
+
+    #[tokio::test]
+    async fn test_audit_sink_records_write_op() {
+        use lance_distributed_common::audit::AuditSink;
+        use tokio::sync::Notify;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log").to_string_lossy().to_string();
+        let shutdown = Arc::new(Notify::new());
+
+        let sink = AuditSink::spawn(path.clone(), shutdown.clone());
+        let svc = CoordinatorService::new(&make_config(), Duration::from_secs(5))
+            .with_audit_sink(sink);
+
+        // Fake a request from a known principal (no auth = principal
+        // becomes "no-auth") and submit an audit line through the private
+        // audit() path. We only expose this via the pb::AddRowsRequest
+        // shape to exercise the same code path a real RPC would.
+        let req = Request::new(pb::AddRowsRequest {
+            table_name: "t1".to_string(),
+            arrow_ipc_data: vec![0; 5],
+            on_columns: vec![],
+            request_id: String::new(),
+        });
+        svc.audit(&req, "AddRows", "t1", "bytes=5");
+
+        // Allow the background sink task to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        shutdown.notify_waiters();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("\"op\":\"AddRows\""),
+                "audit file must contain the op we submitted: {content}");
+        assert!(content.contains("\"target\":\"t1\""));
     }
 }

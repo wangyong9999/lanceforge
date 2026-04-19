@@ -98,8 +98,9 @@ impl RateBucket {
 /// `Arc` under a read lock and releases the lock immediately, so a concurrent
 /// reload never blocks request handling. ROADMAP_0.2 §B1.2.3.
 ///
-/// Per-key QPS quotas (G6) live in a parallel map keyed by the same API
-/// key. Updated by `reload()` alongside the role map.
+/// Per-key QPS quotas (G6) and namespace bindings (G5) live in parallel
+/// maps keyed by the same API key. Updated by `reload()` alongside the
+/// role map.
 #[derive(Clone)]
 pub struct ApiKeyInterceptor {
     /// Map from key → role. Empty map = no auth required (all allowed as Admin).
@@ -107,6 +108,10 @@ pub struct ApiKeyInterceptor {
     /// Map from key → rate bucket. Only keys with qps_limit > 0 appear here;
     /// unrated keys are allowed through without a bucket lookup cost.
     buckets: Arc<std::sync::RwLock<Arc<HashMap<String, Arc<RateBucket>>>>>,
+    /// Map from key → namespace prefix (G5). Only keys that declared a
+    /// non-empty namespace appear here. A missing entry means "no
+    /// namespace binding" — caller can reference any table.
+    namespaces: Arc<std::sync::RwLock<Arc<HashMap<String, String>>>>,
 }
 
 impl ApiKeyInterceptor {
@@ -122,6 +127,7 @@ impl ApiKeyInterceptor {
         Self {
             keys: Arc::new(std::sync::RwLock::new(Arc::new(map))),
             buckets: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
+            namespaces: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
         }
     }
 
@@ -130,6 +136,7 @@ impl ApiKeyInterceptor {
         Self {
             keys: Arc::new(std::sync::RwLock::new(Arc::new(keys))),
             buckets: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
+            namespaces: Arc::new(std::sync::RwLock::new(Arc::new(HashMap::new()))),
         }
     }
 
@@ -144,6 +151,63 @@ impl ApiKeyInterceptor {
             }
         }
         *self.buckets.write().expect("auth buckets lock poisoned") = Arc::new(buckets);
+    }
+
+    /// Install per-key namespace bindings (G5). Keys not present in the
+    /// map have no namespace restriction. Called once at startup from
+    /// `coordinator/bin/main.rs`.
+    pub fn set_namespaces(&self, bindings: HashMap<String, String>) {
+        let filtered: HashMap<String, String> = bindings
+            .into_iter()
+            .filter(|(_, ns)| !ns.is_empty())
+            .collect();
+        *self.namespaces.write().expect("auth namespaces lock poisoned") = Arc::new(filtered);
+    }
+
+    /// Snapshot the current namespace map. Cheap (Arc clone).
+    fn namespaces_snapshot(&self) -> Arc<HashMap<String, String>> {
+        self.namespaces.read().expect("auth namespaces lock poisoned").clone()
+    }
+
+    /// Resolve the caller's namespace binding, if any. Used by the
+    /// coordinator service to enforce `{ns}/` prefix on every table
+    /// reference. Returns `None` when the caller is unauthenticated, has
+    /// no key header, or the key is not bound to a namespace.
+    pub fn namespace_for<T>(&self, req: &Request<T>) -> Option<String> {
+        let key = req.metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.strip_prefix("Bearer ").unwrap_or(s))?;
+        self.namespaces_snapshot().get(key).cloned()
+    }
+
+    /// Enforce namespace prefix on a table name for the caller. Returns
+    /// `PermissionDenied` when the caller's key is bound to a namespace
+    /// and `table` does not start with `{namespace}/`. Callers without a
+    /// namespace (or unauthenticated setups) pass through.
+    pub fn check_namespace<T>(&self, req: &Request<T>, table: &str) -> Result<(), Status> {
+        if let Some(ns) = self.namespace_for(req) {
+            let required = format!("{}/", ns);
+            if !table.starts_with(&required) {
+                return Err(Status::permission_denied(format!(
+                    "table '{table}' not in caller's namespace '{ns}/'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Filter a list of table names by the caller's namespace binding.
+    /// Callers without a namespace see the full list (keeps operator
+    /// `ListTables` usable for break-glass admins).
+    pub fn filter_namespace<T>(&self, req: &Request<T>, tables: Vec<String>) -> Vec<String> {
+        match self.namespace_for(req) {
+            Some(ns) => {
+                let prefix = format!("{}/", ns);
+                tables.into_iter().filter(|t| t.starts_with(&prefix)).collect()
+            }
+            None => tables,
+        }
     }
 
     /// Replace the live key registry atomically. Callers: the hot-reload
@@ -689,5 +753,99 @@ mod tests {
         let err = ic.authorize(&make_request_with_key("rate"), Permission::Read).unwrap_err();
         assert_eq!(err.code(), tonic::Code::ResourceExhausted,
                    "3rd request must get ResourceExhausted, got: {err:?}");
+    }
+
+    // ── G5: namespace binding ──
+
+    #[test]
+    fn test_ns_unbound_key_passes_any_table() {
+        let mut keys = HashMap::new();
+        keys.insert("free".to_string(), Role::Admin);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        // No namespace set for this key → every table name accepted.
+        let r = make_request_with_key("free");
+        assert!(ic.check_namespace(&r, "anything").is_ok());
+        let r = make_request_with_key("free");
+        assert!(ic.check_namespace(&r, "tenant-a/orders").is_ok());
+    }
+
+    #[test]
+    fn test_ns_bound_key_requires_prefix() {
+        let mut keys = HashMap::new();
+        keys.insert("alice".to_string(), Role::Write);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut ns = HashMap::new();
+        ns.insert("alice".to_string(), "tenant-a".to_string());
+        ic.set_namespaces(ns);
+
+        // Own namespace: allowed.
+        let r = make_request_with_key("alice");
+        assert!(ic.check_namespace(&r, "tenant-a/orders").is_ok());
+
+        // Wrong namespace: PermissionDenied.
+        let r = make_request_with_key("alice");
+        let err = ic.check_namespace(&r, "tenant-b/orders").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("tenant-a"),
+                "error should name the expected namespace, got: {err:?}");
+
+        // Bare name (no prefix): rejected.
+        let r = make_request_with_key("alice");
+        assert!(ic.check_namespace(&r, "orders").is_err());
+
+        // Prefix-match-but-different-ns: rejected. `tenant-abc/` must not
+        // satisfy a binding of `tenant-a`.
+        let r = make_request_with_key("alice");
+        assert!(ic.check_namespace(&r, "tenant-abc/orders").is_err(),
+                "prefix check must demand a trailing slash");
+    }
+
+    #[test]
+    fn test_ns_filter_hides_other_tenants_in_list() {
+        let mut keys = HashMap::new();
+        keys.insert("alice".to_string(), Role::Read);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut ns = HashMap::new();
+        ns.insert("alice".to_string(), "tenant-a".to_string());
+        ic.set_namespaces(ns);
+
+        let all = vec![
+            "tenant-a/orders".to_string(),
+            "tenant-b/leads".to_string(),
+            "global/metrics".to_string(),
+            "tenant-a/customers".to_string(),
+        ];
+        let r = make_request_with_key("alice");
+        let filtered = ic.filter_namespace(&r, all);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|t| t.starts_with("tenant-a/")));
+    }
+
+    #[test]
+    fn test_ns_unbound_key_sees_full_list() {
+        let mut keys = HashMap::new();
+        keys.insert("op".to_string(), Role::Admin);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let all = vec!["a/x".to_string(), "b/y".to_string()];
+        let r = make_request_with_key("op");
+        let filtered = ic.filter_namespace(&r, all.clone());
+        assert_eq!(filtered, all,
+                   "unbound operator key must see every table name");
+    }
+
+    #[test]
+    fn test_ns_empty_string_is_not_a_binding() {
+        // Defensive: empty namespace string must not install a binding
+        // — otherwise every table would need to start with `/`.
+        let mut keys = HashMap::new();
+        keys.insert("k".to_string(), Role::Read);
+        let ic = ApiKeyInterceptor::with_roles(keys);
+        let mut ns = HashMap::new();
+        ns.insert("k".to_string(), "".to_string());
+        ic.set_namespaces(ns);
+        let r = make_request_with_key("k");
+        assert!(ic.check_namespace(&r, "any/table").is_ok());
+        let r = make_request_with_key("k");
+        assert!(ic.check_namespace(&r, "bare").is_ok());
     }
 }

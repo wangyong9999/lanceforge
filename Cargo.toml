@@ -25,6 +25,7 @@ members = [
     "crates/coordinator",
     "crates/worker",
     "crates/meta",
+    "crates/admin",
     # Ballista — kept in the workspace so ballista/* can still inherit
     # [workspace.package] / [workspace.dependencies], but excluded from
     # `default-members` so `cargo build` / `cargo test` (no flags) at the
@@ -46,6 +47,7 @@ default-members = [
     "crates/coordinator",
     "crates/worker",
     "crates/meta",
+    "crates/admin",
 ]
 resolver = "3"
 
@@ -91,6 +93,7 @@ parking_lot = { version = "0.12" }
 tempfile = { version = "3.26" }
 dashmap = { version = "6.1" }
 async-trait = { version = "0.1" }
+anyhow = { version = "1.0" }
 serde = { version = "1.0" }
 tokio-stream = { version = "0.1" }
 url = { version = "2.5" }
@@ -102,6 +105,18 @@ lance-index = { version = "0.37", default-features = false }
 lance-io = { version = "0.37", default-features = false }
 lance-table = { version = "0.37", default-features = false }
 lancedb = { version = "0.37", default-features = false }
+
+# Dev profile tuned to keep target/ small without losing useful backtraces.
+# Default cargo dev has `debug = 2` which produces ~1.5 GB integration-test
+# binaries — each `cargo test` rebuild leaves a fresh hashed copy behind and
+# deps/ balloons into hundreds of GB over a few weeks of iteration.
+# `line-tables-only` keeps file:line in panics and debugger stack traces but
+# strips local-variable debuginfo; `split-debuginfo = "unpacked"` writes
+# debug sections to separate .dwo files so the linker doesn't have to rewrite
+# them on every test recompile (link time drops ~30% on Linux).
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 # cargo build --profile release-lto
 [profile.release-lto]
