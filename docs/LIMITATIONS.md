@@ -70,17 +70,35 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 ## 9. 多租户 / 资源隔离
 
-- 目前**没有**每 API key 的 QPS quota / 存储 quota
-- `max_concurrent_queries` 是全局信号量，不区分 key
-- 多租户场景需要自己在上层网关做限流
+**0.2.0-beta.1 起有两层**：
+
+- ✅ **G6 per-key QPS quota**（token bucket）— `api_keys_rbac[].qps_limit`
+  设置即生效；超额返回 `ResourceExhausted`。这是 RPC 调用率上限，不区分查询成本。
+- ✅ **G5 API key → namespace 绑定**（名前缀校验）— `api_keys_rbac[].namespace`
+  设置后，客户端访问 `table_name` 必须以 `{ns}/` 开头，`ListTables` 响应也按前缀过滤。
+  不设 namespace 的 key 保持 0.1/alpha 行为（看全部表）。
+
+**仍然不做**（明确留到 0.3 或操作层解决）：
+
+- ❌ 每 namespace 的存储 quota / 连接数 quota
+- ❌ MetaStore 层面的隔离 — 若租户拿到 OBS 凭据可直接读/写其它 prefix 下的 .lance 文件；
+  真正密级隔离靠"一客户一 bucket + 独立 IAM"
+- ❌ 命名空间的重命名 / 批量删除原语
+- ❌ `max_concurrent_queries` 仍是全局信号量，不按 namespace 划分
+
+多租户生产环境的硬要求：配合上层 API 网关做流量整形，或者直接 "一客户一集群"（每租户独立 bucket + 独立 IAM）。
 
 ## 10. 未实现的企业级功能
 
 - ❌ Schema 演化（ALTER TABLE ADD COLUMN）
 - ❌ Time-travel / snapshot restore
-- ❌ OpenTelemetry 分布式追踪（只有结构化日志 + Prometheus 指标）
+- ⚠️ **OpenTelemetry 分布式追踪** — 0.2-beta 起解析 W3C `traceparent` header 并写入
+  stdout audit 行 + JSONL 记录（G10 最小版）。**尚未**做：向 OTLP collector 推 span、
+  coord → worker 的 trace 穿透（0.3 计划）
 - ❌ Python SDK 原生异步（当前同步 gRPC）
 - ❌ 流式搜索结果（当前一次性返回）
+- ⚠️ **Audit log 持久化到 OBS** — G7 本地文件路径可用；OBS URI（s3://…）暂时 warn-and-drop
+  因各家 OBS 的 append 语义不统一（0.3 计划补，见 `ROADMAP_0.2.md` R3）
 
 每一条都有明确理由不在当前版本实现（详见 Phase 15/16 的架构反思日志）。需要时再加。
 

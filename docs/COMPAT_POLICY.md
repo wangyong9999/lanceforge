@@ -94,14 +94,30 @@ Lance 自身的 manifest 版本由 `lancedb` crate 管理。LanceForge 不直接
 - `crates/meta/src/store.rs::test_schema_version_future_rejected`：守护 Persistence 向前拒绝
 - 每一次 break 都要扩充或新增此类测试
 
-## 九、当前状态（0.2.0-pre.1 视角）
+## 九、当前状态（0.2.0-beta.1 视角）
 
 | 维度 | 当前兼容性状态 |
 |---|---|
 | 0.1.x → 0.2 wire | ✅ 加法更新，完全兼容 |
 | 0.1.x → 0.2 persistence | ✅ auto-upgrade 生效 |
 | 0.1.x → 0.2 config | ⚠️ 一个 behavior change：`--auto-shard` 现在需要 `deployment_profile=dev`（0.1 默认就是没这个字段，解析为 `dev`，所以实际用户无感）|
-| 0.1.x → 0.2 legacy api_keys | 🔴 **calendar for 0.2.0-alpha.1**：当前 legacy `api_keys` 默认给 Admin；B1.2.3 会把默认改为 ReadOnly（breaking），在 CHANGELOG 中列出 |
+| 0.1.x → 0.2 legacy api_keys | 🔴 **calendar for 0.3.0**：当前 legacy `api_keys` 默认给 Admin；0.3 把默认改为 Read（breaking），在 CHANGELOG 中列出 |
+| 0.2-alpha → 0.2-beta wire | ✅ 加法更新 (`ApiKeyEntry.namespace`、`SecurityConfig.audit_log_path`、解析 `traceparent` metadata) |
+| 0.2-alpha → 0.2-beta persistence | ✅ 无变化，schema_version 仍为 1 |
+| 0.2-alpha → 0.2-beta config | ✅ 纯加法，既有 YAML 无需修改 |
+
+## 九.1、0.2 → 0.3 升级路径（前瞻）
+
+0.2-beta 已知会在 0.3 破坏或演进的契约，现在列出让用户有准备窗口：
+
+| 项目 | 变化 | Deprecation 窗口 | 建议迁移动作 |
+|---|---|---|---|
+| Legacy `api_keys` 默认角色 | `Admin` → `Read` | 从 0.2-pre.1 起已警告 | 把 key 迁到 `api_keys_rbac` + 显式 `role` |
+| Audit log OBS 路径 | 当前 warn-drop；0.3 改为真 append（滚动 object） | 0.2-beta 已标注 | 目前用 local path + Vector/Fluent Bit shipper；0.3 可直接 `s3://…` |
+| `replica_factor` YAML 键名 | 将重命名为 `read_parallelism`（现在是 alias） | 0.2.x 双识别 / 0.3.x 主识别 `read_parallelism` + alias `replica_factor` / 0.4.x 只识别 `read_parallelism` | 0.2.x 无需动作；0.3 起建议换名 |
+| G5 namespace 校验粒度 | 0.2-beta 只做 API-layer 前缀校验；0.3 下推到 MetaStore key 前缀并在 `get_prefix` 层强制 | 当前已是最小实现 | 客户端表名已经带前缀的不需改；误配置保护从 API-layer 升级到 store-layer |
+| G7 `AuditRecord` schema | 可能增加 `namespace`、`trace_id`（当前嵌在 `details`）、`ip` 三个显式字段 | 一个版本窗口 | 向后兼容：SIEM 读 `details` 里的 `trace_id=...` 仍 work，新字段只是更方便查询 |
+| Traceparent 穿透 | 0.2-beta 只在 coord 侧解析；0.3 在 coord → worker 出站 gRPC 上重新 `traceparent` header | 加法，不破 | 客户端不动；worker 日志会多 trace_id，与 coord audit 行串串 |
 
 ## 十、反面教材（绝不做的）
 

@@ -19,7 +19,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"/>
-  <img src="https://img.shields.io/badge/tests-272%20unit%20%7C%2029%20integration%20%7C%2021%20E2E-green" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-311%20unit%20%7C%2029%20integration%20%7C%2021%20E2E-green" alt="Tests"/>
   <img src="https://img.shields.io/badge/recall%4010-1.0000-brightgreen" alt="Recall"/>
 </p>
 
@@ -148,8 +148,13 @@ Each Worker uses the **lancedb Table API** directly -- vector search, FTS, hybri
 
 | Feature | Description |
 |---------|-------------|
-| **API Key Auth + RBAC** | Bearer token authentication with role-based permissions |
+| **API Key Auth + RBAC** | Bearer token authentication with three-role permissions (Read / Write / Admin) |
+| **Namespace Binding** *(0.2-beta)* | API key → namespace (`{ns}/` table prefix check + ListTables filter). Minimum-viable multi-tenant; see `docs/SECURITY.md` §5 |
+| **Per-Key QPS Quota** *(0.2-beta)* | Token-bucket rate limit per API key; exceeding the cap returns `ResourceExhausted` |
+| **Persistent Audit Log** *(0.2-beta)* | Every DDL / write RPC is appended to a JSONL file (local; OBS path tracked for 0.3) with principal, target, trace_id |
 | **TLS** | mTLS between coordinator and workers |
+| **Encryption at Rest** *(0.2-beta)* | Documentation + config pattern for SSE-KMS / SSE-S3 / SSE-C; see `docs/SECURITY.md` §6 |
+| **Traceparent Pass-Through** *(0.2-beta)* | W3C `traceparent` header parsed and correlated into the audit line + JSONL record for cross-process debugging |
 | **Prometheus Metrics** | `/metrics` with latency histogram (P50/P95/P99), per-table counters |
 | **Health Check** | `/healthz` for load balancers and K8s probes |
 | **Backpressure** | Semaphore-based admission control (configurable max concurrent) |
@@ -160,6 +165,7 @@ Each Worker uses the **lancedb Table API** directly -- vector search, FTS, hybri
 | **Runtime Key Rotation** *(0.2)* | API key registry lives in MetaStore and hot-reloads every 60 s — no coordinator restart required |
 | **SaaS Deployment Guard** *(0.2)* | `deployment_profile: saas` rejects any local-disk MetaStore at startup so pod replacement stays stateless |
 | **Schema Versioning** *(0.2)* | MetaStore snapshots carry `schema_version`; older versions auto-upgrade on write, future versions fail closed |
+| **`lance-admin` CLI** *(0.2-beta)* | Operator tool: MetaStore dump / restore / list + shard-URI inspection. Data copies use cloud-native tooling (`aws s3 sync`) |
 | **Structured Logging** | JSON (production) / pretty (dev) via tracing |
 | **Graceful Shutdown** | All background tasks cooperatively stop on SIGTERM |
 

@@ -1,5 +1,130 @@
 # LanceForge Release Notes
 
+## 0.2.0-beta.1 — 2026-04-19
+
+**First beta on the SaaS-first track.** Closes the Severity-1 gaps
+identified in `docs/COMPETITIVE_ANALYSIS.md` against Pinecone /
+Weaviate / Qdrant / Milvus: multi-tenant namespace binding, per-key
+QPS quota, persistent audit log, encryption-at-rest documentation,
+operator CLI, and cross-process trace correlation. Backward
+compatible with 0.2.0-alpha.1 on wire and on disk.
+
+### Feature matrix (what's new in beta)
+
+| Capability | 0.1.0 | 0.2.0-alpha.1 | **0.2.0-beta.1** |
+|---|:-:|:-:|:-:|
+| Three-role RBAC (Read/Write/Admin)           | ❌ | ✅ | ✅ |
+| MetaStore-backed runtime key rotation        | ❌ | ✅ | ✅ |
+| Per-key QPS quota (token bucket)             | ❌ | ❌ | ✅ **G6** |
+| API-key ↔ namespace binding                  | ❌ | ❌ | ✅ **G5** |
+| Persistent audit log (JSONL)                 | ❌ | ❌ | ✅ **G7** |
+| Encryption-at-rest (SSE-KMS / SSE-S3 / SSE-C) | docs only | docs only | ✅ **G8** |
+| `lance-admin` operator CLI                   | ❌ | ❌ | ✅ **G9** |
+| W3C traceparent → audit log                  | ❌ | ❌ | ✅ **G10** |
+| Mixed-RW read-QPS recovery (10 QPS W)        | 38% | 82.5% | 82.5% |
+| Coverage on the 4 critical modules           | measured | ratcheted | ratcheted |
+| Chaos 20-iter (worker kill + stall)          | — | 20/20 | 20/20 |
+| Read-only 1h soak RSS/fd drift               | — | < 3% | **< 3%** (re-measured G4) |
+
+### New capabilities in detail
+
+- **G5 — Namespace multi-tenancy (minimal).** Each API key may carry
+  a `namespace` field. Coordinator rejects any RPC whose `table_name`
+  doesn't begin with `{ns}/` and filters `ListTables` to the caller's
+  prefix. Admin keys without a namespace retain operator access. This
+  is an API-layer boundary — storage-layer isolation (separate
+  buckets / IAM roles per tenant) is still the operator's call. See
+  `docs/SECURITY.md` §5 and `docs/LIMITATIONS.md` §9 for the explicit
+  scope.
+- **G6 — Per-key QPS quota.** `api_keys_rbac[].qps_limit` installs a
+  token-bucket rate limit per key; exceeding the quota returns
+  `ResourceExhausted`. Tokens are tracked in milli-units so
+  sub-integer refill rates don't drift. (Already in alpha but
+  production-ready in beta.)
+- **G7 — Persistent audit log.** `security.audit_log_path` (local
+  file or OBS URI) turns on an append-only JSONL sink. Every DDL and
+  write RPC writes one record `{ts, op, principal, target, details}`;
+  records carry the `trace_id` from the caller's W3C `traceparent`
+  header when present. OBS paths currently drop-with-warn (no
+  uniform append semantics across object stores) — point at a local
+  path and ship with Vector / Fluent Bit until 0.3.
+- **G8 — Encryption-at-rest.** `docs/SECURITY.md` §6 covers SSE-KMS,
+  SSE-S3, and SSE-C configuration end-to-end, including IAM/KMS
+  permission minimums and rotation paths. The object-store layer
+  passes all encryption options through unchanged — LanceForge adds
+  no second envelope.
+- **G9 — `lance-admin` CLI.** Operator tool for MetaStore backup
+  (`meta dump`), restore (`meta restore --purge`), listing, and
+  shard-URI inspection. Copying the Lance data directories
+  themselves is left to cloud-native tooling (`aws s3 sync`, etc.)
+  — `lance-admin shards list` prints the URIs so ops can drive that
+  with one command.
+- **G10 — Traceparent pass-through (minimal).** Coordinator parses
+  the W3C `traceparent` metadata and writes the 32-char trace_id into
+  both the stdout `audit` log line and the JSONL record. Worker-side
+  re-emission (so a distributed trace spans coord → worker) is
+  scheduled for 0.3 — this minimal version still lets SREs correlate
+  client logs ↔ coordinator audit line by `trace_id`.
+
+### Build hygiene
+
+- Dev profile now builds with `debug = "line-tables-only"` +
+  `split-debuginfo = "unpacked"`. Integration-test binaries shrink
+  from ~1.5 GB to ~300 MB; a full `target/` from an active dev cycle
+  no longer blows past 400 GB. See `docs/BUILD_HYGIENE.md` for the
+  command aliases (`cargo small`, `cargo prune`).
+- Test-flake fix: `crates/meta/src/state.rs` tests migrated off
+  hardcoded `/tmp/lanceforge_metastate_*.json` paths (nanosecond-
+  clash races under parallel tokio-test) to `tempfile::tempdir()`.
+  Same root cause as H23 (store.rs); state.rs was missed at the
+  time.
+
+### Not yet in beta (deferred to 0.3)
+
+- OBS-native append for the audit log (OBS paths warn-and-drop
+  today). Tracked as `ROADMAP_0.2.md` R3.
+- Full OpenTelemetry exporter pipeline (OTLP collector integration).
+  The traceparent header is parsed and persisted; emitting spans to
+  Jaeger/Tempo is 0.3 work.
+- Grafana dashboard template bundle.
+- Async Python SDK (`grpc.aio`). Current SDK is sync.
+- Namespace-level quota + ListTables enforcement via the MetaStore
+  prefix (today the filter lives at the auth layer).
+- Mixed-RW writes > 10 QPS — still 18.5% of baseline at 50 QPS on
+  local fs. `PROFILE_MIXED_RW.md` documents the root cause
+  (manifest-commit-storm + fsync barriers); the S3 path isn't
+  impacted the same way but isn't bench-validated yet.
+- `lance-admin` live-migration subcommand. Today's `meta
+  dump`/`restore` is enough for disaster-recovery and cross-cluster
+  seeding; doing online migration is 0.3.
+
+### Upgrade notes (from 0.2.0-alpha.1)
+
+- No wire or on-disk schema changes. A rolling restart of
+  coordinators is sufficient.
+- To use G5, add `namespace` to the relevant entries in
+  `api_keys_rbac`. Keys without the field keep 0.1.x / alpha
+  behaviour.
+- To use G7, set `security.audit_log_path` to a writable local
+  path. The directory is created if missing; records land one line
+  per RPC.
+- `Cargo.toml` dev-profile changes affect only local dev — release
+  builds (`cargo build --release`) are unchanged.
+
+### Known gotchas
+
+- The `bench_sustained_load.py` and `bench_phase17_matrix.py`
+  harnesses now clear `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env
+  vars at import — if you run them through a WSL2 shell that has
+  a system proxy configured (`http://127.0.0.1:7897` is the common
+  one), this is what was masquerading as "k=10000 60% error rate"
+  in alpha's H24. The fix is unconditional; you don't need to do
+  anything.
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## 0.2.0-alpha.1 — 2026-04-18
 
 **First alpha on the SaaS-first track.** Meets every gate in

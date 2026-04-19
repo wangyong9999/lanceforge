@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.1] - 2026-04-19
+
+First beta on the SaaS-first track. Closes the Severity-1 gaps
+from `docs/COMPETITIVE_ANALYSIS.md` — multi-tenant namespace,
+per-key quota, persistent audit log, encryption-at-rest
+documentation, operator CLI, cross-process trace correlation.
+Backward compatible with 0.2.0-alpha.1 on wire and on disk.
+
+### Added
+- API-key ↔ namespace binding (G5). `ApiKeyEntry.namespace` rejects
+  RPCs whose `table_name` doesn't start with `{ns}/` and filters
+  `ListTables` through the caller's prefix. Admin keys without a
+  namespace retain operator access. See `docs/SECURITY.md` §5.
+- Persistent audit log (G7). `security.audit_log_path` turns on an
+  append-only JSONL sink for every DDL / write RPC. Records carry
+  timestamp, principal, target, details, and the W3C trace_id when
+  present. OBS URIs currently warn-and-drop (tracked R3) — use a
+  local path with Vector / Fluent Bit until 0.3.
+- `docs/SECURITY.md` (G8). Threat model, TLS config, RBAC +
+  namespace scope, SSE-KMS / SSE-S3 / SSE-C pattern, audit log
+  ingestion, key rotation, hardening checklist.
+- `lance-admin` operator CLI (G9). `meta dump` / `meta restore` /
+  `meta list` / `shards list`. Shard file transfer is left to
+  cloud-native tooling — `shards list` prints the URIs.
+- Traceparent pass-through (G10). Coordinator parses W3C
+  `traceparent` metadata and writes the 32-char trace_id into the
+  stdout audit line and the JSONL record's `details` field.
+
+### Changed
+- Dev profile now builds with `debug = "line-tables-only"` and
+  `split-debuginfo = "unpacked"`. Integration test binaries shrink
+  from ~1.5 GB to ~300 MB without losing panic stack traces. See
+  `docs/BUILD_HYGIENE.md`.
+- `.cargo/config.toml` added with `build.incremental = true`
+  explicit, sparse registry, and `cargo small` / `cargo prune`
+  aliases for routine work.
+- `crates/meta/src/state.rs` tests migrated off hardcoded
+  `/tmp/lanceforge_metastate_*.json` paths (nanosecond-collision
+  FileMetaStore lock race under parallel `cargo test`; same root
+  cause as H23 in store.rs). Uses `tempfile::tempdir()` now.
+- README feature matrix updated with G5 / G6 / G7 / G8 / G9 / G10.
+  Test count badge 272 → 311.
+
+### Deferred to 0.3
+- OBS-native append for the audit log (R3).
+- Full OpenTelemetry exporter pipeline (OTLP collector).
+- Grafana dashboard template bundle.
+- Async Python SDK (`grpc.aio`).
+- MetaStore-side namespace enforcement (today's G5 is API-layer).
+- Worker-side `traceparent` re-emission on outbound gRPC.
+
 ## [0.2.0-alpha.1] - 2026-04-18
 
 First alpha on the SaaS-first track. Closes every alpha gate in
