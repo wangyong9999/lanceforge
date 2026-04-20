@@ -333,13 +333,19 @@ impl CoordinatorService {
         info!("audit op={} principal={} target={} details={}{}",
               op, principal, target, details, trace_fragment);
         if let Some(ref sink) = self.audit_sink {
+            // F9: dual-write the trace_id — both as the dedicated JSONL
+            // field (SIEM-friendly, the 0.3 authoritative source) and
+            // embedded in `details` as `trace_id=<hex>` (back-compat for
+            // SIEM parsers built against 0.2.0-beta.1). One release
+            // window, then 0.3 drops the details substring.
             let details_with_trace = match &trace_id {
                 Some(t) => format!("{details} trace_id={t}"),
                 None => details.to_string(),
             };
-            sink.submit(lance_distributed_common::audit::AuditRecord::new(
+            let record = lance_distributed_common::audit::AuditRecord::new(
                 op, &principal, target, &details_with_trace,
-            ));
+            ).with_trace_id(trace_id);
+            sink.submit(record);
         }
     }
 }
@@ -1081,7 +1087,19 @@ impl LanceSchedulerService for CoordinatorService {
         // shards if the operator has it enabled.
         let mut handles = Vec::new();
         for (i, partition) in partitions.into_iter().enumerate() {
-            let shard_name = format!("{}_shard_{:02}", req.table_name, i);
+            // Sanitize the table_name portion of shard_name: lancedb 0.27
+            // rejects dataset names containing `/` (and its current
+            // validation path `.unwrap()`s on rejection instead of
+            // returning an error, which would panic the worker if we
+            // passed `/` through — see F3 regression). G5 requires
+            // `tenant-a/table`-style namespace prefixes at the API,
+            // which means every shard_name would carry a `/`. Map `/`
+            // to `__` when constructing the shard name that lives on
+            // disk and in lancedb; the user-facing table_name keeps
+            // the `/` separator everywhere else (routing, audit,
+            // ListTables filtering).
+            let safe_stem = req.table_name.replace('/', "__");
+            let shard_name = format!("{}_shard_{:02}", safe_stem, i);
             let worker_id = healthy[i % healthy.len()].0.clone();
 
             if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
@@ -2838,9 +2856,9 @@ mod tests {
         let path = dir.path().join("audit.log").to_string_lossy().to_string();
         let shutdown = Arc::new(Notify::new());
 
-        let sink = AuditSink::spawn(path.clone(), shutdown.clone());
-        let svc = CoordinatorService::new(&make_config(), Duration::from_secs(5))
-            .with_audit_sink(sink);
+        let svc = CoordinatorService::new(&make_config(), Duration::from_secs(5));
+        let sink = AuditSink::spawn(path.clone(), shutdown.clone(), svc.metrics());
+        let svc = svc.with_audit_sink(sink);
 
         // Fake a request from a known principal (no auth = principal
         // becomes "no-auth") and submit an audit line through the private

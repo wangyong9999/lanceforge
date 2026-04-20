@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 
 /// One audit record. Field order + names are part of the public format —
 /// operators are expected to ingest these via SIEM tooling.
+///
+/// **Compatibility**: `trace_id` was added as a top-level field in
+/// 0.2.0-beta.2 (F9). Before that it was only available embedded in
+/// `details` as `trace_id=<hex>`. Writers in 0.2.0-beta.2+ populate both
+/// the field and the details substring for one version, so SIEM
+/// parsers can migrate without coordinated downtime. 0.3 drops the
+/// details substring; treat the top-level field as authoritative now.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// ISO-8601 timestamp at the coordinator when the action was accepted.
@@ -24,6 +31,13 @@ pub struct AuditRecord {
     pub target: String,
     /// Freeform operator-facing details (filter text, row count, etc).
     pub details: String,
+    /// W3C traceparent `trace_id` (32 hex chars) when the caller supplied
+    /// one in the request metadata. `None` / absent in JSON when the
+    /// caller didn't send a traceparent. Present from 0.2.0-beta.2; SIEM
+    /// parsers built against 0.2.0-beta.1 will see an extra key and
+    /// should ignore-unknown per JSON norms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl AuditRecord {
@@ -34,7 +48,14 @@ impl AuditRecord {
             principal: principal.to_string(),
             target: target.to_string(),
             details: details.to_string(),
+            trace_id: None,
         }
+    }
+
+    /// Attach a W3C trace_id. Returns self so callers can chain.
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
     }
 
     pub fn to_jsonl(&self) -> String {
@@ -81,96 +102,144 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+/// Returned by [`validate_audit_path`] when a path is refused at config time.
+/// The caller (coordinator startup) surfaces this to stdout and exits
+/// non-zero — no silent drop of compliance data.
+#[derive(Debug)]
+pub enum AuditConfigError {
+    ObsNotSupported(String),
+}
+
+impl std::fmt::Display for AuditConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ObsNotSupported(p) => write!(
+                f,
+                "audit_log_path '{p}' is an object-storage URI, but OBS-append \
+                 is not implemented (records would be silently dropped). Use a \
+                 local filesystem path + external shipper (Vector / Fluent Bit) \
+                 until 0.3. See ROADMAP_0.2.md R3."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AuditConfigError {}
+
+/// Validate an `audit_log_path` value before spawning the sink. Currently
+/// rejects any object-storage scheme (`s3://`, `gs://`, `az://`) because
+/// the sink can't actually append there yet and silent drops are worse
+/// than a hard startup error. Local filesystem paths pass through.
+///
+/// This is F1 fail-fast. Previously the sink warned once at startup and
+/// then dropped every record; operators who missed the log line were
+/// losing audit visibility without knowing it.
+pub fn validate_audit_path(path: &str) -> Result<(), AuditConfigError> {
+    const OBS_PREFIXES: &[&str] = &["s3://", "gs://", "az://", "azure://"];
+    for p in OBS_PREFIXES {
+        if path.starts_with(p) {
+            return Err(AuditConfigError::ObsNotSupported(path.to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// Persistent audit sink. Spawns a background task that drains a
-/// bounded channel and appends JSONL to the configured destination.
+/// bounded channel and appends JSONL to the configured local path.
+///
+/// OBS URIs are rejected upstream by [`validate_audit_path`] — see F1.
 #[derive(Clone)]
 pub struct AuditSink {
     sender: Arc<tokio::sync::mpsc::Sender<AuditRecord>>,
+    /// Shared metrics handle so `submit` can bump `audit_dropped_total`
+    /// on channel-full / sink-closed (F1). Never None after spawn.
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl AuditSink {
-    /// Spawn a new sink. `path` may be a local filesystem path or an
-    /// OBS URI. On filesystem errors / channel-full, records are
-    /// dropped + a warn logged; never blocks the request path.
-    pub fn spawn(path: String, shutdown: Arc<tokio::sync::Notify>) -> Self {
+    /// Spawn a new sink against a **local filesystem** path. Caller must
+    /// have validated the path with [`validate_audit_path`] first.
+    ///
+    /// On filesystem errors the sink drains-and-drops so producers never
+    /// block on channel-full; `metrics.audit_dropped_count` is what
+    /// operators should alert on. Channel capacity is 1024 — enough for
+    /// RPC burst tolerance, not enough to hide a sustained firehose.
+    pub fn spawn(
+        path: String,
+        shutdown: Arc<tokio::sync::Notify>,
+        metrics: Arc<crate::metrics::Metrics>,
+    ) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AuditRecord>(1024);
         let sender = Arc::new(tx);
+        let metrics_for_spawn = metrics.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
-            if path.starts_with("s3://") || path.starts_with("gs://") || path.starts_with("az://") {
-                // OBS sink: buffer records, flush as a single put-append
-                // per batch. object_store doesn't expose append semantics
-                // uniformly, so we accumulate + write-rename on interval.
-                // Simpler for the minimum-viable: log + drop when OBS
-                // path is configured; warn once, flag it as TODO.
-                log::warn!("audit sink: OBS path {path} — OBS-append not yet implemented; \
-                          records will be dropped. Use a local path + external rotation \
-                          for now; tracked in ROADMAP_0.2 R3.");
-                // Drain and drop so producers don't block on channel-full.
-                loop {
-                    tokio::select! {
-                        _ = shutdown.notified() => return,
-                        msg = rx.recv() => if msg.is_none() { return; }
-                    }
-                }
-            } else {
-                // Local filesystem: open append-only, fsync on shutdown.
-                let p = PathBuf::from(&path);
-                if let Some(parent) = p.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                let mut file = match tokio::fs::OpenOptions::new()
-                    .create(true).append(true).open(&p).await
-                {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log::error!("audit sink: failed to open {path}: {e}");
-                        // Drain channel to avoid blocking producers forever.
-                        loop {
-                            tokio::select! {
-                                _ = shutdown.notified() => return,
-                                msg = rx.recv() => if msg.is_none() { return; }
+            // Local filesystem: open append-only, fsync on shutdown.
+            let p = PathBuf::from(&path);
+            if let Some(parent) = p.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let mut file = match tokio::fs::OpenOptions::new()
+                .create(true).append(true).open(&p).await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("audit sink: failed to open {path}: {e}");
+                    // Drain channel to avoid blocking producers forever;
+                    // every dropped record bumps the counter so Prometheus
+                    // alerts can fire.
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.notified() => return,
+                            msg = rx.recv() => match msg {
+                                Some(_) => metrics_for_spawn.record_audit_dropped(),
+                                None => return,
                             }
                         }
                     }
-                };
-                log::info!("audit sink: appending to {path}");
-                loop {
-                    tokio::select! {
-                        _ = shutdown.notified() => {
+                }
+            };
+            log::info!("audit sink: appending to {path}");
+            loop {
+                tokio::select! {
+                    _ = shutdown.notified() => {
+                        let _ = file.sync_all().await;
+                        log::info!("audit sink: shutdown, flushed");
+                        return;
+                    }
+                    msg = rx.recv() => match msg {
+                        Some(record) => {
+                            let line = record.to_jsonl() + "\n";
+                            if let Err(e) = file.write_all(line.as_bytes()).await {
+                                // Count as dropped — we couldn't persist it.
+                                metrics_for_spawn.record_audit_dropped();
+                                log::error!("audit sink: write failed: {e}");
+                            }
+                        }
+                        None => {
                             let _ = file.sync_all().await;
-                            log::info!("audit sink: shutdown, flushed");
                             return;
-                        }
-                        msg = rx.recv() => match msg {
-                            Some(record) => {
-                                let line = record.to_jsonl() + "\n";
-                                if let Err(e) = file.write_all(line.as_bytes()).await {
-                                    log::error!("audit sink: write failed: {e}");
-                                }
-                            }
-                            None => {
-                                let _ = file.sync_all().await;
-                                return;
-                            }
                         }
                     }
                 }
             }
         });
-        Self { sender }
+        Self { sender, metrics }
     }
 
-    /// Try to enqueue a record. Never blocks; drops on channel-full and
-    /// emits a warn log so operators see they're losing audit visibility.
+    /// Try to enqueue a record. Never blocks; drops on channel-full /
+    /// sink-closed and bumps `lance_audit_dropped_total` so operators
+    /// see they're losing audit visibility without having to grep logs.
     pub fn submit(&self, rec: AuditRecord) {
         match self.sender.try_send(rec) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(r)) => {
+                self.metrics.record_audit_dropped();
                 log::warn!("audit sink: channel full, dropping record op={} target={}",
                            r.op, r.target);
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.record_audit_dropped();
                 log::warn!("audit sink: sink closed, record dropped");
             }
         }
@@ -220,7 +289,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.log").to_string_lossy().to_string();
         let shutdown = Arc::new(tokio::sync::Notify::new());
-        let sink = AuditSink::spawn(path.clone(), shutdown.clone());
+        let metrics = crate::metrics::Metrics::new();
+        let sink = AuditSink::spawn(path.clone(), shutdown.clone(), metrics.clone());
         sink.submit(AuditRecord::new("CreateTable", "key:a", "t1", ""));
         sink.submit(AuditRecord::new("AddRows", "key:a", "t1", "bytes=5"));
         // Give the background task a moment to write.
@@ -235,19 +305,54 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(v["ts"].as_str().unwrap().ends_with('Z'));
         }
+        // Nothing should have been dropped on the happy path.
+        assert_eq!(metrics.audit_dropped_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn validate_audit_path_rejects_obs_schemes() {
+        // F1: OBS URIs must fail at config time, not silently drop records.
+        for bad in ["s3://b/a", "gs://b/a", "az://b/a", "azure://b/a"] {
+            let err = validate_audit_path(bad).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains(bad), "err should name the path, got: {msg}");
+            assert!(msg.contains("silently dropped") || msg.contains("OBS"));
+        }
+    }
+
+    #[test]
+    fn validate_audit_path_accepts_local() {
+        // Local paths — absolute, relative, /tmp — all pass.
+        assert!(validate_audit_path("/var/log/lance/audit.jsonl").is_ok());
+        assert!(validate_audit_path("./audit.log").is_ok());
+        assert!(validate_audit_path("audit.log").is_ok());
     }
 
     #[tokio::test]
-    async fn obs_sink_drops_gracefully() {
-        // OBS path: TODO stub currently drops records without blocking
-        // producers. This test locks that behaviour in so anyone adding
-        // real OBS support trips the test and updates it.
+    async fn submit_past_capacity_bumps_dropped_counter() {
+        // F1: channel-full must bump audit_dropped_count, not just warn.
+        // Trigger it by filling the 1024-slot bounded channel before the
+        // background task has a chance to drain. We pause the sink
+        // consumer by withholding shutdown and relying on filesystem
+        // latency — faster path: call submit 2000 times in a tight loop
+        // so the channel saturates before the writer can keep up.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log").to_string_lossy().to_string();
         let shutdown = Arc::new(tokio::sync::Notify::new());
-        let sink = AuditSink::spawn("s3://bucket/audit.log".to_string(), shutdown.clone());
-        for _ in 0..10 {
-            sink.submit(AuditRecord::new("AddRows", "key:a", "t1", ""));
+        let metrics = crate::metrics::Metrics::new();
+        let sink = AuditSink::spawn(path.clone(), shutdown.clone(), metrics.clone());
+        for i in 0..5000 {
+            sink.submit(AuditRecord::new("AddRows", "key:a", "t1", &format!("i={i}")));
         }
-        // No assertion on persistence — just that we didn't deadlock.
+        // Give the writer time to drain + count any drops along the way.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         shutdown.notify_waiters();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let dropped = metrics.audit_dropped_count.load(std::sync::atomic::Ordering::Relaxed);
+        let written = tokio::fs::read_to_string(&path).await
+            .map(|s| s.lines().count() as u64).unwrap_or(0);
+        assert_eq!(dropped + written, 5000,
+                   "every submit must be either written or counted as dropped, \
+                    got {written} written + {dropped} dropped");
     }
 }

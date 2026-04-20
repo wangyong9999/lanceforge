@@ -29,6 +29,10 @@ pub struct Metrics {
     pub executor_healthy_count: AtomicU64,
     pub executor_total_count: AtomicU64,
     pub slow_query_count: AtomicU64,
+    /// Audit records that the AuditSink dropped (G7 / F1). Channel-full
+    /// and sink-closed both land here. Compliance-critical: if this
+    /// counter is non-zero the operator is losing audit visibility.
+    pub audit_dropped_count: AtomicU64,
     /// Latency histogram: bucket[i] counts queries with latency <= HISTOGRAM_BUCKETS_MS[i].
     latency_buckets: Vec<AtomicU64>,
     /// Per-table metrics. RwLock is held only briefly on first-use insert;
@@ -46,6 +50,7 @@ impl Default for Metrics {
             executor_healthy_count: AtomicU64::new(0),
             executor_total_count: AtomicU64::new(0),
             slow_query_count: AtomicU64::new(0),
+            audit_dropped_count: AtomicU64::new(0),
             latency_buckets: HISTOGRAM_BUCKETS_MS.iter().map(|_| AtomicU64::new(0)).collect(),
             per_table: RwLock::new(HashMap::new()),
         }
@@ -106,6 +111,14 @@ impl Metrics {
         self.slow_query_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment the audit-dropped counter (G7 / F1). Called from
+    /// `AuditSink::submit` when the channel is full or the sink closed.
+    /// **Non-zero means we are silently losing audit records** — alert
+    /// on this in production.
+    pub fn record_audit_dropped(&self) {
+        self.audit_dropped_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Remove per-table metrics (called on DropTable to prevent leak).
     pub fn remove_table(&self, table: &str) {
         let mut map = match self.per_table.write() {
@@ -153,8 +166,12 @@ impl Metrics {
              lance_executors_total {total}\n\
              # HELP lance_slow_query_total Queries exceeding slow_query_ms threshold\n\
              # TYPE lance_slow_query_total counter\n\
-             lance_slow_query_total {slow}\n",
+             lance_slow_query_total {slow}\n\
+             # HELP lance_audit_dropped_total Audit records dropped by the sink (channel full or sink closed). Non-zero = compliance blind spot.\n\
+             # TYPE lance_audit_dropped_total counter\n\
+             lance_audit_dropped_total {audit_dropped}\n",
             max_ms = max_us as f64 / 1000.0,
+            audit_dropped = self.audit_dropped_count.load(Ordering::Relaxed),
         );
 
         // Latency histogram (Prometheus histogram type)

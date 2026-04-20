@@ -173,10 +173,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the gRPC server so the sender is in place when the first request
     // arrives. Skip entirely when the operator hasn't configured a path
     // — keeps 0.1 stdout-only behaviour for dev clusters.
+    //
+    // F1 hardening: reject OBS URIs at config time instead of silently
+    // dropping records. Operators who want OBS audit today must ship
+    // via an external log collector (Vector / Fluent Bit) pointed at a
+    // local file. 0.3 will land real OBS-append support (ROADMAP R3).
+    let metrics = service.metrics();
     if let Some(ref audit_path) = config.security.audit_log_path {
+        if let Err(e) = lance_distributed_common::audit::validate_audit_path(audit_path) {
+            log::error!("invalid audit_log_path: {e}");
+            std::process::exit(2);
+        }
         let audit_sink = lance_distributed_common::audit::AuditSink::spawn(
             audit_path.clone(),
             bg_shutdown.clone(),
+            metrics.clone(),
         );
         service = service.with_audit_sink(audit_sink);
     }
@@ -185,8 +196,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // write paths can split read vs write traffic across replicas. No-op
     // when every executor uses the default `Either` role.
     service.install_executor_roles(&config.executors).await;
-
-    let metrics = service.metrics();
     // Keep handles for graceful shutdown
     let shutdown_handle = service.pool_shutdown_handle();
     let addr = format!("0.0.0.0:{}", port).parse()?;

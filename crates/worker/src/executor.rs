@@ -291,6 +291,23 @@ impl LanceTableRegistry {
         num_partitions: u32,
         storage_options: &std::collections::HashMap<String, String>,
     ) -> Result<(u64, String)> {
+        // Guard lancedb 0.27's validation path that `.unwrap()`s on
+        // invalid names and panics the tokio task. Coord sanitizes `/`
+        // away before calling us (G5 / F3); this is belt-and-braces in
+        // case any other caller sends a name lancedb rejects. Also
+        // blocks absolute paths / path-traversal patterns from clients.
+        if shard_name.is_empty()
+            || shard_name.contains('/')
+            || shard_name.contains("..")
+            || shard_name.starts_with('.')
+        {
+            return Err(DataFusionError::External(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid shard_name '{shard_name}': must be non-empty and contain only \
+                         [a-zA-Z0-9_\\-.], no '/', no leading '.'; see G5 namespace rules"),
+            ))));
+        }
+
         let db = lancedb::connect(parent_uri)
             .storage_options(storage_options.iter().map(|(k, v)| (k.clone(), v.clone())))
             .read_consistency_interval(Duration::from_secs(self.read_consistency_secs))

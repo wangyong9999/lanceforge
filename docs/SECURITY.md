@@ -108,6 +108,20 @@ storage_options:
 
 ## 5. Multi-tenant namespace binding (G5, minimal form)
 
+> **Read this first.** Namespace binding is an **API-layer** boundary,
+> not a storage-layer one. A tenant holding your object-storage
+> credentials can read or write Lance files under any prefix — the
+> LanceForge coordinator is the enforcement point, the bucket is not.
+> **If your tenancy model requires cryptographic isolation (regulated
+> industries, untrusted co-tenants, per-tenant data-residency
+> commitments), run one LanceForge deployment per tenant with separate
+> buckets and IAM roles.** The rest of this section describes what
+> namespace binding does give you: a correct, auditable API-layer
+> isolation that makes casual cross-tenant access return
+> `PermissionDenied`. Combined with TLS + per-key quota + audit log,
+> it's enough to meet "operators cannot read each other's tables via
+> the documented API" requirements. Use it accordingly.
+
 Each API key may carry a `namespace` field. When set, every RPC that
 names a table (`CreateTable`, `Search`, `AddRows`, `DropTable`, …) is
 rejected with `PermissionDenied` unless the table name begins with
@@ -125,14 +139,11 @@ namespace prefix.
 **Out of scope** (documented in `LIMITATIONS.md` §9):
 
 - MetaStore-side enforcement: a rogue client with direct OBS credentials
-  can still read/write Lance files under any prefix. Namespace is an
-  API-layer boundary, not a storage-layer one.
+  can still read/write Lance files under any prefix (see the boxed
+  warning above — this is the storage-layer caveat).
 - Per-namespace quotas (storage, connection, bucket sharing).
 - Namespace rename / deletion primitives.
 - Automatic namespace provisioning.
-
-If you need strict cryptographic tenant isolation today, run one
-LanceForge deployment per tenant with separate buckets and credentials.
 
 ## 6. Encryption at rest
 
