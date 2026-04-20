@@ -18,17 +18,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().json().with_target(true))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().with_target(true))
-            .init();
-    }
+    // B3: optional OTLP tracing layer. Feature-gated (`--features otel`).
+    // When the binary is built with OTEL and the operator sets
+    // `OTEL_EXPORTER_OTLP_ENDPOINT`, spans produced by the `tracing`
+    // macros in the codebase are exported via gRPC to an OTLP
+    // collector (Jaeger, Tempo, otel-collector, Datadog agent, …).
+    // When the feature is off or the env var is missing, the registry
+    // is identical to the default stdout stack — no behavior change.
+    init_tracing_with_optional_otel(filter);
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -388,4 +385,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bg_shutdown.notify_waiters();
     info!("Server stopped — all background tasks signalled");
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// B3: OpenTelemetry OTLP exporter (feature-gated).
+//
+// The default build keeps zero OTEL deps. `cargo build --features otel`
+// compiles in `opentelemetry-otlp` + `tracing-opentelemetry` and
+// wires a second tracing layer that ships spans over gRPC to the
+// OTLP collector at `OTEL_EXPORTER_OTLP_ENDPOINT`.
+//
+// Spans come from the existing `#[tracing::instrument]` / `info!`
+// call sites in the codebase — no new code per RPC. Coord audit
+// lines already carry `trace_id=<hex>` (F9 + G10), so the same
+// trace threads through stdout logs *and* OTLP spans once enabled.
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "otel")]
+fn init_tracing_with_optional_otel(filter: EnvFilter) {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig;
+
+    // Build an OpenTelemetry layer only when the operator opted in via
+    // the OTLP spec env var. No env var ⇒ default stdout stack.
+    let otel_layer = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .and_then(|endpoint| {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .build()
+                .map_err(|e| eprintln!("otel: exporter build failed: {e}"))
+                .ok()?;
+            let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+                .with_resource(opentelemetry_sdk::Resource::new(vec![
+                    opentelemetry::KeyValue::new("service.name", "lance-coordinator"),
+                ]))
+                .build();
+            let tracer = provider.tracer("lance-coordinator");
+            opentelemetry::global::set_tracer_provider(provider);
+            Some(tracing_opentelemetry::layer().with_tracer(tracer))
+        });
+
+    let fmt_layer = if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        fmt::layer().json().with_target(true).boxed()
+    } else {
+        fmt::layer().with_target(true).boxed()
+    };
+    let reg = tracing_subscriber::registry().with(filter).with(fmt_layer);
+    match otel_layer {
+        Some(otel) => reg.with(otel).init(),
+        None => reg.init(),
+    }
+}
+
+#[cfg(not(feature = "otel"))]
+fn init_tracing_with_optional_otel(filter: EnvFilter) {
+    let fmt_layer = if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
+        fmt::layer().json().with_target(true).boxed()
+    } else {
+        fmt::layer().with_target(true).boxed()
+    };
+    tracing_subscriber::registry().with(filter).with(fmt_layer).init();
 }
