@@ -2,6 +2,7 @@
 LanceForge gRPC client — thin wrapper over generated proto stubs.
 """
 
+import os
 import struct
 
 import grpc
@@ -10,6 +11,35 @@ import pyarrow.ipc as ipc
 
 from lanceforge import lance_service_pb2 as pb
 from lanceforge import lance_service_pb2_grpc as pb_grpc
+
+
+# F8: env vars that silently route localhost gRPC through a system
+# proxy (common in WSL2, Codespaces, VPN setups). grpcio does not honour
+# NO_PROXY reliably, so even `127.0.0.1` lookups get funneled to the
+# proxy where the h2 stream is dropped under concurrent load. The
+# symptoms match H24 (k=10000 60% error rate) — a misdiagnosed mess
+# that turned out to be environment interference, not a LanceForge
+# bug. See RELEASE_NOTES 0.2.0-beta.1.
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY", "HTTPS_PROXY",
+    "http_proxy", "https_proxy",
+    "GRPC_PROXY", "grpc_proxy",
+    "ALL_PROXY", "all_proxy",
+)
+
+
+def _drop_proxy_env():
+    """Clear proxy env vars in the current process. Returns the prior
+    values so the caller can restore them (rarely useful; most apps
+    want the proxy gone for the lifetime of the process). The SDK
+    calls this from LanceForgeClient.__init__ unless the caller opts
+    out with `respect_proxy_env=True`.
+    """
+    prior = {}
+    for v in _PROXY_ENV_VARS:
+        if v in os.environ:
+            prior[v] = os.environ.pop(v)
+    return prior
 
 
 class LanceForgeClient:
@@ -21,11 +51,18 @@ class LanceForgeClient:
         max_message_size: Max gRPC message size in bytes (default 64MB)
         tls_ca_cert: Path to PEM-encoded CA certificate for TLS verification.
                      When set, uses secure channel (grpc.secure_channel).
+        respect_proxy_env: When False (default), the client clears
+                           HTTP_PROXY/HTTPS_PROXY/NO_PROXY/GRPC_PROXY
+                           from the process env before constructing
+                           the channel. Set True to opt out — use only
+                           if you explicitly need the proxy for
+                           coordinator traffic.
     """
 
     def __init__(self, host="localhost:50050", api_key=None,
                  max_message_size=64*1024*1024, tls_ca_cert=None,
-                 default_timeout=30, max_retries=0, retry_backoff=0.5):
+                 default_timeout=30, max_retries=0, retry_backoff=0.5,
+                 respect_proxy_env=False):
         """
         Args:
             host: Coordinator address (e.g., "localhost:50050")
@@ -35,7 +72,12 @@ class LanceForgeClient:
             default_timeout: Default RPC timeout in seconds (default 30).
             max_retries: Max retry attempts on transient failures (default 0 = no retry).
             retry_backoff: Base backoff in seconds between retries (exponential).
+            respect_proxy_env: Leave HTTP(S)_PROXY / GRPC_PROXY env vars
+                alone. Default False (strip them) — guards against
+                H24-class WSL2 / Codespaces proxy interference.
         """
+        if not respect_proxy_env:
+            _drop_proxy_env()
         options = [("grpc.max_receive_message_length", max_message_size)]
         if tls_ca_cert:
             with open(tls_ca_cert, 'rb') as f:

@@ -340,5 +340,50 @@ class TestApiKeyAuth(unittest.TestCase):
         self.assertIsNone(client._metadata())
 
 
+class TestProxyEnvGuard(unittest.TestCase):
+    """F8: SDK must clear HTTP(S)_PROXY / GRPC_PROXY by default so
+    localhost gRPC isn't routed through a system proxy (H24 / WSL2
+    symptom). `respect_proxy_env=True` opts out."""
+
+    PROXY_VARS = (
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "GRPC_PROXY", "grpc_proxy", "ALL_PROXY", "all_proxy",
+    )
+
+    def _with_proxy_env(self):
+        return {v: f"http://proxy.invalid:{i}/" for i, v in enumerate(self.PROXY_VARS)}
+
+    def test_default_clears_proxy_env(self):
+        from lanceforge.client import LanceForgeClient
+        env = self._with_proxy_env()
+        with patch.dict(os.environ, env, clear=False):
+            with patch('grpc.insecure_channel'):
+                LanceForgeClient("fake:50050")
+            for v in self.PROXY_VARS:
+                self.assertNotIn(v, os.environ,
+                                 f"default ctor must strip {v}, still present")
+
+    def test_opt_in_preserves_proxy_env(self):
+        from lanceforge.client import LanceForgeClient
+        env = self._with_proxy_env()
+        with patch.dict(os.environ, env, clear=False):
+            with patch('grpc.insecure_channel'):
+                LanceForgeClient("fake:50050", respect_proxy_env=True)
+            for v in self.PROXY_VARS:
+                self.assertIn(v, os.environ,
+                              f"respect_proxy_env=True must preserve {v}")
+
+    def test_drop_proxy_env_returns_prior(self):
+        from lanceforge.client import _drop_proxy_env
+        with patch.dict(os.environ,
+                        {"HTTP_PROXY": "http://x/", "NO_SUCH": "keep"},
+                        clear=False):
+            prior = _drop_proxy_env()
+            self.assertEqual(prior.get("HTTP_PROXY"), "http://x/")
+            self.assertNotIn("HTTP_PROXY", os.environ)
+            self.assertIn("NO_SUCH", os.environ,
+                          "non-proxy vars must survive")
+
+
 if __name__ == '__main__':
     unittest.main()
