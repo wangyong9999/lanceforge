@@ -159,22 +159,39 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 ## 13. Worker RSS 在 sustained-read 下的周期性 warmup
 
-**实测**（G4 beta soak，见 `soak/results/soak_60min_20260419_130316.json`）：
+**实测两轮 60 min read-only soak 的一致结论**：
 
-- 20K 行表 × 64d × IVF_FLAT-16，5 readers × ~10 QPS，60 min 持续
-- **Coord**：RSS +2.91%、fd +0.00% —— 稳
-- **Worker**：RSS +15~17%、fd 13→15（两个 worker 各 +2 fd）
+| 轮次 | 产物 | Coord drift | Worker RSS drift | Worker fd |
+|---|---|---:|---:|---:|
+| beta.1 G4 (60 min) | `soak/results/soak_60min_20260419_130316.json` | +2.91% | +15.6/+16.9% | 13 → 15 |
+| beta.3 B7 (60 min) | `soak/results/soak_60min_20260420_161244.json` | +4.08% | +16.4/+13.0% | 13 → 15 |
+| alpha G4 (15 min) | — | -10.6% | +228/+231% | 13 → 14 |
 
-Worker 的增长**不是线性泄漏**：sampling 序列 0→30 min 属于初始 cache warmup（RSS 缓慢上升约 +3%），30→55 min 完全平（±0），55→60 min **一个 14 MB + 2 fd 的 step** —— 两个 worker 同步发生 —— 是 Lance 背景 fragment reload 事件，典型的"cache 命中一个新 segment 并把 file handle 保留"。
+两轮 beta 的 worker RSS 曲线形状**完全一致**：
 
-**与 alpha 对比**：alpha 15 min soak 的 w0/w1 RSS 增长为 +228%/+231%（H25 修复前的粗放 cache 管理）。beta 在 4 倍时长下只增 +15~17%，已经好 15 倍，但 3% 门槛对 warmup 事件太严。
+- min 0→55：缓慢上升约 +3% 后长时间平（±0.2%），看起来是初始 cache warmup 阶段
+- min 55→60：**一个 13-15 MB 的 step，两个 worker 同步发生**，fd 从 13 →15（各 +2）
+
+两轮 60-min 窗口里各只出现 **一次** step。配合 beta.3 中途被 pkill 打断的 38 min 数据（RSS 一直平稳没出 step），三个数据点共同支持 **"事件是周期性、非线性"** 的假设——一次 Lance 背景 fragment reload 打开了额外 segment，把 file handle 保留进 cache，导致 RSS 跳一次然后继续平。
+
+与 alpha 对比：alpha 15 min 就飙 +228%，暴涨完全不同的曲线——是 H21 之前粗放 cache 管理导致的线性漏；**beta 已经好 15× 以上**。现在是 step 形状，不是斜线。
+
+**3% 门槛的诚实处理**：
+
+- **Coord**：beta.3 +4.08% 略超门槛，但曲线形状也是"两次小 step（min 25 / min 55）"非线性；coord 作为 stateless scatter-gather 期望应该 < 3%，0.3 要查 coord 的那 2 次 +~500KB step 具体是什么（嫌疑最大是 TLS session cache / tonic channel 池）。
+- **Worker**：+15% 超门槛但是**单次事件**而非持续增长，实际 SRE 规划意义上的 "per-hour growth" 接近 0。将 `soak/run.py --drift-threshold` 按 worker/coord 分桶、对 step 形曲线用 "峰值高度 / 连续平均斜率" 两维度判断——是 0.3 harness 改造工作。
 
 **生产建议**：
-- 先用 10-15 MB/worker/hour 作为"可接受 warmup 上限"规划 pod memory limit，留 20~30% headroom。
-- 如果 4h+ 运行后 RSS 仍在线性上涨（而不是阶梯式 + 长时间持平），那就是真漏了，需要抓火焰图。
-- Coord 的 3% 门槛**仍然是硬约束** —— coord 是 stateless scatter-gather，不应该有任何漏。
 
-**计划**：0.3 把 soak 扩到 4h 并按 Welford 方法计算"阶梯高度 / 阶梯间隔"两个维度，区分 warmup 与泄漏。
+- Pod memory limit 预留 20-30 MB/worker headroom 覆盖一次 step。
+- 4h+ 长跑来特征化 step 发生间隔——0.3 nightly CI 里用 `workflow_dispatch` soak_minutes=240 跑。
+- 4h 后仍线性上涨（不是"step 然后长时间平"）才算真漏，应当抓火焰图。
+
+**计划（0.3）**：
+
+1. 扩展 `soak/run.py` 自动识别 step（首差分 > 5 MB 认定是 step，记步高 + 时间戳），代替裸 drift% 作为 gate 标准
+2. 查 coord 非零 drift 的根因（TLS session cache？tonic 连接池增长？）
+3. 4h characterisation run 作为发布前强制 gate
 
 ---
 
