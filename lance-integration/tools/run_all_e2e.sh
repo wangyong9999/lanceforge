@@ -1,6 +1,15 @@
 #!/bin/bash
 # Run all LanceForge E2E regression suites (Phase 11-16) + smoke benchmark.
 # Exits non-zero on any failure; prints a summary at the end.
+#
+# Each phase test owns its own port range (53900-53950, 54000-54050,
+# etc.) and does port-specific cleanup on entry, so this wrapper does
+# not need to kill cross-run stragglers. Earlier versions ran
+# `pkill -9 -f 'lance-coordinator|lance-worker'` between phases; that
+# matched every coordinator/worker on the machine, including soaks
+# and chaos runs deliberately kept alive on other ports. The
+# 2026-04-20 beta-3 soak was killed at 38 min by this exact bug —
+# don't reintroduce it.
 set -u
 
 cd "$(dirname "$0")"
@@ -14,8 +23,7 @@ start_total=$(date +%s)
 
 for t in "${tests[@]}"; do
     echo -e "\n=== $t ==="
-    pkill -9 -f 'lance-coordinator|lance-worker' 2>/dev/null
-    sleep 3
+    sleep 1
     if python3 "$t"; then
         pass=$((pass + 1))
     else
@@ -26,8 +34,7 @@ done
 
 # Smoke bench
 echo -e "\n=== smoke benchmark ==="
-pkill -9 -f 'lance-coordinator|lance-worker' 2>/dev/null
-sleep 3
+sleep 1
 if python3 ../bench/bench_phase17_matrix.py --smoke; then
     echo "Smoke bench: PASS"
 else
