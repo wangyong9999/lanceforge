@@ -56,10 +56,23 @@ def start_cluster():
         if rw_split:
             entry['role'] = 'write_primary' if i == 0 else 'read_primary'
         executors.append(entry)
+    # B2.6 C2: optional S3/MinIO backend. Set LANCEFORGE_STORAGE_PATH to
+    # an s3:// URI to drive the bench against object storage instead of
+    # local fs. LANCEFORGE_S3_* env vars populate storage_options. This
+    # is the controlled test for "is Mixed-RW 50 QPS also bad on S3, or
+    # only on local fs?" — see docs/PROFILE_MIXED_RW.md §8.2.
+    storage_path = os.environ.get("LANCEFORGE_STORAGE_PATH", BASE)
+    storage_options = {}
+    for k in ("aws_access_key_id", "aws_secret_access_key", "aws_endpoint",
+              "aws_region", "allow_http"):
+        v = os.environ.get(f"LANCEFORGE_S3_{k.upper()}")
+        if v:
+            storage_options[k] = v
     cfg = {
         'tables': [],
         'executors': executors,
-        'default_table_path': BASE,
+        'default_table_path': storage_path,
+        'storage_options': storage_options,
         'server': {'max_k': 50_000, 'slow_query_ms': 0},
         'cache': {'read_consistency_secs': rc_secs},
     }

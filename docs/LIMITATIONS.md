@@ -133,8 +133,12 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
   ```
   启动后调用 `Rebalance()` 把每 shard 复制到两个 worker。
 
-- **高频写入（> 10 QPS）—— alpha 不推荐用于生产**：
-  实测 50 QPS 写读 QPS = 18.5% baseline（本地 fs）。根因是**存储层共享资源争抢**（manifest commit 风暴 + fsync write barrier），不是 cache invalidation。详见 `docs/PROFILE_MIXED_RW.md` §8。
+- **高频写入（> 10 QPS）—— 当前不推荐用于生产**：
+  实测 50 QPS 写读 QPS = 18.5% baseline（本地 fs）、**2.4% baseline（S3/MinIO）**。
+  C2 实测 (2026-04-20) 推翻"S3 会解救"的假设——**S3 在 50 QPS 场景比本地 fs 更糟**
+  （单次 HTTP PUT RTT 放大 + MinIO 服务端 OCC 冲突序列化）。根因与 backend
+  无关，是 **lancedb 每次 add 都做一次完整 manifest commit** 的写放大问题。
+  详见 `docs/PROFILE_MIXED_RW.md` §8.6.1。
   - **临时 workaround**：多副本读负载均衡
     ```yaml
     replica_factor: 3
@@ -178,7 +182,13 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 
 **3% 门槛的诚实处理**：
 
-- **Coord**：beta.3 +4.08% 略超门槛，但曲线形状也是"两次小 step（min 25 / min 55）"非线性；coord 作为 stateless scatter-gather 期望应该 < 3%，0.3 要查 coord 的那 2 次 +~500KB step 具体是什么（嫌疑最大是 TLS session cache / tonic channel 池）。
+- **Coord**：beta.3 +4.08% 略超门槛，但曲线形状也是"两次小 step（min 25 / min 55）"非线性；coord 作为 stateless scatter-gather 期望应该 < 3%。0.3 查 coord step 根因的候选清单（按置信度重排，C1 证伪一个后）：
+  - ~~audit mpsc channel 队列~~（C1 证伪：soak 配置从不开 audit_log_path，sink 根本没跑）
+  - **tonic Channel / HTTP2 连接池重建**：健康检查 flap 触发旧 Arc buffer 延迟 drop，嫌疑最大
+  - **reconciliation loop 状态累积**：5s 一次的背景任务可能在 ShardState 里留痕
+  - **tracing-subscriber JSON layer 内部 buffer**：默认 64KB ring，step 大小不吻合但不能完全排除
+  - **系统 allocator（glibc）arena 分裂**：非 jemalloc 下 RSS 会出现离散 arena 添加，正好匹配"步进"形态
+  - 验证手段：soak 时开 `jemalloc_pprof` 或 `heaptrack`，对比两次 step 前后的 heap delta。0.3 harness 改造项。
 - **Worker**：+15% 超门槛但是**单次事件**而非持续增长，实际 SRE 规划意义上的 "per-hour growth" 接近 0。将 `soak/run.py --drift-threshold` 按 worker/coord 分桶、对 step 形曲线用 "峰值高度 / 连续平均斜率" 两维度判断——是 0.3 harness 改造工作。
 
 **生产建议**：

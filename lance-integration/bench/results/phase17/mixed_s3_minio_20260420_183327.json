@@ -1,0 +1,39 @@
+{
+  "timestamp": "20260420_183327",
+  "baseline_qps": 1186.1,
+  "scenarios": [
+    {
+      "label": "read-only",
+      "write_qps_target": 0,
+      "read_qps": 1186.1,
+      "read_p50_ms": 2.9642640001839027,
+      "read_p95_ms": 40.11203900154214,
+      "read_p99_ms": 117.1934589947341,
+      "read_errors": 0,
+      "write_completed": 0,
+      "write_errors": 0
+    },
+    {
+      "label": "read+10qps_writes",
+      "write_qps_target": 10,
+      "read_qps": 883.4333333333333,
+      "read_p50_ms": 3.303029006929137,
+      "read_p95_ms": 70.14268499915488,
+      "read_p99_ms": 128.62285200390033,
+      "read_errors": 0,
+      "write_completed": 235,
+      "write_errors": 0
+    },
+    {
+      "label": "read+50qps_writes",
+      "write_qps_target": 50,
+      "read_qps": 28.066666666666666,
+      "read_p50_ms": 365.3290990041569,
+      "read_p95_ms": 447.06004799809307,
+      "read_p99_ms": 521.6976770025212,
+      "read_errors": 0,
+      "write_completed": 163,
+      "write_errors": 0
+    }
+  ]
+}

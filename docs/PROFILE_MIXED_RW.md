@@ -296,17 +296,40 @@ ROADMAP 之前写"fragment-level invalidation"是认为瓶颈在 cache 层。实
 
 ### 8.6 真正的 beta 解法（按 ROI 排）
 
-- **B2.3 Write batching**（写路径批处理，~1 周）：coordinator/worker 侧加 WriteBuffer，窗口 500ms 或 1000 行，50 commits/s → 10 commits/s（-80% 写放大）。**在本地 fs 下是最大杠杆**。
+- **B2.3 Write batching**（写路径批处理，~1 周）：coordinator/worker 侧加 WriteBuffer，窗口 500ms 或 1000 行，50 commits/s → 10 commits/s（-80% 写放大）。**本地 fs 和 S3 下都是最大杠杆**（见 §8.6.1 实测）。
 - **B2.4 Fragment-level invalidation**（~2 周）：ROADMAP 原计划。配合 lancedb fragment API。在 10-30 QPS 写场景叠加 10-15%；50 QPS 场景锦上添花。
 - **B2.5 物理存储隔离 PoC**（~1 周 spike）：write worker 写独立 hot tier；背景 compact 到 cold tier；readers 只读 cold tier。彻底解除 fs 层争抢。本地 fs 下 ROI 最高但运维最重。
-- **B2.6 S3 基线验证**（~2 天）：在真实 S3/MinIO 下重跑 bench。**如果 S3 下 50 QPS 写已经接近 80%，则 B2.3-2.5 只需要本地 dev 场景，不需要 beta-blocking**。
+- **B2.6 S3 基线验证**（**2026-04-20 实测完成**，见 §8.6.1）
 - **B2.7 Async commit**（和 B2.3 叠加）：`durability: {sync, async, group_commit}` 配置；async 场景 ack 不等 fsync，背景按时间或字节批量推。
+
+### 8.6.1 B2.6 S3/MinIO 实测（C2 gate，2026-04-20）
+
+原始数据：`lance-integration/bench/results/phase17/mixed_s3_minio_20260420_183327.json`
+
+配置：2-worker 集群 + MinIO 后端（单机 `/tmp/minio-data`）+ rw_split + rc=60（同本地 fs 对比配置）。
+
+| 场景 | 本地 fs (split+rc60) | **S3 MinIO (split+rc60)** | 差距分析 |
+|---|---:|---:|---|
+| read-only baseline | 2440 QPS | **1186 QPS** | S3 baseline 自带 ~10ms HTTP 往返开销，减半 |
+| +10 QPS 写 | 2014 (82.5%) | 883 (**74.5%**) | S3 略差 8 pp |
+| +50 QPS 写 | 450 (**18.5%**) | 28 (**2.4%**) | **S3 反而糟 8×** |
+
+**原假设**："S3 没有共享 fs 层 → 没 fsync write barrier → 50 QPS 写应该接近线性扩展" → **证伪**。
+
+**真实机制**（实测后的修正理解）：
+- 每次 `table.add().execute()` 在 S3 上触发至少 2 次 HTTP PUT（1× fragment + 1× manifest）+ fsync 段省掉但**换成 HTTP RTT**
+- MinIO（或任何 S3 兼容）在 OCC manifest 冲突场景会有服务端 If-Match 重试，读取的 GET 被同步等待
+- 50 QPS 写 = 100 PUTs/s；HTTP connection pool 饱和，读的 fragment GET 排队延迟炸
+- 结论：**S3 不是本地 fs 瓶颈的解药**，反而更敏感于写放大
+
+**C2 决策门结果**：B2.3 Write batching 不是"本地 fs 独有优化"，而是对所有后端都需要的核心写路径重构。降级到 0.3 而非取消。
 
 ### 8.7 建议 beta exit criteria（B2 维度）
 
-- 本地 fs：50 QPS 写读 QPS ≥ 60% baseline（不求 80%，那是 GA）
-- S3/MinIO：50 QPS 写读 QPS ≥ 80% baseline（如 B2.6 实测本就接近则不做 Tier 1）
-- 前置：`B2.6` 先跑完，定位真问题在本地 fs 还是 S3 也如此
+- 本地 fs / S3 一致门槛：50 QPS 写读 QPS ≥ 60% baseline（需 B2.3 write batching 实施才能达）
+- beta 定位诚实：**当前不推荐 sustained writes > 10 QPS**；10 QPS 以内两套后端都有 ≥74% 读能力（本地 82.5% / S3 74.5%）
+- 多数实际向量检索 / RAG 场景是 "bulk ingest + 低频增量"，10 QPS 已足够多数生产
+- 50+ QPS 持续写场景文档标注为 "planned improvement in 0.3 via B2.3"
 
 ---
 
