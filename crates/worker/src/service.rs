@@ -57,17 +57,20 @@ impl LanceExecutorService for WorkerService {
             table = %request.get_ref().table_name,
             query_type = ?request.get_ref().query_type,
             k = ?request.get_ref().k,
+            trace_id = tracing::field::Empty,
         )
     )]
     async fn execute_local_search(
         &self,
         request: Request<LocalSearchRequest>,
     ) -> Result<Response<LocalSearchResponse>, Status> {
-        // B1: surface trace_id in worker logs when the coord attached
-        // a `traceparent`. info! not debug! so production log levels
-        // can still correlate across processes without dropping the
-        // level to debug.
+        // B1 + D7: surface trace_id in both the info! log line and as
+        // a recorded field on the enclosing tracing span, so OTLP
+        // consumers (Jaeger / Tempo) see `trace_id` as a first-class
+        // attribute without having to parse the raw traceparent
+        // header.
         if let Some(tid) = extract_trace_id(&request) {
+            tracing::Span::current().record("trace_id", tid.as_str());
             info!("local_search trace_id={tid} table={}", request.get_ref().table_name);
         }
         let req = request.into_inner();
@@ -115,6 +118,7 @@ impl LanceExecutorService for WorkerService {
         fields(
             table = %request.get_ref().table_name,
             write_type = ?request.get_ref().write_type,
+            trace_id = tracing::field::Empty,
         )
     )]
     async fn execute_local_write(
@@ -122,6 +126,7 @@ impl LanceExecutorService for WorkerService {
         request: Request<pb::LocalWriteRequest>,
     ) -> Result<Response<pb::LocalWriteResponse>, Status> {
         if let Some(tid) = extract_trace_id(&request) {
+            tracing::Span::current().record("trace_id", tid.as_str());
             info!("local_write trace_id={tid} table={} type={}",
                   request.get_ref().table_name, request.get_ref().write_type);
         }

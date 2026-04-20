@@ -1,7 +1,7 @@
 [package]
 name = "lanceforge"
 description = "LanceForge - distributed multimodal retrieval engine for Lance tables"
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.4"
 edition = "2024"
 license = "Apache-2.0"
 

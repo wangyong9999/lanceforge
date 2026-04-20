@@ -188,3 +188,72 @@ jobs:
       - name: Run H25 uptime test
         run: |
           python3 lance-integration/tools/e2e_h25_coord_uptime_test.py
+
+  minio-sse:
+    # D1: bucket-level SSE-S3 end-to-end. Uses GitHub Actions
+    # `services:` to boot MinIO with KMS enabled so bucket
+    # default-encryption can be set. `MINIO_KMS_SECRET_KEY` is
+    # required for that path (SSE-S3 + SSE-KMS both refuse without it).
+    name: MinIO SSE-S3 encryption e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: lanceadmin
+          MINIO_ROOT_PASSWORD: lanceadmin123
+          MINIO_KMS_SECRET_KEY: "lance-ci-key:aGVsbG8tYnllLXdvcmxkLW1pbmlvLWtleQo="
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -sf http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --quiet pyarrow lance numpy grpcio pyyaml boto3
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nightly-sse-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-nightly-sse-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --bin lance-coordinator --bin lance-worker
+
+      - name: Clear proxy env
+        run: |
+          echo "HTTP_PROXY=" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=" >> $GITHUB_ENV
+
+      - name: Minio image run (start via docker workaround on hosts without services)
+        # Sanity check: confirm the services block actually stood up.
+        # If run locally via `act`, this step harmlessly no-ops.
+        run: |
+          curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null || \
+            (echo "MinIO not reachable on 127.0.0.1:9000" && exit 1)
+
+      - name: Run SSE-S3 e2e
+        env:
+          MINIO_ENDPOINT: http://127.0.0.1:9000
+          MINIO_ROOT_USER: lanceadmin
+          MINIO_ROOT_PASSWORD: lanceadmin123
+        run: |
+          python3 lance-integration/tools/e2e_minio_sse_test.py

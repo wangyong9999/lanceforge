@@ -812,4 +812,115 @@ mod tests {
         let _store2 = FileMetaStore::new(&path).await
             .expect("lock should be released after drop");
     }
+
+    // ── D5: S3MetaStore against a real S3-compatible server (MinIO) ──
+    //
+    // Everything else in this module exercises the `file://` path
+    // through S3MetaStore's object_store dispatch, which catches bugs
+    // in the URI parsing + version bookkeeping but not in the actual
+    // S3 HTTP round-trip. These tests plug into a local MinIO when
+    // the operator opts in.
+    //
+    // Activation: set MINIO_E2E_TEST=1 (plus MINIO_* credentials if
+    // they differ from the defaults the other SSE tests use). Without
+    // the env var the test returns early so cargo test still runs in
+    // a sealed box. CI nightly-soak-chaos.yml `minio-sse` job
+    // satisfies the env for its coverage run.
+
+    fn minio_uri_from_env() -> Option<(String, Vec<(String, String)>)> {
+        if std::env::var("MINIO_E2E_TEST").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let endpoint = std::env::var("MINIO_ENDPOINT")
+            .unwrap_or_else(|_| "http://127.0.0.1:9000".to_string());
+        let key = std::env::var("MINIO_ROOT_USER")
+            .unwrap_or_else(|_| "lanceadmin".to_string());
+        let secret = std::env::var("MINIO_ROOT_PASSWORD")
+            .unwrap_or_else(|_| "lanceadmin123".to_string());
+        let bucket = std::env::var("MINIO_MSTORE_BUCKET")
+            .unwrap_or_else(|_| "lance-meta-test".to_string());
+        // Unique key per run so concurrent CI jobs don't collide.
+        let rand = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let uri = format!("s3://{bucket}/meta-{rand}.json");
+        let opts = vec![
+            ("aws_access_key_id".to_string(), key),
+            ("aws_secret_access_key".to_string(), secret),
+            ("aws_endpoint".to_string(), endpoint),
+            ("aws_region".to_string(), "us-east-1".to_string()),
+            ("allow_http".to_string(), "true".to_string()),
+        ];
+        Some((uri, opts))
+    }
+
+    /// Create the MinIO bucket if missing. `object_store` fails with
+    /// 404 when the bucket doesn't exist, but we can't create buckets
+    /// via that API (S3 CreateBucket isn't in the ObjectStore trait).
+    /// Drop down to the raw `reqwest::put` style via a shell curl
+    /// invocation — ugly but avoids pulling boto3 / awssdk deps just
+    /// for this test bootstrap.
+    async fn ensure_bucket(uri: &str, opts: &[(String, String)]) {
+        let key = opts.iter().find(|(k, _)| k == "aws_access_key_id")
+            .map(|(_, v)| v.as_str()).unwrap_or("");
+        let secret = opts.iter().find(|(k, _)| k == "aws_secret_access_key")
+            .map(|(_, v)| v.as_str()).unwrap_or("");
+        let endpoint = opts.iter().find(|(k, _)| k == "aws_endpoint")
+            .map(|(_, v)| v.as_str()).unwrap_or("http://127.0.0.1:9000");
+        let bucket = uri.strip_prefix("s3://").unwrap_or(uri)
+            .split('/').next().unwrap_or("");
+        // Use aws sigv4 via mc or skip if we can't. Try python3+boto3.
+        let py = format!(
+            "import boto3\n\
+             s = boto3.client('s3', endpoint_url='{endpoint}',\n\
+                              aws_access_key_id='{key}',\n\
+                              aws_secret_access_key='{secret}',\n\
+                              region_name='us-east-1')\n\
+             try: s.create_bucket(Bucket='{bucket}')\n\
+             except Exception: pass\n"
+        );
+        let _ = tokio::process::Command::new("python3")
+            .arg("-c").arg(&py)
+            .output().await;
+    }
+
+    #[tokio::test]
+    async fn test_s3_store_real_minio_cas_and_persistence() {
+        let Some((uri, opts)) = minio_uri_from_env() else {
+            eprintln!("skipping: set MINIO_E2E_TEST=1 to run against MinIO");
+            return;
+        };
+        ensure_bucket(&uri, &opts).await;
+        let store1 = S3MetaStore::new(&uri, opts.clone()).await.unwrap();
+
+        // Basic CRUD + CAS over real HTTP.
+        let v1 = store1.put("tables/t1", "{\"s0\":[\"w0\"]}", 0).await.unwrap();
+        assert!(v1 > 0);
+        let entry = store1.get("tables/t1").await.unwrap().unwrap();
+        assert_eq!(entry.version, v1);
+
+        // CAS conflict on stale version.
+        let err = store1.put("tables/t1", "{\"wrong\":true}", 0).await;
+        assert!(matches!(err, Err(MetaError::VersionConflict { .. })),
+                "expected CAS conflict, got {err:?}");
+
+        // Persistence: new instance reopens and reads committed state.
+        drop(store1);
+        let store2 = S3MetaStore::new(&uri, opts.clone()).await.unwrap();
+        let entry = store2.get("tables/t1").await.unwrap().unwrap();
+        assert_eq!(entry.version, v1,
+                   "persistence round-trip lost the version");
+
+        // list_keys filters by prefix.
+        store2.put("tables/t2", "{}", 0).await.unwrap();
+        store2.put("shards/s0", "file:///ignored", 0).await.unwrap();
+        let tables = store2.list_keys("tables/").await.unwrap();
+        assert_eq!(tables.len(), 2,
+                   "list_keys must filter by prefix; got {tables:?}");
+
+        // Cleanup: delete the test object so repeated runs don't
+        // accumulate MinIO litter.
+        store2.delete("tables/t1").await.ok();
+        store2.delete("tables/t2").await.ok();
+        store2.delete("shards/s0").await.ok();
+    }
 }

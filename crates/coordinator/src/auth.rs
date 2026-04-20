@@ -848,4 +848,134 @@ mod tests {
         let r = make_request_with_key("k");
         assert!(ic.check_namespace(&r, "bare").is_ok());
     }
+
+    // ── D4: property tests for namespace prefix matching ──
+    //
+    // Unit tests above hit specific edge cases; these assert
+    // cross-cutting invariants across a large random corpus.
+
+    use proptest::prelude::*;
+
+    // A namespace-friendly string regex: [a-z0-9-]{1,12} so generated
+    // names mirror the kind of tenant IDs real deployments use
+    // (DNS-label subset, no slashes, no dots).
+    fn ns_regex() -> &'static str { "[a-z0-9-]{1,12}" }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+        // Invariant (a): a namespace-bound key calling a table name
+        // that does NOT start with `{ns}/` is always denied.
+        #[test]
+        fn prop_ns_rejects_names_outside_prefix(
+            ns in ns_regex(),
+            other_ns in ns_regex(),
+            leaf in ns_regex(),
+        ) {
+            prop_assume!(ns != other_ns);
+            let mut keys = HashMap::new();
+            keys.insert("k".to_string(), Role::Admin);
+            let ic = ApiKeyInterceptor::with_roles(keys);
+            let mut m = HashMap::new();
+            m.insert("k".to_string(), ns.clone());
+            ic.set_namespaces(m);
+            let req = make_request_with_key("k");
+            let table = format!("{other_ns}/{leaf}");
+            prop_assert!(
+                ic.check_namespace(&req, &table).is_err(),
+                "ns={ns} should deny {table}"
+            );
+        }
+
+        // Invariant (b): a namespace-bound key calling a table name
+        // that starts with exactly `{ns}/` is always allowed.
+        #[test]
+        fn prop_ns_accepts_names_within_prefix(
+            ns in ns_regex(),
+            leaf in ns_regex(),
+        ) {
+            let mut keys = HashMap::new();
+            keys.insert("k".to_string(), Role::Admin);
+            let ic = ApiKeyInterceptor::with_roles(keys);
+            let mut m = HashMap::new();
+            m.insert("k".to_string(), ns.clone());
+            ic.set_namespaces(m);
+            let req = make_request_with_key("k");
+            let table = format!("{ns}/{leaf}");
+            prop_assert!(
+                ic.check_namespace(&req, &table).is_ok(),
+                "ns={ns} should allow {table}"
+            );
+        }
+
+        // Invariant (c): `filter_namespace` output is a subset of
+        // the input, preserves order, and contains only `{ns}/`-prefixed
+        // entries. Guards against the `tenant-a / tenant-abc` prefix-
+        // collision class of bugs.
+        #[test]
+        fn prop_filter_namespace_preserves_order_and_is_prefix_safe(
+            ns in ns_regex(),
+            tables in proptest::collection::vec(ns_regex(), 0..20),
+        ) {
+            let mut keys = HashMap::new();
+            keys.insert("k".to_string(), Role::Read);
+            let ic = ApiKeyInterceptor::with_roles(keys);
+            let mut m = HashMap::new();
+            m.insert("k".to_string(), ns.clone());
+            ic.set_namespaces(m);
+
+            // Build a mix of own-ns, foreign-ns, and bare names.
+            let mut input: Vec<String> = Vec::new();
+            for (i, t) in tables.iter().enumerate() {
+                match i % 3 {
+                    0 => input.push(format!("{ns}/{t}")),
+                    1 => input.push(format!("x-{ns}/{t}")), // prefix-collision bait
+                    _ => input.push(t.clone()),             // bare
+                }
+            }
+            let req = make_request_with_key("k");
+            let out = ic.filter_namespace(&req, input.clone());
+            let required_prefix = format!("{ns}/");
+            // Every output element must have the exact prefix.
+            for o in &out {
+                prop_assert!(o.starts_with(&required_prefix),
+                             "filter_namespace leaked {o} which doesn't start with {required_prefix}");
+            }
+            // Output is a subset (every out element is in input).
+            for o in &out {
+                prop_assert!(input.contains(o));
+            }
+            // Order preservation: relative order within `out` matches
+            // the subsequence found in `input`.
+            let filtered_by_hand: Vec<&String> = input.iter()
+                .filter(|s| s.starts_with(&required_prefix))
+                .collect();
+            prop_assert_eq!(out.len(), filtered_by_hand.len());
+            for (a, b) in out.iter().zip(filtered_by_hand.iter()) {
+                prop_assert_eq!(a, *b);
+            }
+        }
+
+        // Invariant (d): for an UNBOUND key (no namespace installed),
+        // check_namespace always succeeds and filter_namespace returns
+        // the input unchanged.
+        #[test]
+        fn prop_unbound_key_is_pass_through(
+            tables in proptest::collection::vec(ns_regex(), 0..20),
+            probe in ns_regex(),
+        ) {
+            let mut keys = HashMap::new();
+            keys.insert("op".to_string(), Role::Admin);
+            let ic = ApiKeyInterceptor::with_roles(keys);
+            // No set_namespaces call ⇒ "op" has no binding.
+            let req = make_request_with_key("op");
+            prop_assert!(ic.check_namespace(&req, &probe).is_ok());
+            prop_assert!(ic.check_namespace(&req, "").is_ok());
+            prop_assert!(ic.check_namespace(&req, "anything/at_all").is_ok());
+
+            let req = make_request_with_key("op");
+            let out = ic.filter_namespace(&req, tables.clone());
+            prop_assert_eq!(out, tables);
+        }
+    }
 }

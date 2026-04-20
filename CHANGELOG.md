@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.4] - 2026-04-20
+
+Coverage-first hardening pass + honest fix for an overstated SSE
+claim. D1-D8 + the SSE-C correction.
+
+### Fixed
+- SECURITY.md §6.3 SSE-C claim: `storage_options.aws_server_side_
+  encryption_customer_*` keys don't actually encrypt (empirically
+  verified against MinIO). Docs rewritten; SSE-C deferred to 0.3.
+- `lance-admin shards copy` OOM risk: refactored from
+  `get().bytes().await` to `put_multipart` above a configurable
+  threshold. Streaming now keeps memory bounded by one chunk.
+- `lance-admin shards copy` fail-fast on single-object error:
+  added `--continue-on-error` + summary report.
+
+### Added
+- D1 MinIO SSE-S3 e2e (`e2e_minio_sse_test.py`) + CI services block.
+- D4 namespace prefix proptests (512 cases × 4 properties).
+- D5 MetaStore S3 real-MinIO integration test (`MINIO_E2E_TEST=1`).
+- D6 audit_dropped_total e2e (`e2e_audit_dropped_test.py`).
+- D7 worker `#[tracing::instrument]` explicit `trace_id` field.
+- D8 write-path per-shard latency log (add_rows fan-out; H13 parity).
+- `docs/OBSERVABILITY.md`, `docs/CI_MATRIX.md`, `docs/RELEASE.md`
+  added in earlier beta.3 commits — remain authoritative.
+
+### Changed
+- `cmd_shards_copy` signature: now takes `continue_on_error: bool` +
+  `multipart_threshold: u64`. Test call sites updated.
+- `SECURITY.md` §6.3 rewritten to reflect the actual storage_options
+  capabilities (bucket-level SSE works, per-request SSE-C doesn't).
+- `LIMITATIONS.md` §10 adds explicit "SSE-C not supported" entry
+  with technical reason + workaround.
+
+### Deferred to 0.3
+- SSE-C support via custom object_store wrapper (the real fix).
+- B2.3 Write batching (confirmed as cross-backend blocker in C2).
+- Coord RSS step root-cause (audit hypothesis ruled out in C1).
+
 ## [0.2.0-beta.3] - 2026-04-20
 
 Observability + OBS-native audit + async SDK. B1-B6 (minus B7 soak

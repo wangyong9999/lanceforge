@@ -99,6 +99,15 @@ HA 部署必须用 S3MetaStore。文档会在 DEPLOYMENT.md 里明说。
 - ❌ 流式搜索结果（当前一次性返回）
 - ⚠️ **Audit log 持久化到 OBS** — G7 本地文件路径可用；OBS URI（s3://…）暂时 warn-and-drop
   因各家 OBS 的 append 语义不统一（0.3 计划补，见 `ROADMAP_0.2.md` R3）
+- ❌ **Encryption at rest：SSE-C 客户自带密钥** — beta.4 实测（D1）发现
+  `storage_options.aws_server_side_encryption_customer_*` 配置对 object_store
+  crate 无效果，对象落盘时没有实际加密。SSE-C 要求每次 PutObject/GetObject
+  携带 header，`object_store` 的 ObjectStore trait 没有 per-request header hook。
+  **SSE-S3（bucket-level）和 SSE-KMS（bucket-level）完全可用且已 e2e 测试覆盖**
+  （见 `lance-integration/tools/e2e_minio_sse_test.py`）——这两个模式是服务端
+  管理密钥、对客户端透明，直接在 bucket policy 上配即可。
+  需要客户自带密钥（cryptographic key custody）的场景建议：per-tenant
+  LanceForge 部署 + per-tenant KMS key（见 `docs/SECURITY.md` §6.3）。
 
 每一条都有明确理由不在当前版本实现（详见 Phase 15/16 的架构反思日志）。需要时再加。
 

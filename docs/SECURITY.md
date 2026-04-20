@@ -180,20 +180,30 @@ storage_options:
   aws_server_side_encryption: AES256
 ```
 
-### 6.3 SSE-C (customer-provided keys)
+### 6.3 SSE-C (customer-provided keys) — NOT supported in 0.2
 
-The caller supplies a 256-bit key on every request. LanceForge supports
-this by passing the `aws_sse_customer_*` options through to the underlying
-`object_store` crate — but note that **every read and every write must
-carry the key**, and losing the key means losing the data. This is tested
-under `lance-integration/tests/test_encryption_sse.py` against MinIO.
+Previous versions of this document claimed SSE-C worked through
+`storage_options.aws_server_side_encryption_customer_*`. **That was
+wrong.** Empirically verified 2026-04-20 against a LanceForge 0.2.0-beta.4
+build + MinIO:
 
-```yaml
-storage_options:
-  aws_server_side_encryption_customer_algorithm: AES256
-  aws_server_side_encryption_customer_key: <base64 of 32-byte key>
-  aws_server_side_encryption_customer_key_md5: <base64 md5 of the key>
-```
+- With the documented config, LanceForge writes objects **plain**, not
+  encrypted. `ServerSideEncryption` metadata is absent on every stored
+  object.
+
+Root cause: SSE-C requires per-request HTTP headers
+(`x-amz-server-side-encryption-customer-*`) on every `PutObject` /
+`GetObject` call. The `object_store` crate's `ObjectStore` trait doesn't
+expose a hook to inject per-request headers — S3 credentials and region
+go through `parse_url_opts` at client-construction time, but customer
+keys are a per-operation concern. LanceForge would need a custom
+wrapper over `object_store` that adds the headers before every call,
+which is a 0.3 item.
+
+**If you need per-tenant customer-key isolation today**: run one
+LanceForge deployment per tenant with its own bucket, and use SSE-KMS
+with a per-tenant KMS key (§6.1). That gives you the same
+cryptographic split without SSE-C's per-request-key overhead.
 
 ### 6.4 GCS / Azure
 

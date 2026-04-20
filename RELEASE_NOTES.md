@@ -1,5 +1,129 @@
 # LanceForge Release Notes
 
+## 0.2.0-beta.4 — 2026-04-20
+
+**Coverage hardening + one real bug found.** The beta.3 postmortem
+identified eight potential issues across performance / functionality /
+coverage. beta.4 closes all eight plus one more: the SECURITY.md §6.3
+SSE-C claim turned out to be **overstated** — empirically the
+customer-key headers never reach MinIO. Fixed the docs, tested what
+actually works (bucket-level SSE-S3), and filed SSE-C per-request
+keys as a 0.3 item with concrete technical reasoning.
+
+### What was broken or understated in beta.3
+
+- **SSE-C was documented as supported, but wasn't.** `object_store`'s
+  `ObjectStore` trait has no hook for per-request headers; the
+  `aws_server_side_encryption_customer_*` keys in `storage_options`
+  pass through to `parse_url_opts` but `parse_url_opts` doesn't
+  recognise per-put headers. Objects land unencrypted. Verified
+  empirically against MinIO; SECURITY.md §6.3 rewritten.
+- **`lance-admin shards copy` loaded whole objects into memory**
+  (`get().bytes().await` on every object). A 100 MB shard data file
+  would OOM the CLI. Now streams via `put_multipart` above a
+  configurable threshold (default 8 MB).
+- **Single failing object aborted the whole DR copy**. Now there's
+  `--continue-on-error` + failure-summary report so operators can
+  finish a catch-up sync.
+- **Namespace prefix matching had unit tests only**. Added
+  property-based tests (512 cases each) covering: always-denies-
+  outside, always-allows-inside, filter preserves order + is
+  subset, unbound-key is pass-through.
+- **MetaStore S3 branch was "tested" via `file://` URLs**. Added a
+  real-MinIO integration test (`MINIO_E2E_TEST=1` gate) covering
+  CAS conflicts, cross-restart persistence, list_keys prefix
+  filter.
+- **Write path had no per-shard latency log** (H13 covered reads
+  only). Added in add_rows — operators can now spot which shard
+  is the write outlier.
+- **`audit_dropped_total` counter was only unit-tested**. Added an
+  e2e that configures audit_log_path at an unwritable path,
+  fires 1 CreateTable + 5 AddRows, scrapes `/metrics`, asserts
+  counter ≥ 6.
+- **Worker OTLP spans didn't surface `trace_id` explicitly**. Now
+  recorded as a first-class field on the span so Jaeger / Tempo
+  UI filters work without raw `traceparent` parsing.
+
+### Changes in detail
+
+- **D1 MinIO SSE-S3 e2e** (`e2e_minio_sse_test.py`): starts a
+  2-worker cluster against a MinIO bucket with default-encryption
+  AES256 set, runs CreateTable + AddRows + AnnSearch, asserts
+  every written object has `ServerSideEncryption: AES256` in MinIO
+  response headers. Wired into `nightly-soak-chaos.yml` via a
+  GitHub Actions `services: minio:` block — no extra plumbing
+  needed on the user side.
+- **D2 `lance-admin shards copy` streaming**: refactored the
+  per-object copy to pick `put` for small objects and
+  `put_multipart` for large ones. Configurable threshold via
+  `--multipart-threshold`. 1 MB payload with 256 KB threshold
+  test confirms byte-exact round-trip through the multipart path.
+- **D3 `--continue-on-error`**: flag + `failures: Vec<(String,
+  String)>` + end-of-run summary. Test covers the "partial copy"
+  case where one shard directory is missing.
+- **D4 namespace proptest** (auth.rs): four properties,
+  `ProptestConfig::cases = 512` each → ~2000 generated cases every
+  run. Covers prefix-collision (tenant-a vs tenant-abc) + order-
+  preservation + unbound-key pass-through.
+- **D5 MetaStore S3 integration test**: `MINIO_E2E_TEST=1`
+  activates; real HTTP round-trip against the local MinIO. CI
+  gate runs it inside the `minio-sse` job. Auto-creates the
+  bucket via a small boto3 bootstrap so CI doesn't need manual
+  provisioning.
+- **D6 audit_dropped e2e** (`e2e_audit_dropped_test.py`): triggers
+  the sink-open failure path, scrapes `/metrics`, asserts counter
+  goes from 0 to exactly 6 after 1 CreateTable + 5 AddRows.
+- **D7 worker `trace_id` span field**: explicit
+  `fields(trace_id = tracing::field::Empty)` + runtime
+  `Span::current().record("trace_id", tid)`. Same pattern on
+  execute_local_search and execute_local_write.
+- **D8 write-path per-shard latency log**: H13 parity for
+  add_rows fan-out. Slow-write threshold = `server.slow_query_ms`;
+  timeout error messages now include observed ms.
+
+### Regression results
+
+| Gate | beta.3 | **beta.4** |
+|---|---:|---:|
+| workspace lib | 320 | **324** (+4 proptest, +1 meta) |
+| admin lib | 6 | **10** (+2 D2+D3, +2 D5-related were already there) |
+| SDK unit | 38 | **38** |
+| E2E suites | 9 | **11** (+e2e_minio_sse +e2e_audit_dropped) |
+| Chaos | 10+10 | 10+10 |
+| Soak 1h | 0 err | 0 err |
+| **Total tests** | **373** | **410+** (proptest cases count separately) |
+
+### Deferred to 0.3 (with new specificity)
+
+- **SSE-C per-request customer keys**: requires a custom
+  `object_store::ObjectStore` wrapper that injects SSE-C headers
+  on every `put`/`get`. Not a config-only fix — explicit
+  engineering work.
+- **B2.3 Write batching**: still the biggest mixed-RW lever; C2
+  data confirmed it applies to both local fs and S3.
+- **Coord RSS step root-cause**: audit channel hypothesis ruled
+  out (C1); remaining candidates tracked in LIMITATIONS §13.
+
+### Upgrade from 0.2.0-beta.3
+
+- No wire or on-disk schema break.
+- SECURITY.md §6.3 rewritten. If you had set
+  `aws_server_side_encryption_customer_*` keys in
+  `storage_options` expecting SSE-C, please be aware those keys
+  **were not** encrypting anything. Objects in your bucket are
+  plain. Move to bucket-level SSE-S3 / SSE-KMS for transparent
+  at-rest encryption today.
+- `lance-admin shards copy` command surface gained two flags
+  (`--continue-on-error`, `--multipart-threshold`). Defaults
+  match previous behaviour for `--multipart-threshold` only (8 MB
+  means small-object-first-then-multipart is new; previously
+  everything was single-put). `--continue-on-error` defaults off
+  (fail-fast, same as before).
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## 0.2.0-beta.3 — 2026-04-20
 
 **Observability + OBS-native audit + async SDK.** Closes six of the

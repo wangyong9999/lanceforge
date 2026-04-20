@@ -533,10 +533,21 @@ impl CoordinatorService {
                     on_columns: vec![],
                     target_shard: shard_name.clone(),
                 };
-                match tokio::time::timeout(
+                // D8: per-shard write latency, mirrors H13 on the read
+                // path. Lets operators see which shard is the outlier
+                // when a write spikes — the usual culprit is the shard
+                // holding the largest manifest.
+                let w_start = std::time::Instant::now();
+                let result = tokio::time::timeout(
                     self.query_timeout,
                     client.execute_local_write(Request::new(local_req)),
-                ).await {
+                ).await;
+                let w_ms = w_start.elapsed().as_millis() as u64;
+                if self.slow_query_ms > 0 && w_ms >= self.slow_query_ms {
+                    warn!("slow_write shard={} worker={} elapsed_ms={}",
+                          shard_name, worker_id, w_ms);
+                }
+                match result {
                     Ok(Ok(resp)) => {
                         let r = resp.into_inner();
                         if r.error.is_empty() {
@@ -547,7 +558,7 @@ impl CoordinatorService {
                         }
                     }
                     Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
-                    Err(_) => errors.push(format!("{}: timeout", shard_name)),
+                    Err(_) => errors.push(format!("{}: timeout ({}ms)", shard_name, w_ms)),
                 }
             }
         }
