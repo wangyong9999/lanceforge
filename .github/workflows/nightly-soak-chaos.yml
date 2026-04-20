@@ -1,0 +1,190 @@
+name: Nightly Soak + Chaos
+
+# B8 (0.2.0-beta.3): wire `soak/run.py` and `chaos/runner.py` into CI so
+# slow-drift memory/fd leaks and cluster resiliency regressions don't
+# need a human to remember to run them before release. Runs at 03:47
+# UTC daily (off-peak, offset from the 03:17 main CI cron so the two
+# jobs don't fight for GitHub Actions runner quota) and on manual
+# dispatch.
+#
+# The soak is the shorter nightly variant: 20 minutes read-only. Full
+# characterisation soak (4h+) is a manual dispatch with a longer
+# timeout. 20 min is enough to catch: H25-class force-exit at fixed
+# intervals, linear RSS growth > 3% in 20 min (~15 MB), fd leaks on
+# the read path.
+#
+# Chaos runs 5 iters of each scenario (worker_kill, worker_stall)
+# instead of the 10-iter release gate — 5 iters is enough to detect a
+# regression (any failure fails the run) while keeping per-night
+# wall-clock under 15 min. The 10-iter variant still runs on release
+# branches via `workflow_dispatch`.
+
+on:
+  schedule:
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+    inputs:
+      soak_minutes:
+        description: 'Soak duration in minutes (default 20; use 240 for 4h characterisation)'
+        type: string
+        default: '20'
+      chaos_iters:
+        description: 'Iterations per chaos scenario (default 5; release gate uses 10)'
+        type: string
+        default: '5'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  soak:
+    name: Soak (${{ github.event.inputs.soak_minutes || '20' }}m read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 330  # accommodate 4h manual dispatch + build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --quiet pyarrow lance numpy grpcio pyyaml
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nightly-soak-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-nightly-soak-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --bin lance-coordinator --bin lance-worker
+
+      - name: Clear proxy env
+        run: |
+          echo "HTTP_PROXY=" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=" >> $GITHUB_ENV
+          echo "http_proxy=" >> $GITHUB_ENV
+          echo "https_proxy=" >> $GITHUB_ENV
+
+      - name: Run soak
+        env:
+          MINUTES: ${{ github.event.inputs.soak_minutes || '20' }}
+        run: |
+          python3 soak/run.py --minutes "${MINUTES}" --read-only --drift-threshold 3.0
+
+      - name: Upload soak result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-${{ github.run_id }}
+          path: soak/results/*.json
+          retention-days: 30
+
+  chaos:
+    name: Chaos (kill + stall, ${{ github.event.inputs.chaos_iters || '5' }} iters each)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --quiet pyarrow lance numpy grpcio pyyaml
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nightly-chaos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-nightly-chaos-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --bin lance-coordinator --bin lance-worker
+
+      - name: Clear proxy env
+        run: |
+          echo "HTTP_PROXY=" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=" >> $GITHUB_ENV
+
+      - name: worker_kill
+        env:
+          ITERS: ${{ github.event.inputs.chaos_iters || '5' }}
+        run: |
+          python3 chaos/runner.py chaos/scenarios/worker_kill.yaml --iters "${ITERS}"
+
+      - name: worker_stall
+        env:
+          ITERS: ${{ github.event.inputs.chaos_iters || '5' }}
+        run: |
+          python3 chaos/runner.py chaos/scenarios/worker_stall.yaml --iters "${ITERS}"
+
+      - name: Upload chaos result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-${{ github.run_id }}
+          path: chaos/results/*.json
+          retention-days: 30
+
+  h25-uptime-regression:
+    # F2: coord must stay up past the 65 s mark H21 was silently
+    # capping at. Standalone job so a regression is visible as a
+    # distinct red check instead of buried in soak output.
+    name: H25 coordinator uptime (75s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python deps
+        run: |
+          python3 -m pip install --quiet pyarrow lance numpy grpcio pyyaml
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nightly-h25-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-nightly-h25-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --bin lance-coordinator --bin lance-worker
+
+      - name: Clear proxy env
+        run: |
+          echo "HTTP_PROXY=" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=" >> $GITHUB_ENV
+
+      - name: Run H25 uptime test
+        run: |
+          python3 lance-integration/tools/e2e_h25_coord_uptime_test.py
