@@ -14,7 +14,10 @@ set -u
 
 cd "$(dirname "$0")"
 tests=(e2e_phase11_test.py e2e_phase12_test.py e2e_phase13_test.py
-       e2e_phase14_test.py e2e_phase15_test.py e2e_phase16_test.py)
+       e2e_phase14_test.py e2e_phase15_test.py e2e_phase16_test.py
+       # beta.3 additions — each owns a dedicated port range:
+       e2e_beta2_ns_audit_test.py
+       e2e_h25_coord_uptime_test.py)
 
 pass=0
 fail=0
