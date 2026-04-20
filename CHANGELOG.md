@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.3] - 2026-04-20
+
+Observability + OBS-native audit + async SDK. B1-B6 (minus B7 soak
+which runs past tag and updates LIMITATIONS §13 after).
+
+### Fixed
+- G5 namespaced reads returning `No Lance shard found`: worker now
+  applies the `/` → `__` shard-name sanitisation on the read path
+  (beta.2 did it only on writes; the unit test didn't cover the
+  read-accept case).
+
+### Added
+- B1 worker-side traceparent re-emission.
+- B2 OBS-native audit sink (put-per-batch).
+- B3 optional OTLP exporter (`--features otel`).
+- B4 Grafana dashboard + README + alert snippets.
+- B5 `MetaShardState::all_tables_for_namespace` + `list_tables`
+  pushdown.
+- B6 `AsyncLanceForgeClient` covering search/insert/create_table/
+  drop_table/list_tables/count_rows.
+- `docs/OBSERVABILITY.md` (three-pillar walkthrough + OTLP pipeline).
+
+### Changed
+- `AuditSink::spawn` routes OBS URIs to the new batch-PUT backend
+  instead of failing startup.
+- `validate_audit_path` now only rejects empty strings.
+- `lanceforge` Python package exports `AsyncLanceForgeClient`;
+  `__version__` bumped to `0.2.0-beta.3`.
+
+### Deferred to 0.3
+- Worker-side OTLP span emission, REST bridge, span attribute
+  enrichment, coord-side sampling.
+- Async SDK: upsert, batch_search, create_index, rebalance.
+- Audit sink retry on PUT failure.
+
 ## [0.2.0-beta.2] - 2026-04-20
 
 Posttag hardening for beta.1. F1-F9 close the "shipped-but-not-

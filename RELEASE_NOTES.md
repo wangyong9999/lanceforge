@@ -1,5 +1,132 @@
 # LanceForge Release Notes
 
+## 0.2.0-beta.3 — 2026-04-20
+
+**Observability + OBS-native audit + async SDK.** Closes six of the
+seven 0.3-deferred items from beta.2 at minimum-viable depth (B7
+characterisation soak is still running at tag time; result merged as
+LIMITATIONS §13 update in a follow-up). Plus one unrelated bug
+surfaced by the new B1 end-to-end coverage: beta.2 namespaced reads
+never worked because the worker's shard-name matcher didn't apply
+the same `/` → `__` sanitisation as the writer. **You'll see real
+results from G5 namespaces for the first time in this release.**
+
+### What was broken or missing in beta.2
+
+- **G5 namespaced reads returned `No Lance shard found`.** The unit
+  test covered `check_namespace()` logic; `t_f3d` exercised the
+  *rejected* path; no test exercised the *accepted* read path on a
+  namespaced table. beta.3 adds the test + the
+  `resolve_tables_inner` sanitisation fix.
+- **Audit sink rejected OBS URIs at startup.** Fine for compliance
+  integrity, useless for operators who actually wanted OBS
+  destinations. beta.3 ships a put-per-batch sink (100 records
+  OR 30s) that creates one object per batch under the configured
+  prefix; SIEM shippers (Vector, Fluent Bit) ingest via
+  prefix-list + sort.
+- **Worker logs didn't carry the client's trace_id.** beta.2 wrote
+  it to coord audit lines (F9) but coord never re-emitted
+  `traceparent` on outbound worker RPCs. beta.3 does.
+- **`ListTables` did full-scan + client-filter for namespaced
+  callers.** Fine on small clusters, wasteful at scale. beta.3
+  pushes the filter down to the MetaStore key level.
+- **No Grafana dashboard.** beta.3 ships one.
+- **No OTLP integration.** beta.3 ships a feature-gated OTLP
+  exporter.
+- **Sync-only Python SDK.** beta.3 ships `AsyncLanceForgeClient`.
+
+### Changes in detail
+
+- **B1 worker-side traceparent re-emission.** `scatter_gather` gained
+  a `trace_id: Option<String>` parameter. Each outbound
+  `execute_local_search` Request carries a fresh `traceparent` with
+  the same 32-hex trace_id. Worker logs `local_search trace_id=<hex>
+  table=<name>` at info! level. `grep trace_id=<hex>` across coord +
+  worker logs now returns a continuous request story.
+
+- **B2 OBS-native audit log (put-per-batch).**
+  `audit_log_path: s3://…` no longer fails startup. AuditSink
+  batches up to 100 records or 30 s (whichever first) and PUTs one
+  object `audit-{epoch_ms}-{rand_hex}.jsonl` under the configured
+  prefix. Uses the `object_store` crate with env-based credentials,
+  same pattern as Lance / S3MetaStore. PUT failures count every
+  record in the batch as dropped (`lance_audit_dropped_total`).
+
+- **B3 optional OTLP exporter.** New `otel` feature on the
+  coordinator crate: `cargo build --features otel`. Operator sets
+  `OTEL_EXPORTER_OTLP_ENDPOINT`; coord exports tracing spans to the
+  collector at that endpoint. Default build pulls zero OTEL deps.
+  See `docs/OBSERVABILITY.md` for the end-to-end pipeline.
+
+- **B4 Grafana dashboard**: `deploy/grafana/lanceforge.json` +
+  README + Prometheus alert snippets. Covers QPS / latency /
+  error rate / worker health / audit-dropped (compliance) / per-
+  table breakdowns.
+
+- **B5 namespace filter pushed down to MetaShardState.**
+  `all_tables_for_namespace(ns)` lists only keys under
+  `{prefix}/tables/{ns}/` at the MetaStore layer. `list_tables`
+  routes through it when the caller is namespace-bound. Four-case
+  unit test covers own-ns, cross-ns, empty-ns, prefix-collision
+  (tenant-a vs tenant-ab) edges.
+
+- **B6 `AsyncLanceForgeClient`.** `grpc.aio`-based async client
+  covering `search` / `insert` / `create_table` / `drop_table` /
+  `list_tables` / `count_rows`. Proxy env guard (F8 parity).
+  Upsert, batch_search, create_index, rebalance are 0.3 follow-ups.
+
+- **`resolve_tables_inner` sanitisation** (the beta.2-missed bug):
+  worker now applies the same `/` → `__` mapping when matching
+  a user-facing `table_name` against stored shard names, so reads
+  work on namespaced tables for the first time.
+
+- **`docs/OBSERVABILITY.md`** (new): three-pillar overview (metrics
+  / logs / traces) with the cross-process correlation story, the
+  opt-in OTLP pipeline, and an honest §4 known-gaps list.
+
+### Regression results
+
+| Gate | beta.2 | **beta.3** |
+|---|---:|---:|
+| workspace lib + admin | 319 + 6 | **320 + 6** (+1 B5 meta test) |
+| SDK unit | 30 | **38** (+8 async client) |
+| E2E phases | 6 / 6 | 6 / 6 |
+| Chaos worker_kill / stall | 10+10 | 10+10 |
+| New: B1 e2e (trace_id in worker log) | — | PASS |
+| New: namespace read path (tenant-a/orders AnnSearch) | broken | PASS |
+| `cargo check --features otel` | n/a | clean |
+
+### Deferred to 0.3
+
+- Worker-side OTLP span emission (traceparent already flows; worker
+  doesn't emit its own spans yet).
+- REST `/v1/*` → in-process gRPC traceparent bridge.
+- OTEL span attributes (`table`, `k`, `recall`) — depends on what
+  operator investigations find most valuable in the wild.
+- Coord-side sampling (everything is exported today; rely on a
+  collector-side tail sampler at high QPS).
+- Async SDK: upsert / batch_search / create_index / rebalance.
+- Audit sink retry on PUT failure (0.3 exponential backoff).
+- 4h soak characterization → merged as LIMITATIONS §13 update post-
+  tag. beta.3 tags when the soak completes, with findings appended.
+
+### Upgrade from 0.2.0-beta.2
+
+- No wire break. Rolling restart of coordinators is sufficient.
+- `audit_log_path: s3://…` now works. If you were using a
+  workaround with an external shipper, you can simplify to native
+  OBS destination (still fine to keep the shipper if it's doing
+  enrichment).
+- Build without `--features otel` gets you the stdout-only stack
+  same as before. Enable OTEL only when you need distributed
+  traces.
+- Python SDK: `from lanceforge import AsyncLanceForgeClient` for
+  async. Sync client surface unchanged.
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## 0.2.0-beta.2 — 2026-04-20
 
 **Posttag hardening for 0.2.0-beta.1.** The postmortem on the beta.1

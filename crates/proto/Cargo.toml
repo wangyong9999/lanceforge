@@ -1,6 +1,6 @@
 [package]
 name = "lance-distributed-proto"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Proto definitions for Lance distributed retrieval"
