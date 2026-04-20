@@ -21,5 +21,12 @@ anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
+# C7: shards copy subcommand uses object_store directly to stream
+# shard objects from source prefix to destination prefix across
+# backends (file://, s3://, gs://, az://).
+object_store = { workspace = true }
+url = "2"
+futures = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"

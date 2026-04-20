@@ -4091,13 +4091,16 @@ dependencies = [
  "anyhow",
  "clap 4.6.1",
  "env_logger",
+ "futures",
  "lance-distributed-common",
  "lance-distributed-meta",
  "log",
+ "object_store",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -4317,11 +4320,15 @@ dependencies = [
  "lance-index",
  "lancedb",
  "log",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "rustls",
  "tokio",
  "tonic 0.14.5",
  "tonic-prost",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 

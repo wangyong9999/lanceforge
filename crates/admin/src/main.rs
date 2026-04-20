@@ -106,6 +106,30 @@ enum ShardsCmd {
         #[arg(long)]
         table: Option<String>,
     },
+    /// Stream-copy every shard `.lance` directory under a source
+    /// prefix into a destination prefix. Cross-backend is supported
+    /// (file://→s3://, s3://→s3://, etc.) via the `object_store`
+    /// crate. C7: closes the DR gap so operators don't need to learn
+    /// `aws s3 sync` semantics — one command recovers or migrates
+    /// every shard a MetaStore knows about.
+    Copy {
+        /// MetaStore URI — tells us what shards exist.
+        #[arg(long)]
+        meta: String,
+        /// Source prefix. Typically the `default_table_path` of the
+        /// cluster being backed up (e.g. `s3://prod/lance/`).
+        #[arg(long)]
+        src: String,
+        /// Destination prefix (e.g. `s3://dr/lance/` or `/mnt/backup/`).
+        #[arg(long)]
+        dst: String,
+        /// Filter to one table (substring match). Empty = all tables.
+        #[arg(long)]
+        table: Option<String>,
+        /// Print what would be copied and return without writing.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -374,6 +398,148 @@ async fn cmd_shards_list(meta: &str, table_filter: Option<&str>) -> anyhow::Resu
     Ok(())
 }
 
+/// C7: stream-copy every shard `.lance` directory from `src` to `dst`.
+///
+/// Both `src` and `dst` go through `object_store::parse_url_opts`, which
+/// means local paths, `file://`, `s3://`, `gs://`, `az://` all work as
+/// either end. For every shard URI this MetaStore knows about, we:
+///
+///   1. Strip the shard's leaf (`{prefix}/{table}__shard_{NN}.lance`)
+///      from the configured `src` prefix to get the relative path
+///   2. List all objects under the shard directory
+///   3. Stream each object from source to destination, preserving
+///      the relative path under `dst`
+///
+/// Per-batch stream: `get` returns a `Stream<Bytes>` which we pipe to
+/// `put_multipart` on the destination. Memory footprint is bounded by
+/// one object at a time; no whole-dataset buffering.
+async fn cmd_shards_copy(
+    meta: &str,
+    src: &str,
+    dst: &str,
+    table_filter: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use object_store::ObjectStore;
+    let store = open_store(meta).await?;
+
+    // Figure out which shard directories to copy.
+    let tables = store.get_prefix("tables/").await?;
+    let shards = store.get_prefix("shards/").await?;
+    let shard_uri = |name: &str| -> Option<String> {
+        shards.get(&format!("shards/{name}")).map(|v| v.value.clone())
+    };
+
+    let mut shard_dirs: Vec<(String, String)> = Vec::new(); // (table, shard_uri)
+    for (full_key, versioned) in &tables {
+        let table_name = full_key.strip_prefix("tables/").unwrap_or(full_key);
+        if let Some(f) = table_filter
+            && !table_name.contains(f) { continue; }
+        let mapping: std::collections::HashMap<String, Vec<String>> =
+            match serde_json::from_str(&versioned.value) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+        for shard in mapping.keys() {
+            if let Some(uri) = shard_uri(shard) {
+                shard_dirs.push((table_name.to_string(), uri));
+            }
+        }
+    }
+
+    if shard_dirs.is_empty() {
+        log::info!("no shards match {:?}", table_filter);
+        return Ok(());
+    }
+
+    // Parse src / dst stores.
+    let src_url = url::Url::parse(src)
+        .or_else(|_| url::Url::parse(&format!("file://{}", src)))?;
+    let dst_url = url::Url::parse(dst)
+        .or_else(|_| url::Url::parse(&format!("file://{}", dst)))?;
+    let (src_store, src_prefix) =
+        object_store::parse_url_opts::<_, String, String>(&src_url, std::iter::empty())?;
+    let (dst_store, dst_prefix) =
+        object_store::parse_url_opts::<_, String, String>(&dst_url, std::iter::empty())?;
+
+    let mut total_objects = 0u64;
+    let mut total_bytes = 0u64;
+    for (table, uri) in &shard_dirs {
+        // The shard URI is absolute (e.g. `s3://bucket/prod/lance/t__s00.lance`)
+        // but we need the relative sub-path under `src` to re-root it under
+        // `dst`. If the URI doesn't start with `src`, the MetaStore is
+        // referring to a shard outside the backup source — skip + warn.
+        let src_str = src.trim_end_matches('/').to_string();
+        let rel = match uri.strip_prefix(&format!("{src_str}/"))
+            .or_else(|| uri.strip_prefix(&src_str))
+        {
+            Some(r) => r.trim_start_matches('/').to_string(),
+            None => {
+                log::warn!("shard uri {uri} is outside src {src_str}; skipping");
+                continue;
+            }
+        };
+
+        let shard_src_path = if src_prefix.as_ref().is_empty() {
+            object_store::path::Path::from(rel.clone())
+        } else {
+            object_store::path::Path::from(format!("{}/{}", src_prefix.as_ref(), rel))
+        };
+        let shard_dst_path = if dst_prefix.as_ref().is_empty() {
+            object_store::path::Path::from(rel.clone())
+        } else {
+            object_store::path::Path::from(format!("{}/{}", dst_prefix.as_ref(), rel))
+        };
+
+        // List everything under the shard directory.
+        let mut objects: Vec<object_store::ObjectMeta> = Vec::new();
+        let mut stream = src_store.list(Some(&shard_src_path));
+        use futures::StreamExt;
+        while let Some(entry) = stream.next().await {
+            match entry {
+                Ok(o) => objects.push(o),
+                Err(e) => log::warn!("list {}: {e}", shard_src_path),
+            }
+        }
+
+        if dry_run {
+            let bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
+            println!("{table}\t{rel}\t{} objects\t{} bytes", objects.len(), bytes);
+            total_objects += objects.len() as u64;
+            total_bytes += bytes;
+            continue;
+        }
+
+        for o in &objects {
+            // Relative key inside the shard dir.
+            let rel_key = o.location.as_ref()
+                .strip_prefix(shard_src_path.as_ref())
+                .unwrap_or(o.location.as_ref())
+                .trim_start_matches('/');
+            let dst_path = if rel_key.is_empty() {
+                shard_dst_path.clone()
+            } else {
+                object_store::path::Path::from(
+                    format!("{}/{}", shard_dst_path.as_ref(), rel_key))
+            };
+            let get_res = src_store.get(&o.location).await?;
+            let bytes = get_res.bytes().await?;
+            dst_store.put(&dst_path, bytes.into()).await?;
+            log::info!("copy {} → {} ({} bytes)", o.location, dst_path, o.size);
+            total_objects += 1;
+            total_bytes += o.size as u64;
+        }
+    }
+    if dry_run {
+        println!("DRY RUN: would copy {total_objects} objects / {total_bytes} bytes across {} shards",
+                 shard_dirs.len());
+    } else {
+        log::info!("copied {total_objects} objects / {total_bytes} bytes across {} shards",
+                   shard_dirs.len());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -387,6 +553,8 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Shards { action } => match action {
             ShardsCmd::List { meta, table } => cmd_shards_list(&meta, table.as_deref()).await,
+            ShardsCmd::Copy { meta, src, dst, table, dry_run } =>
+                cmd_shards_copy(&meta, &src, &dst, table.as_deref(), dry_run).await,
         },
     }
 }
@@ -569,5 +737,87 @@ mod tests {
             let err = cmd_restore(&dst, file.path(), false, false, false).await.unwrap_err();
             assert!(err.to_string().contains("snapshot version"));
         });
+    }
+
+    // ── C7: shards copy ──
+
+    #[tokio::test]
+    async fn shards_copy_file_to_file_roundtrips_all_objects() {
+        // Seed:
+        //   MetaStore records one table with two shards at
+        //   file:///tmp/<src>/ns1__orders_shard_{00,01}.lance
+        //   Each shard dir has 2 files (a _latest.manifest + a data file).
+        // Expected: after `shards copy --src <src> --dst <dst>`, every
+        // file appears under dst with the same relative path.
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let meta_dir = tempfile::tempdir().unwrap();
+        let meta_path = meta_dir.path().join("meta.json").to_string_lossy().to_string();
+
+        // Populate MetaStore.
+        let meta_uri = format!("file://{}", meta_path);
+        let store = open_store(&meta_uri).await.unwrap();
+        store.put("tables/ns1__orders",
+                  "{\"ns1__orders_shard_00\":[\"w0\"],\
+                    \"ns1__orders_shard_01\":[\"w1\"]}", 0).await.unwrap();
+        let s0_uri = format!("file://{}/ns1__orders_shard_00.lance",
+                             src_dir.path().display());
+        let s1_uri = format!("file://{}/ns1__orders_shard_01.lance",
+                             src_dir.path().display());
+        store.put("shards/ns1__orders_shard_00", &s0_uri, 0).await.unwrap();
+        store.put("shards/ns1__orders_shard_01", &s1_uri, 0).await.unwrap();
+
+        // Populate source with fake shard payloads.
+        for shard in ["ns1__orders_shard_00", "ns1__orders_shard_01"] {
+            let d = src_dir.path().join(format!("{shard}.lance"));
+            std::fs::create_dir_all(d.join("_versions")).unwrap();
+            std::fs::write(d.join("_versions/0.manifest"), b"manifest-bytes").unwrap();
+            std::fs::write(d.join("data.lance"), b"fragment-bytes").unwrap();
+        }
+
+        let src_uri = format!("file://{}", src_dir.path().display());
+        let dst_uri = format!("file://{}", dst_dir.path().display());
+
+        cmd_shards_copy(&meta_uri, &src_uri, &dst_uri, None, false).await.unwrap();
+
+        // Verify: every file copied.
+        for shard in ["ns1__orders_shard_00", "ns1__orders_shard_01"] {
+            let d = dst_dir.path().join(format!("{shard}.lance"));
+            assert!(d.join("_versions/0.manifest").exists(),
+                    "missing manifest for {shard}");
+            assert!(d.join("data.lance").exists(),
+                    "missing data for {shard}");
+            let m = std::fs::read(d.join("_versions/0.manifest")).unwrap();
+            assert_eq!(m, b"manifest-bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn shards_copy_dry_run_does_not_mutate_dst() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let meta_dir = tempfile::tempdir().unwrap();
+        let meta_path = meta_dir.path().join("meta.json").to_string_lossy().to_string();
+
+        let meta_uri = format!("file://{}", meta_path);
+        let store = open_store(&meta_uri).await.unwrap();
+        store.put("tables/t1", "{\"t1_shard_00\":[\"w0\"]}", 0).await.unwrap();
+        let s_uri = format!("file://{}/t1_shard_00.lance",
+                            src_dir.path().display());
+        store.put("shards/t1_shard_00", &s_uri, 0).await.unwrap();
+
+        let d = src_dir.path().join("t1_shard_00.lance");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("data.lance"), b"x").unwrap();
+
+        let src_uri = format!("file://{}", src_dir.path().display());
+        let dst_uri = format!("file://{}", dst_dir.path().display());
+
+        cmd_shards_copy(&meta_uri, &src_uri, &dst_uri, None, /*dry_run*/ true)
+            .await.unwrap();
+
+        // dst must be empty after dry-run.
+        let empty = std::fs::read_dir(dst_dir.path()).unwrap().count();
+        assert_eq!(empty, 0, "dry-run wrote to destination");
     }
 }

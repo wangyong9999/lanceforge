@@ -51,6 +51,14 @@ impl WorkerService {
 
 #[tonic::async_trait]
 impl LanceExecutorService for WorkerService {
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            table = %request.get_ref().table_name,
+            query_type = ?request.get_ref().query_type,
+            k = ?request.get_ref().k,
+        )
+    )]
     async fn execute_local_search(
         &self,
         request: Request<LocalSearchRequest>,
@@ -102,10 +110,21 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            table = %request.get_ref().table_name,
+            write_type = ?request.get_ref().write_type,
+        )
+    )]
     async fn execute_local_write(
         &self,
         request: Request<pb::LocalWriteRequest>,
     ) -> Result<Response<pb::LocalWriteResponse>, Status> {
+        if let Some(tid) = extract_trace_id(&request) {
+            info!("local_write trace_id={tid} table={} type={}",
+                  request.get_ref().table_name, request.get_ref().write_type);
+        }
         let req = request.into_inner();
         debug!("Worker write: table={}, type={}", req.table_name, req.write_type);
 
@@ -128,6 +147,10 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(shard = %request.get_ref().shard_name)
+    )]
     async fn load_shard(
         &self,
         request: Request<pb::LoadShardRequest>,
@@ -199,6 +222,10 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(shard = %request.get_ref().shard_name)
+    )]
     async fn create_local_shard(
         &self,
         request: Request<pb::CreateLocalShardRequest>,

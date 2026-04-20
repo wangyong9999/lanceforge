@@ -91,6 +91,13 @@ pub async fn start_rest_server(
                 let method = request.split_whitespace().next().unwrap_or("GET");
                 let path = extract_path(&request);
                 let body_str = extract_body(&request);
+                // C4: bridge W3C trace context from the HTTP headers into
+                // the downstream gRPC Request metadata so the audit /
+                // worker-log trace_id threads the REST path too. Plain
+                // case-insensitive header lookup; forwards `traceparent`
+                // and `tracestate` (the two standard headers) plus any
+                // incoming `authorization` so auth still works.
+                let tp_hdrs = extract_trace_headers(&request);
 
                 let (status, content_type, body) = match (method, path) {
                     (_, "/metrics") => {
@@ -106,25 +113,25 @@ pub async fn start_rest_server(
                             r#"{{"query_count":{},"query_errors":{},"healthy":true}}"#, count, errors))
                     }
                     ("POST", "/v1/search") => {
-                        handle_search(gport, body_str).await
+                        handle_search(gport, body_str, &tp_hdrs).await
                     }
                     ("POST", "/v1/fts") => {
-                        handle_fts(gport, body_str).await
+                        handle_fts(gport, body_str, &tp_hdrs).await
                     }
                     ("POST", "/v1/count") => {
-                        handle_count(gport, body_str).await
+                        handle_count(gport, body_str, &tp_hdrs).await
                     }
                     ("POST", "/v1/tables") | ("GET", "/v1/tables") => {
-                        handle_list_tables(gport).await
+                        handle_list_tables(gport, &tp_hdrs).await
                     }
                     ("POST", "/v1/query") => {
-                        handle_query(gport, body_str).await
+                        handle_query(gport, body_str, &tp_hdrs).await
                     }
                     ("POST", "/v1/batch_search") => {
-                        handle_batch_search(gport, body_str).await
+                        handle_batch_search(gport, body_str, &tp_hdrs).await
                     }
                     ("POST", "/v1/drop_table") => {
-                        handle_drop_table(gport, body_str).await
+                        handle_drop_table(gport, body_str, &tp_hdrs).await
                     }
                     _ => {
                         ("404 Not Found", "application/json",
@@ -144,7 +151,7 @@ pub async fn start_rest_server(
 
 /// POST /v1/search — ANN vector search
 /// Body: {"table":"t","vector":[0.1,0.2,...],"k":10,"filter":"...","nprobes":20}
-async fn handle_search(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_search(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return ("400 Bad Request", "application/json",
@@ -180,7 +187,7 @@ async fn handle_search(grpc_port: u16, body: &str) -> (&'static str, &'static st
                 query_text: None,
                 offset: 0,
             };
-            match client.ann_search(tonic::Request::new(req)).await {
+            match client.ann_search(apply_passthrough(tonic::Request::new(req), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     if !r.error.is_empty() {
@@ -201,7 +208,7 @@ async fn handle_search(grpc_port: u16, body: &str) -> (&'static str, &'static st
 
 /// POST /v1/fts — Full-text BM25 search
 /// Body: {"table":"t","query":"text","k":10,"text_column":"text"}
-async fn handle_fts(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_fts(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return ("400 Bad Request", "application/json",
@@ -224,7 +231,7 @@ async fn handle_fts(grpc_port: u16, body: &str) -> (&'static str, &'static str, 
                 columns: vec![],
                 offset: 0,
             };
-            match client.fts_search(tonic::Request::new(req)).await {
+            match client.fts_search(apply_passthrough(tonic::Request::new(req), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     if !r.error.is_empty() {
@@ -245,7 +252,7 @@ async fn handle_fts(grpc_port: u16, body: &str) -> (&'static str, &'static str, 
 
 /// POST /v1/count — Count rows
 /// Body: {"table":"t"}
-async fn handle_count(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_count(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return ("400 Bad Request", "application/json",
@@ -254,9 +261,9 @@ async fn handle_count(grpc_port: u16, body: &str) -> (&'static str, &'static str
     let table = parsed["table"].as_str().unwrap_or("");
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
-            match client.count_rows(tonic::Request::new(
+            match client.count_rows(apply_passthrough(tonic::Request::new(
                 pb::CountRowsRequest { table_name: table.to_string(), filter: None }
-            )).await {
+            ), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     ("200 OK", "application/json",
@@ -272,10 +279,10 @@ async fn handle_count(grpc_port: u16, body: &str) -> (&'static str, &'static str
 }
 
 /// GET/POST /v1/tables — List tables
-async fn handle_list_tables(grpc_port: u16) -> (&'static str, &'static str, String) {
+async fn handle_list_tables(grpc_port: u16, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
-            match client.list_tables(tonic::Request::new(pb::ListTablesRequest {})).await {
+            match client.list_tables(apply_passthrough(tonic::Request::new(pb::ListTablesRequest {}), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     let tables: Vec<String> = r.table_names.iter()
@@ -294,7 +301,7 @@ async fn handle_list_tables(grpc_port: u16) -> (&'static str, &'static str, Stri
 
 /// POST /v1/query — Expression scan (filter without vector)
 /// Body: {"table":"t","filter":"category='tech'","limit":100}
-async fn handle_query(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_query(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v, Err(e) => return ("400 Bad Request", "application/json",
             format!(r#"{{"error":"invalid JSON: {}"}}"#, e)),
@@ -309,10 +316,10 @@ async fn handle_query(grpc_port: u16, body: &str) -> (&'static str, &'static str
     }
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
-            match client.query(tonic::Request::new(pb::QueryRequest {
+            match client.query(apply_passthrough(tonic::Request::new(pb::QueryRequest {
                 table_name: table.to_string(), filter: filter.to_string(),
                 limit, offset, columns: vec![],
-            })).await {
+            }), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
@@ -329,7 +336,7 @@ async fn handle_query(grpc_port: u16, body: &str) -> (&'static str, &'static str
 
 /// POST /v1/batch_search — Multiple ANN queries in one call
 /// Body: {"table":"t","vectors":[[0.1,...],[0.2,...]],"k":10}
-async fn handle_batch_search(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_batch_search(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v, Err(e) => return ("400 Bad Request", "application/json",
             format!(r#"{{"error":"invalid JSON: {}"}}"#, e)),
@@ -359,10 +366,10 @@ async fn handle_batch_search(grpc_port: u16, body: &str) -> (&'static str, &'sta
 
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
-            match client.batch_search(tonic::Request::new(pb::BatchSearchRequest {
+            match client.batch_search(apply_passthrough(tonic::Request::new(pb::BatchSearchRequest {
                 table_name: table.to_string(), query_vectors, vector_column: "vector".to_string(),
                 dimension, k, nprobes, filter: None, columns: vec![], metric_type: 0,
-            })).await {
+            }), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
@@ -383,7 +390,7 @@ async fn handle_batch_search(grpc_port: u16, body: &str) -> (&'static str, &'sta
 
 /// POST /v1/drop_table — Drop a table
 /// Body: {"table":"t"}
-async fn handle_drop_table(grpc_port: u16, body: &str) -> (&'static str, &'static str, String) {
+async fn handle_drop_table(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&'static str, &'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v, Err(_) => return ("400 Bad Request", "application/json",
             r#"{"error":"invalid JSON"}"#.to_string()),
@@ -391,9 +398,9 @@ async fn handle_drop_table(grpc_port: u16, body: &str) -> (&'static str, &'stati
     let table = parsed["table"].as_str().unwrap_or("");
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
-            match client.drop_table(tonic::Request::new(pb::DropTableRequest {
+            match client.drop_table(apply_passthrough(tonic::Request::new(pb::DropTableRequest {
                 table_name: table.to_string(),
-            })).await {
+            }), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
                     if !r.error.is_empty() { return ("500 Internal Server Error", "application/json",
@@ -454,6 +461,65 @@ fn extract_body(request: &str) -> &str {
     request.split("\r\n\r\n").nth(1).unwrap_or("{}")
 }
 
+/// W3C trace-context headers (`traceparent`, `tracestate`) + `authorization`
+/// pulled out of the raw HTTP request headers for forwarding into the
+/// loopback gRPC Request metadata. C4 bridges the REST entry path to the
+/// same correlation story the gRPC entry path already has.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PassthroughHeaders {
+    pub traceparent: Option<String>,
+    pub tracestate: Option<String>,
+    pub authorization: Option<String>,
+}
+
+fn extract_trace_headers(request: &str) -> PassthroughHeaders {
+    let mut out = PassthroughHeaders::default();
+    // Iterate only the header block (up to the blank line). Case-
+    // insensitive prefix match per RFC 9110.
+    for line in request.split("\r\n").take_while(|l| !l.is_empty()) {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("traceparent:") {
+            out.traceparent = Some(v.trim().to_string());
+        } else if let Some(v) = lower.strip_prefix("tracestate:") {
+            out.tracestate = Some(v.trim().to_string());
+        } else if lower.starts_with("authorization:") {
+            // Preserve original casing of the value (Bearer <tok>);
+            // the lowercase copy only tells us the header matched.
+            if let Some(colon) = line.find(':') {
+                out.authorization = Some(line[colon + 1..].trim().to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Decorate a tonic Request with passthrough headers from the REST entry.
+/// Unknown / empty headers are skipped silently; malformed values that
+/// tonic's MetadataValue rejects fall through silently too — a bad
+/// `traceparent` is "no trace", not "request rejected".
+pub(crate) fn apply_passthrough<T>(
+    mut req: tonic::Request<T>,
+    hdrs: &PassthroughHeaders,
+) -> tonic::Request<T> {
+    let md = req.metadata_mut();
+    if let Some(tp) = &hdrs.traceparent
+        && let Ok(v) = tonic::metadata::MetadataValue::try_from(tp.as_str())
+    {
+        md.insert("traceparent", v);
+    }
+    if let Some(ts) = &hdrs.tracestate
+        && let Ok(v) = tonic::metadata::MetadataValue::try_from(ts.as_str())
+    {
+        md.insert("tracestate", v);
+    }
+    if let Some(auth) = &hdrs.authorization
+        && let Ok(v) = tonic::metadata::MetadataValue::try_from(auth.as_str())
+    {
+        md.insert("authorization", v);
+    }
+    req
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +576,72 @@ mod tests {
         // than a parse error.
         assert_eq!(extract_body("POST /v1/search HTTP/1.1\r\nContent-Type: application/json"),
             "{}");
+    }
+
+    // ── C4: REST → gRPC trace-context bridge ──
+
+    #[test]
+    fn test_extract_trace_headers_picks_traceparent_and_authorization() {
+        let req = "POST /v1/search HTTP/1.1\r\n\
+                   Host: 127.0.0.1:50051\r\n\
+                   Traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\r\n\
+                   Authorization: Bearer sk-abc123\r\n\
+                   Tracestate: vendor=xyz\r\n\
+                   Content-Length: 2\r\n\r\n{}";
+        let h = extract_trace_headers(req);
+        assert_eq!(h.traceparent.as_deref(),
+                   Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"));
+        assert_eq!(h.tracestate.as_deref(), Some("vendor=xyz"));
+        assert_eq!(h.authorization.as_deref(), Some("Bearer sk-abc123"));
+    }
+
+    #[test]
+    fn test_extract_trace_headers_case_insensitive() {
+        // HTTP header names are case-insensitive; every reasonable client
+        // sends lowercase (curl) OR Title-Case (some JVM clients). Must
+        // match both.
+        let req = "POST /x HTTP/1.1\r\n\
+                   traceparent: 00-aaaa-bbbb-01\r\n\
+                   AUTHORIZATION: Bearer x\r\n\r\n{}";
+        let h = extract_trace_headers(req);
+        assert_eq!(h.traceparent.as_deref(), Some("00-aaaa-bbbb-01"));
+        assert_eq!(h.authorization.as_deref(), Some("Bearer x"));
+    }
+
+    #[test]
+    fn test_extract_trace_headers_absent_returns_defaults() {
+        let req = "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n";
+        let h = extract_trace_headers(req);
+        assert!(h.traceparent.is_none());
+        assert!(h.tracestate.is_none());
+        assert!(h.authorization.is_none());
+    }
+
+    #[test]
+    fn test_apply_passthrough_decorates_request() {
+        let hdrs = PassthroughHeaders {
+            traceparent: Some("00-aaa-bbb-01".to_string()),
+            tracestate: Some("v=1".to_string()),
+            authorization: Some("Bearer tok".to_string()),
+        };
+        let req = tonic::Request::new(pb::ListTablesRequest {});
+        let out = apply_passthrough(req, &hdrs);
+        let md = out.metadata();
+        assert_eq!(md.get("traceparent").and_then(|v| v.to_str().ok()),
+                   Some("00-aaa-bbb-01"));
+        assert_eq!(md.get("tracestate").and_then(|v| v.to_str().ok()),
+                   Some("v=1"));
+        assert_eq!(md.get("authorization").and_then(|v| v.to_str().ok()),
+                   Some("Bearer tok"));
+    }
+
+    #[test]
+    fn test_apply_passthrough_with_empty_headers_is_noop() {
+        let hdrs = PassthroughHeaders::default();
+        let req = tonic::Request::new(pb::ListTablesRequest {});
+        let out = apply_passthrough(req, &hdrs);
+        assert!(out.metadata().get("traceparent").is_none());
+        assert!(out.metadata().get("authorization").is_none());
     }
 
     #[test]
