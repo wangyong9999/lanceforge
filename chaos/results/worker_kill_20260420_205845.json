@@ -1,0 +1,129 @@
+{
+  "scenario": "worker_kill",
+  "iterations": 10,
+  "passed": 10,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "results": [
+    {
+      "iteration": 1,
+      "timestamp": "2026-04-20T20:56:15.704823",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.172103999531828,
+      "p99_ms": 25.275744090322416
+    },
+    {
+      "iteration": 2,
+      "timestamp": "2026-04-20T20:56:32.462314",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.348256999743171,
+      "p99_ms": 24.9444390309509
+    },
+    {
+      "iteration": 3,
+      "timestamp": "2026-04-20T20:56:48.625717",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.3794220071285963,
+      "p99_ms": 22.321317195892362
+    },
+    {
+      "iteration": 4,
+      "timestamp": "2026-04-20T20:57:05.394150",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.8858379994053394,
+      "p99_ms": 25.885866362077664
+    },
+    {
+      "iteration": 5,
+      "timestamp": "2026-04-20T20:57:21.636047",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.339429007610306,
+      "p99_ms": 24.440931003773603
+    },
+    {
+      "iteration": 6,
+      "timestamp": "2026-04-20T20:57:38.410444",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.3726699912222102,
+      "p99_ms": 22.029360097367352
+    },
+    {
+      "iteration": 7,
+      "timestamp": "2026-04-20T20:57:54.598351",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 4.189205996226519,
+      "p99_ms": 25.436934053723235
+    },
+    {
+      "iteration": 8,
+      "timestamp": "2026-04-20T20:58:11.393156",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.4863750042859465,
+      "p99_ms": 27.365851394424688
+    },
+    {
+      "iteration": 9,
+      "timestamp": "2026-04-20T20:58:27.624135",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.4157280024373904,
+      "p99_ms": 26.172317216987725
+    },
+    {
+      "iteration": 10,
+      "timestamp": "2026-04-20T20:58:44.398964",
+      "attempts": 199,
+      "successes": 199,
+      "failures": 0,
+      "success_rate": 1.0,
+      "min_required": 0.9,
+      "passed": true,
+      "p50_ms": 3.459746003500186,
+      "p99_ms": 23.83335052843904
+    }
+  ]
+}
