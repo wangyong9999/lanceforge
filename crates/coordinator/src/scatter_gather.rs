@@ -66,6 +66,12 @@ pub(crate) fn check_failure_threshold(failures: usize, total: usize) -> Result<(
 }
 
 /// Execute a Scatter-Gather query with shard-level routing and failover.
+///
+/// `trace_id` — optional W3C trace_id extracted from the client's
+/// `traceparent` metadata. When set, every outbound worker RPC is
+/// re-decorated with `traceparent: 00-<trace_id>-<new-span>-01` so
+/// worker logs carry the same trace_id operators saw in the coord
+/// audit line (B1). No-op when None.
 pub async fn scatter_gather(
     pool: &Arc<ConnectionPool>,
     shard_state: &Arc<dyn ShardState>,
@@ -75,16 +81,36 @@ pub async fn scatter_gather(
     k: u32,
     merge_by_distance: bool,
     query_timeout: Duration,
+    trace_id: Option<String>,
 ) -> Result<pb::SearchResponse, tonic::Status> {
     // Enforce global timeout on entire scatter-gather (routing + dispatch + merge)
     match tokio::time::timeout(query_timeout, scatter_gather_inner(
-        pool, shard_state, pruner, table_name, local_req, k, merge_by_distance, query_timeout,
+        pool, shard_state, pruner, table_name, local_req, k, merge_by_distance, query_timeout, trace_id,
     )).await {
         Ok(result) => result,
         Err(_) => Err(tonic::Status::deadline_exceeded(
             format!("scatter_gather timed out after {}s", query_timeout.as_secs())
         )),
     }
+}
+
+/// Attach a `traceparent` metadata header to an outbound Request. Caller
+/// supplies the 32-hex trace_id (from the incoming traceparent); we
+/// mint a fresh 16-hex span_id per outbound RPC so Jaeger/Tempo can
+/// thread spans even though we're not yet emitting spans ourselves
+/// (0.3 OTLP work — for now the value is cross-process log grep).
+pub(crate) fn inject_traceparent<T>(mut req: Request<T>, trace_id: &str) -> Request<T> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Cheap 64-bit randomish span_id from nanos; uniqueness across
+    // fan-out isn't cryptographic, only enough that log grep can
+    // distinguish the N per-shard calls of a single scatter.
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    let span_id = format!("{:016x}", nanos);
+    let tp = format!("00-{trace_id}-{span_id}-01");
+    if let Ok(val) = tonic::metadata::MetadataValue::try_from(tp) {
+        req.metadata_mut().insert("traceparent", val);
+    }
+    req
 }
 
 async fn scatter_gather_inner(
@@ -96,6 +122,7 @@ async fn scatter_gather_inner(
     k: u32,
     merge_by_distance: bool,
     query_timeout: Duration,
+    trace_id: Option<String>,
 ) -> Result<pb::SearchResponse, tonic::Status> {
     let filter = local_req.filter.as_deref();
 
@@ -189,12 +216,20 @@ async fn scatter_gather_inner(
             let req = (*shared_req).clone();
             let worker_id = wid.clone();
             let timeout = query_timeout;
+            // B1: propagate traceparent so worker-side logs carry the
+            // same trace_id as the coord audit line. Zero-cost when the
+            // client didn't send a traceparent.
+            let tid = trace_id.clone();
             // H13: per-shard latency timing. Each task reports its own wall
             // clock so operators debugging a slow query can see which
             // worker is the outlier instead of only seeing the aggregate.
             tasks.spawn(async move {
                 let start = std::time::Instant::now();
-                let result = tokio::time::timeout(timeout, client.execute_local_search(Request::new(req))).await;
+                let mut outbound = Request::new(req);
+                if let Some(tid) = tid.as_deref() {
+                    outbound = inject_traceparent(outbound, tid);
+                }
+                let result = tokio::time::timeout(timeout, client.execute_local_search(outbound)).await;
                 let per_worker_ms = start.elapsed().as_millis() as u64;
                 (worker_id, result, per_worker_ms)
             });

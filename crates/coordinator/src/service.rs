@@ -569,6 +569,9 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        // B1: snapshot the incoming trace_id before into_inner() consumes
+        // the Request. None when the client didn't send a traceparent.
+        let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!(
                 "Too many concurrent queries (max {})", self.max_concurrent_queries
@@ -613,7 +616,7 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, true, self.query_timeout,
+            &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -631,6 +634,7 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -649,7 +653,7 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, false, self.query_timeout,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -667,6 +671,7 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -690,7 +695,7 @@ impl LanceSchedulerService for CoordinatorService {
         let t0 = std::time::Instant::now();
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, false, self.query_timeout,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -1209,13 +1214,22 @@ impl LanceSchedulerService for CoordinatorService {
         request: Request<pb::ListTablesRequest>,
     ) -> Result<Response<pb::ListTablesResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
-        let tables = self.shard_state.all_tables().await;
-        // G5: filter by caller's namespace so tenant A doesn't learn the
-        // table names of tenant B. Callers with no namespace binding get
-        // the full list (operator / break-glass path).
-        let tables = match &self.auth {
-            Some(a) => a.filter_namespace(&request, tables),
-            None => tables,
+        // B5: when the caller is bound to a namespace AND a MetaStore is
+        // configured, push the filter down one layer so the key list
+        // never crosses the wire unfiltered. Fall back to the
+        // auth-layer filter (F3) for Static shard state or unbound
+        // operator keys. Same end-result for correctness; B5 cuts
+        // listing cost on a 10k-table / 1000-namespace cluster.
+        let caller_ns = self.auth.as_ref().and_then(|a| a.namespace_for(&request));
+        let tables = match (&caller_ns, &self.meta_state) {
+            (Some(ns), Some(ms)) => ms.all_tables_for_namespace(ns).await,
+            _ => {
+                let all = self.shard_state.all_tables().await;
+                match &self.auth {
+                    Some(a) => a.filter_namespace(&request, all),
+                    None => all,
+                }
+            }
         };
         Ok(Response::new(pb::ListTablesResponse {
             table_names: tables,
@@ -1861,6 +1875,7 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<pb::BatchSearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
         })?;
@@ -1910,9 +1925,10 @@ impl LanceSchedulerService for CoordinatorService {
             let timeout = self.query_timeout;
             let merge_k = k;
 
+            let tid = trace_id.clone();
             tasks.spawn(async move {
                 super::scatter_gather::scatter_gather(
-                    &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout,
+                    &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout, tid,
                 ).await
             });
         }

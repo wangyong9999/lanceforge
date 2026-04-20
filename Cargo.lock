@@ -4183,15 +4183,18 @@ version = "0.2.0-beta.2"
 dependencies = [
  "arrow",
  "async-trait",
+ "bytes",
  "lance",
  "lance-distributed-proto",
  "log",
+ "object_store",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "tokio",
  "tonic",
+ "url",
 ]
 
 [[package]]

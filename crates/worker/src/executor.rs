@@ -659,11 +659,18 @@ fn resolve_tables_inner<'a>(
     tables: &'a [(String, lancedb::Table)],
     table_name: &str,
 ) -> Result<Vec<(&'a str, &'a lancedb::Table)>> {
+    // G5 / lancedb-safety: workers store shards under a sanitized
+    // name (`/` → `__`) because lancedb 0.27 rejects `/` in table
+    // names. Callers still pass the user-facing `tenant-a/orders`;
+    // match against the sanitized form here so the mapping round-
+    // trips. Keep the original `table_name` in the error message so
+    // operators see what they actually queried.
+    let sanitized = table_name.replace('/', "__");
     let matches: Vec<_> = tables.iter()
         .filter(|(name, _)| {
-            name == table_name
-                || (name.starts_with(table_name)
-                    && name.as_bytes().get(table_name.len()) == Some(&b'_'))
+            name == &sanitized
+                || (name.starts_with(&sanitized)
+                    && name.as_bytes().get(sanitized.len()) == Some(&b'_'))
         })
         .map(|(name, t)| (name.as_str(), t))
         .collect();

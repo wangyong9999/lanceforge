@@ -279,6 +279,33 @@ def t_f4a_create_audit_record():
 test("F4-A audit file contains CreateTable record for tenant-a", t_f4a_create_audit_record)
 
 
+def t_b1_trace_id_reaches_worker_log():
+    # B1: coord should re-attach traceparent on outbound
+    # execute_local_search. Worker prints an info! with the trace_id
+    # so cross-process log grep works.
+    stub = make_stub("tenant-a-admin", traceparent=TRACEPARENT)
+    qv = np.random.randn(DIM).astype(np.float32).tolist()
+    stub.AnnSearch(pb.AnnSearchRequest(
+        table_name="tenant-a/orders", vector_column="vector",
+        query_vector=struct.pack(f"<{DIM}f", *qv),
+        dimension=DIM, k=5, nprobes=1, metric_type=0,
+    ))
+    time.sleep(0.5)
+
+    # At least one of the two worker logs must carry the trace_id.
+    hits = 0
+    for wlog in [f"{BASE}/w0.log", f"{BASE}/w1.log"]:
+        with open(wlog) as f:
+            if f"trace_id={TRACE_ID}" in f.read():
+                hits += 1
+    assert hits >= 1, (
+        f"no worker log carries trace_id={TRACE_ID} — coord is not "
+        f"propagating traceparent on outbound scatter-gather"
+    )
+test("B1 worker log carries client's trace_id across gRPC hop",
+     t_b1_trace_id_reaches_worker_log)
+
+
 def t_f4b_addrows_audit_record_with_traceparent():
     # Fire one AddRows with an explicit W3C traceparent header.
     stub = make_stub("tenant-a-writer", traceparent=TRACEPARENT)

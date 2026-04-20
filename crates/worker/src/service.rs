@@ -3,8 +3,23 @@
 
 use std::sync::Arc;
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use tonic::{Request, Response, Status};
+
+/// Extract the 32-hex trace_id portion of a W3C traceparent metadata
+/// header. Matches `crates/coordinator/src/service.rs::extract_trace_id`
+/// — worker logs use the same format so a grep for `trace_id=<hex>`
+/// in coord + worker logs returns a continuous request story (B1).
+fn extract_trace_id<T>(req: &Request<T>) -> Option<String> {
+    let raw = req.metadata().get("traceparent")?.to_str().ok()?;
+    let mut parts = raw.split('-');
+    parts.next()?;
+    let trace = parts.next()?;
+    if trace.len() != 32 || !trace.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(trace.to_string())
+}
 
 use lance_distributed_common::ipc::record_batch_to_ipc;
 use lance_distributed_proto::descriptor::{FtsQueryParams, LanceQueryDescriptor, VectorQueryParams};
@@ -40,6 +55,13 @@ impl LanceExecutorService for WorkerService {
         &self,
         request: Request<LocalSearchRequest>,
     ) -> Result<Response<LocalSearchResponse>, Status> {
+        // B1: surface trace_id in worker logs when the coord attached
+        // a `traceparent`. info! not debug! so production log levels
+        // can still correlate across processes without dropping the
+        // level to debug.
+        if let Some(tid) = extract_trace_id(&request) {
+            info!("local_search trace_id={tid} table={}", request.get_ref().table_name);
+        }
         let req = request.into_inner();
         debug!("Worker: table={}, type={}", req.table_name, req.query_type);
 

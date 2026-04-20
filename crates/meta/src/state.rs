@@ -186,6 +186,33 @@ impl ShardState for MetaShardState {
 }
 
 impl MetaShardState {
+    /// List only tables whose name begins with `{namespace}/` (B5 —
+    /// defence-in-depth for G5 namespace binding). The auth layer
+    /// already filters `ListTables` responses; this method pushes the
+    /// filter down to the MetaStore so a 10k-table cluster with 1000
+    /// namespaces doesn't fetch every key name across the wire just
+    /// to filter 99% of them out client-side.
+    ///
+    /// Passing an empty namespace returns nothing — by construction
+    /// every table stored through `register_table("tenant-a/orders")`
+    /// has a non-empty prefix. Callers who want unfiltered output
+    /// should use `all_tables()`.
+    pub async fn all_tables_for_namespace(&self, namespace: &str) -> Vec<String> {
+        if namespace.is_empty() {
+            return Vec::new();
+        }
+        let ns_prefix = format!("{}/tables/{}/", self.prefix, namespace);
+        let strip = format!("{}/tables/", self.prefix);
+        match self.store.list_keys(&ns_prefix).await {
+            Ok(keys) => keys.iter()
+                .filter_map(|k| k.strip_prefix(&strip).map(|s| s.to_string()))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+impl MetaShardState {
     async fn get_executors_internal(&self) -> Vec<(String, String, u16)> {
         let key = self.executor_key();
         match self.store.get(&key).await {
@@ -452,5 +479,42 @@ mod tests {
         let b_tables = ns_b.all_tables().await;
         assert!(a_tables.contains(&"a_table".to_string()));
         assert!(b_tables.is_empty(), "tenant_b must not see tenant_a's tables");
+    }
+
+    #[tokio::test]
+    async fn test_all_tables_for_namespace_filters_at_store_level() {
+        // B5: MetaStore-side filter. Create tables across three
+        // namespaces on one MetaShardState, then verify each namespace
+        // call returns only its own set.
+        let (state, _dir) = test_state().await;
+        let mut m = HashMap::new();
+        m.insert("s0".to_string(), vec!["w0".to_string()]);
+        state.register_table("tenant-a/orders", m.clone()).await;
+        state.register_table("tenant-a/customers", m.clone()).await;
+        state.register_table("tenant-b/leads", m.clone()).await;
+        state.register_table("global-admin-table", m.clone()).await;
+
+        let a = state.all_tables_for_namespace("tenant-a").await;
+        assert_eq!(a.len(), 2, "tenant-a must see 2 own tables, got {a:?}");
+        assert!(a.contains(&"tenant-a/orders".to_string()));
+        assert!(a.contains(&"tenant-a/customers".to_string()));
+        assert!(!a.contains(&"tenant-b/leads".to_string()),
+                "cross-tenant leak at the store layer");
+        assert!(!a.contains(&"global-admin-table".to_string()),
+                "unprefixed admin table must not leak into tenant-a view");
+
+        let b = state.all_tables_for_namespace("tenant-b").await;
+        assert_eq!(b, vec!["tenant-b/leads".to_string()]);
+
+        // Empty namespace is explicitly nothing — defensive against
+        // accidental `.namespace.unwrap_or_default()` reaching this.
+        assert!(state.all_tables_for_namespace("").await.is_empty());
+
+        // tenant-ab must NOT match tenant-a/ prefix (would be a subtle
+        // prefix-collision bug if we used `starts_with` without the
+        // trailing slash).
+        let tenant_ab = state.all_tables_for_namespace("tenant-ab").await;
+        assert!(tenant_ab.is_empty(),
+                "tenant-ab must not match tenant-a/* tables");
     }
 }

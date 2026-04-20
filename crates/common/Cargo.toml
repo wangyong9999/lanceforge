@@ -17,6 +17,10 @@ arrow = { workspace = true }
 
 # For auto-shard fragment discovery
 lance = { version = "4.0.0", default-features = false, features = ["aws"] }
+# B2: OBS-native audit-log writer (put-per-batch model)
+object_store = { workspace = true }
+url = "2"
+bytes = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

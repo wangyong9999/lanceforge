@@ -1,0 +1,187 @@
+{
+  "title": "LanceForge",
+  "schemaVersion": 39,
+  "version": 1,
+  "uid": "lanceforge-0-2-beta-2",
+  "editable": true,
+  "tags": ["lanceforge", "vector-search"],
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0,
+        "current": {"text": "Prometheus", "value": "Prometheus"}
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": "label_values(lance_query_total, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "QPS (1m rate)",
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum(rate(lance_query_total{instance=~\"$instance\"}[1m]))",
+        "legendFormat": "qps"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps", "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error rate (1m)",
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum(rate(lance_query_errors_total{instance=~\"$instance\"}[1m])) / clamp_min(sum(rate(lance_query_total{instance=~\"$instance\"}[1m])), 1)",
+        "legendFormat": "err"
+      }],
+      "fieldConfig": {"defaults": {
+        "unit": "percentunit",
+        "color": {"mode": "thresholds"},
+        "thresholds": {"mode": "absolute", "steps": [
+          {"color": "green", "value": null},
+          {"color": "yellow", "value": 0.001},
+          {"color": "red", "value": 0.01}
+        ]}
+      }}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Healthy workers",
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "lance_executors_healthy{instance=~\"$instance\"} / clamp_min(lance_executors_total{instance=~\"$instance\"}, 1)",
+        "legendFormat": "{{instance}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Audit records dropped (compliance alert)",
+      "description": "Must stay 0 in production. Any non-zero reading means the AuditSink is silently losing audit records — channel full or sink error. Root cause in logs.",
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum(lance_audit_dropped_total{instance=~\"$instance\"})",
+        "legendFormat": "dropped"
+      }],
+      "fieldConfig": {"defaults": {
+        "color": {"mode": "thresholds"},
+        "thresholds": {"mode": "absolute", "steps": [
+          {"color": "green", "value": null},
+          {"color": "red", "value": 1}
+        ]}
+      }}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Query latency P50 / P95 / P99 (ms)",
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(lance_query_latency_ms_bucket{instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(lance_query_latency_ms_bucket{instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(lance_query_latency_ms_bucket{instance=~\"$instance\"}[1m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "QPS by table",
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum by (table) (rate(lance_table_query_total{instance=~\"$instance\"}[1m]))",
+        "legendFormat": "{{table}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Slow-query count (1m rate)",
+      "description": "Queries exceeding `server.slow_query_ms` (default 1000ms).",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum(rate(lance_slow_query_total{instance=~\"$instance\"}[1m]))",
+        "legendFormat": "slow/s"
+      }],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Per-table error rate",
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "sum by (table) (rate(lance_table_query_errors_total{instance=~\"$instance\"}[5m])) / clamp_min(sum by (table) (rate(lance_table_query_total{instance=~\"$instance\"}[5m])), 1)",
+        "legendFormat": "{{table}}"
+      }],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Max query latency (ms)",
+      "gridPos": {"x": 0, "y": 22, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [{
+        "expr": "max(lance_query_latency_max_ms{instance=~\"$instance\"})",
+        "legendFormat": "max"
+      }],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Executor health",
+      "gridPos": {"x": 12, "y": 22, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {"expr": "lance_executors_healthy{instance=~\"$instance\"}", "legendFormat": "healthy {{instance}}"},
+        {"expr": "lance_executors_total{instance=~\"$instance\"}", "legendFormat": "total {{instance}}"}
+      ]
+    }
+  ],
+  "annotations": {"list": [
+    {
+      "name": "deploy",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "enable": true,
+      "iconColor": "rgba(0, 211, 255, 1)",
+      "expr": "changes(lance_executors_total{instance=~\"$instance\"}[5m]) > 0"
+    }
+  ]},
+  "description": "LanceForge core panel set. Panel 4 (audit_dropped) is a compliance alert: non-zero = silent audit data loss (channel full or sink error). The latency histogram assumes `lance_query_latency_ms` is scraped at >= 15s resolution; at faster scrapes the quantile math still works but becomes noisier."
+}

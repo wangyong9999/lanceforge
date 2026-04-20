@@ -103,22 +103,20 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Returned by [`validate_audit_path`] when a path is refused at config time.
-/// The caller (coordinator startup) surfaces this to stdout and exits
-/// non-zero — no silent drop of compliance data.
+/// The caller (coordinator startup) surfaces this and exits non-zero.
+/// Currently only malformed URIs trigger this — OBS URIs are accepted
+/// and routed through the batch-PUT sink (B2 / 0.2.0-beta.3).
 #[derive(Debug)]
 pub enum AuditConfigError {
-    ObsNotSupported(String),
+    InvalidUri(String),
 }
 
 impl std::fmt::Display for AuditConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ObsNotSupported(p) => write!(
+            Self::InvalidUri(p) => write!(
                 f,
-                "audit_log_path '{p}' is an object-storage URI, but OBS-append \
-                 is not implemented (records would be silently dropped). Use a \
-                 local filesystem path + external shipper (Vector / Fluent Bit) \
-                 until 0.3. See ROADMAP_0.2.md R3."
+                "audit_log_path '{p}' is not a parseable local path or URI"
             ),
         }
     }
@@ -126,22 +124,22 @@ impl std::fmt::Display for AuditConfigError {
 
 impl std::error::Error for AuditConfigError {}
 
-/// Validate an `audit_log_path` value before spawning the sink. Currently
-/// rejects any object-storage scheme (`s3://`, `gs://`, `az://`) because
-/// the sink can't actually append there yet and silent drops are worse
-/// than a hard startup error. Local filesystem paths pass through.
-///
-/// This is F1 fail-fast. Previously the sink warned once at startup and
-/// then dropped every record; operators who missed the log line were
-/// losing audit visibility without knowing it.
+/// Validate an `audit_log_path` value before spawning the sink.
+/// Accepts local filesystem paths and OBS URIs (s3:// / gs:// / az://).
+/// 0.2.0-beta.2 rejected OBS at this layer; 0.2.0-beta.3 routes them
+/// through the batch-PUT sink (new object per batch, no append) —
+/// SIEM shippers ingest via prefix-list.
 pub fn validate_audit_path(path: &str) -> Result<(), AuditConfigError> {
-    const OBS_PREFIXES: &[&str] = &["s3://", "gs://", "az://", "azure://"];
-    for p in OBS_PREFIXES {
-        if path.starts_with(p) {
-            return Err(AuditConfigError::ObsNotSupported(path.to_string()));
-        }
+    if path.is_empty() {
+        return Err(AuditConfigError::InvalidUri(path.to_string()));
     }
     Ok(())
+}
+
+/// Whether an audit_log_path maps to an object-storage backend.
+pub fn path_is_obs(path: &str) -> bool {
+    path.starts_with("s3://") || path.starts_with("gs://")
+        || path.starts_with("az://") || path.starts_with("azure://")
 }
 
 /// Persistent audit sink. Spawns a background task that drains a
@@ -157,73 +155,37 @@ pub struct AuditSink {
 }
 
 impl AuditSink {
-    /// Spawn a new sink against a **local filesystem** path. Caller must
+    /// Spawn a new sink against either a local filesystem path or an
+    /// object-storage URI (`s3://` / `gs://` / `az://`). Caller must
     /// have validated the path with [`validate_audit_path`] first.
     ///
-    /// On filesystem errors the sink drains-and-drops so producers never
-    /// block on channel-full; `metrics.audit_dropped_count` is what
-    /// operators should alert on. Channel capacity is 1024 — enough for
-    /// RPC burst tolerance, not enough to hide a sustained firehose.
+    /// Local filesystem: append-only, fsync on shutdown.
+    ///
+    /// OBS (B2): batch up to 100 records **or** 30 seconds (whichever
+    /// first) into one object named
+    /// `{uri}/audit-{epoch_ms}-{rand_hex}.jsonl`. No append — every
+    /// batch is a new object. SIEM shippers (Vector, Fluent Bit) list
+    /// the prefix + sort by timestamp in the key. Individual records
+    /// are 300–500 bytes each; at 100 records per object the typical
+    /// batch is ~40 KB. At RPC burst rates exceeding 100/s the batch
+    /// flushes on the 100-record trigger; at trickle rates the 30s
+    /// timer guarantees SIEM sees records within 30s.
+    ///
+    /// On filesystem / OBS errors the sink drains-and-drops so
+    /// producers never block on channel-full; `audit_dropped_count`
+    /// bumps for every lost record so operators alert on it.
     pub fn spawn(
         path: String,
         shutdown: Arc<tokio::sync::Notify>,
         metrics: Arc<crate::metrics::Metrics>,
     ) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<AuditRecord>(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel::<AuditRecord>(1024);
         let sender = Arc::new(tx);
-        let metrics_for_spawn = metrics.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            // Local filesystem: open append-only, fsync on shutdown.
-            let p = PathBuf::from(&path);
-            if let Some(parent) = p.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let mut file = match tokio::fs::OpenOptions::new()
-                .create(true).append(true).open(&p).await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("audit sink: failed to open {path}: {e}");
-                    // Drain channel to avoid blocking producers forever;
-                    // every dropped record bumps the counter so Prometheus
-                    // alerts can fire.
-                    loop {
-                        tokio::select! {
-                            _ = shutdown.notified() => return,
-                            msg = rx.recv() => match msg {
-                                Some(_) => metrics_for_spawn.record_audit_dropped(),
-                                None => return,
-                            }
-                        }
-                    }
-                }
-            };
-            log::info!("audit sink: appending to {path}");
-            loop {
-                tokio::select! {
-                    _ = shutdown.notified() => {
-                        let _ = file.sync_all().await;
-                        log::info!("audit sink: shutdown, flushed");
-                        return;
-                    }
-                    msg = rx.recv() => match msg {
-                        Some(record) => {
-                            let line = record.to_jsonl() + "\n";
-                            if let Err(e) = file.write_all(line.as_bytes()).await {
-                                // Count as dropped — we couldn't persist it.
-                                metrics_for_spawn.record_audit_dropped();
-                                log::error!("audit sink: write failed: {e}");
-                            }
-                        }
-                        None => {
-                            let _ = file.sync_all().await;
-                            return;
-                        }
-                    }
-                }
-            }
-        });
+        if path_is_obs(&path) {
+            spawn_obs_sink(path, rx, shutdown, metrics.clone());
+        } else {
+            spawn_local_sink(path, rx, shutdown, metrics.clone());
+        }
         Self { sender, metrics }
     }
 
@@ -241,6 +203,208 @@ impl AuditSink {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 self.metrics.record_audit_dropped();
                 log::warn!("audit sink: sink closed, record dropped");
+            }
+        }
+    }
+}
+
+/// Spawn the local-filesystem variant of the audit sink. Records are
+/// appended to `path` and fsynced on shutdown. Drains-and-drops on
+/// open failure (and bumps `audit_dropped_count` for every drop).
+fn spawn_local_sink(
+    path: String,
+    mut rx: tokio::sync::mpsc::Receiver<AuditRecord>,
+    shutdown: Arc<tokio::sync::Notify>,
+    metrics: Arc<crate::metrics::Metrics>,
+) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let p = PathBuf::from(&path);
+        if let Some(parent) = p.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let mut file = match tokio::fs::OpenOptions::new()
+            .create(true).append(true).open(&p).await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!("audit sink: failed to open {path}: {e}");
+                loop {
+                    tokio::select! {
+                        _ = shutdown.notified() => return,
+                        msg = rx.recv() => match msg {
+                            Some(_) => metrics.record_audit_dropped(),
+                            None => return,
+                        }
+                    }
+                }
+            }
+        };
+        log::info!("audit sink: appending to {path}");
+        loop {
+            tokio::select! {
+                _ = shutdown.notified() => {
+                    let _ = file.sync_all().await;
+                    log::info!("audit sink: shutdown, flushed");
+                    return;
+                }
+                msg = rx.recv() => match msg {
+                    Some(record) => {
+                        let line = record.to_jsonl() + "\n";
+                        if let Err(e) = file.write_all(line.as_bytes()).await {
+                            metrics.record_audit_dropped();
+                            log::error!("audit sink: write failed: {e}");
+                        }
+                    }
+                    None => {
+                        let _ = file.sync_all().await;
+                        return;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Spawn the OBS variant (B2). Buffers records up to
+/// `OBS_BATCH_RECORDS` (100) or `OBS_FLUSH_INTERVAL` (30 s), then PUTs
+/// one object per batch at `{prefix}/audit-{epoch_ms}-{rand_hex}.jsonl`.
+/// Uses `object_store::parse_url_opts` so the URI is handled the same
+/// way Lance / S3MetaStore parse theirs — same credentials (env /
+/// instance role / object_store options) apply.
+///
+/// On PUT failure the batch is dropped + counted. No retry yet —
+/// 0.3 can layer exponential backoff when we have more operator
+/// feedback on which failure modes actually happen in the wild.
+const OBS_BATCH_RECORDS: usize = 100;
+const OBS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn spawn_obs_sink(
+    uri: String,
+    mut rx: tokio::sync::mpsc::Receiver<AuditRecord>,
+    shutdown: Arc<tokio::sync::Notify>,
+    metrics: Arc<crate::metrics::Metrics>,
+) {
+    tokio::spawn(async move {
+        // Resolve the URI into (ObjectStore, prefix-path). `parse_url_opts`
+        // needs a full URL; we pass the operator-provided URI directly.
+        let parsed = match url::Url::parse(&uri) {
+            Ok(u) => u,
+            Err(e) => {
+                log::error!("audit sink: invalid OBS URI {uri}: {e}");
+                drain_and_count(&mut rx, &shutdown, &metrics).await;
+                return;
+            }
+        };
+        let (store, prefix) = match object_store::parse_url_opts::<_, String, String>(
+            &parsed,
+            std::iter::empty(),
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::error!("audit sink: parse_url_opts {uri} failed: {e}");
+                drain_and_count(&mut rx, &shutdown, &metrics).await;
+                return;
+            }
+        };
+        log::info!("audit sink: OBS PUT-per-batch to {uri} (max {} records / {:?})",
+                   OBS_BATCH_RECORDS, OBS_FLUSH_INTERVAL);
+
+        let mut batch: Vec<AuditRecord> = Vec::with_capacity(OBS_BATCH_RECORDS);
+        let mut flush_timer = tokio::time::interval(OBS_FLUSH_INTERVAL);
+        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = shutdown.notified() => {
+                    if !batch.is_empty() {
+                        put_batch(&store, &prefix, &batch, &metrics).await;
+                    }
+                    log::info!("audit sink: OBS shutdown, last batch flushed ({} records)",
+                               batch.len());
+                    return;
+                }
+                _ = flush_timer.tick() => {
+                    if !batch.is_empty() {
+                        put_batch(&store, &prefix, &batch, &metrics).await;
+                        batch.clear();
+                    }
+                }
+                msg = rx.recv() => match msg {
+                    Some(record) => {
+                        batch.push(record);
+                        if batch.len() >= OBS_BATCH_RECORDS {
+                            put_batch(&store, &prefix, &batch, &metrics).await;
+                            batch.clear();
+                        }
+                    }
+                    None => {
+                        if !batch.is_empty() {
+                            put_batch(&store, &prefix, &batch, &metrics).await;
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Drain the channel until shutdown, bumping the dropped counter on
+/// every record. Used when the OBS URI can't be parsed so we don't
+/// block producers on channel-full.
+async fn drain_and_count(
+    rx: &mut tokio::sync::mpsc::Receiver<AuditRecord>,
+    shutdown: &Arc<tokio::sync::Notify>,
+    metrics: &Arc<crate::metrics::Metrics>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.notified() => return,
+            msg = rx.recv() => match msg {
+                Some(_) => metrics.record_audit_dropped(),
+                None => return,
+            }
+        }
+    }
+}
+
+/// PUT one object holding `batch` records as JSONL. Object key is
+/// `{prefix}/audit-{epoch_ms}-{hex16}.jsonl`. Failures bump the
+/// counter for every record in the batch.
+async fn put_batch(
+    store: &dyn object_store::ObjectStore,
+    prefix: &object_store::path::Path,
+    batch: &[AuditRecord],
+    metrics: &Arc<crate::metrics::Metrics>,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    // Randomish 16-hex suffix for uniqueness across N coord pods.
+    let rand_hex = {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
+            .unwrap_or_default().subsec_nanos();
+        let mix = (millis as u64).wrapping_mul(0x100000001b3) ^ nanos as u64;
+        format!("{:016x}", mix)
+    };
+    let filename = format!("audit-{millis:013}-{rand_hex}.jsonl");
+    let key = if prefix.as_ref().is_empty() {
+        object_store::path::Path::from(filename.clone())
+    } else {
+        object_store::path::Path::from(format!("{}/{}", prefix.as_ref(), filename))
+    };
+    let mut body = Vec::with_capacity(batch.len() * 300);
+    for r in batch {
+        body.extend_from_slice(r.to_jsonl().as_bytes());
+        body.push(b'\n');
+    }
+    match store.put(&key, bytes::Bytes::from(body).into()).await {
+        Ok(_) => log::debug!("audit sink: PUT {} ({} records)", key, batch.len()),
+        Err(e) => {
+            log::error!("audit sink: PUT {} failed: {e}", key);
+            for _ in batch {
+                metrics.record_audit_dropped();
             }
         }
     }
@@ -310,22 +474,25 @@ mod tests {
     }
 
     #[test]
-    fn validate_audit_path_rejects_obs_schemes() {
-        // F1: OBS URIs must fail at config time, not silently drop records.
-        for bad in ["s3://b/a", "gs://b/a", "az://b/a", "azure://b/a"] {
-            let err = validate_audit_path(bad).unwrap_err();
-            let msg = format!("{err}");
-            assert!(msg.contains(bad), "err should name the path, got: {msg}");
-            assert!(msg.contains("silently dropped") || msg.contains("OBS"));
+    fn validate_audit_path_accepts_local_and_obs() {
+        // 0.2.0-beta.3 / B2: OBS URIs are accepted (route through the
+        // PUT-per-batch sink). Local paths still work. Only an empty
+        // string is refused.
+        for ok in ["/var/log/lance/audit.jsonl", "./audit.log", "audit.log",
+                   "s3://b/a", "gs://b/a", "az://b/a"] {
+            assert!(validate_audit_path(ok).is_ok(), "expected ok for {ok}");
         }
+        assert!(validate_audit_path("").is_err());
     }
 
     #[test]
-    fn validate_audit_path_accepts_local() {
-        // Local paths — absolute, relative, /tmp — all pass.
-        assert!(validate_audit_path("/var/log/lance/audit.jsonl").is_ok());
-        assert!(validate_audit_path("./audit.log").is_ok());
-        assert!(validate_audit_path("audit.log").is_ok());
+    fn path_is_obs_recognises_schemes() {
+        assert!(path_is_obs("s3://b/a"));
+        assert!(path_is_obs("gs://b/a"));
+        assert!(path_is_obs("az://b/a"));
+        assert!(path_is_obs("azure://b/a"));
+        assert!(!path_is_obs("/tmp/audit.log"));
+        assert!(!path_is_obs("file:///tmp/x.log"));
     }
 
     #[tokio::test]
