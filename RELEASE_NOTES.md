@@ -1,5 +1,139 @@
 # LanceForge Release Notes
 
+## 0.2.0-beta.2 — 2026-04-20
+
+**Posttag hardening for 0.2.0-beta.1.** The postmortem on the beta.1
+tag identified six items where "the feature shipped" didn't mean
+"the feature is actually wired through the request path." beta.2 is
+the corresponding F-series (F1–F9) that closes those gaps, plus one
+unplanned lancedb-panic fix that fell out of the new end-to-end
+coverage. Backward compatible with 0.2.0-beta.1 on wire and on disk;
+audit-log JSONL schema is additive (dedicated `trace_id` field) with
+the old `details` substring preserved for one version.
+
+### What was broken in beta.1
+
+- **G5 namespace binding never worked for real writes.** lancedb 0.27
+  `.unwrap()`s in its table-name validation when the name contains
+  `/`. Every CreateTable under a `tenant-x/` prefix would panic the
+  tokio task and return an opaque `h2 protocol error` to the client.
+  The unit tests on `check_namespace()` passed, but no end-to-end
+  gRPC test had ever fired a real CreateTable through the namespace
+  path. **beta.2 ships the fix and the test that would have caught
+  it.**
+- **G7 audit sink silently dropped records on OBS URIs.** Operators
+  who set `audit_log_path: s3://...` got a single `warn!` line at
+  startup and then lost every subsequent record. beta.2 makes this
+  a hard startup failure with a pointer at the real follow-up work
+  in ROADMAP R3.
+- **G7 audit sink channel-full was invisible to monitoring.** Drops
+  emitted a `warn!` log, which is impossible to alert on reliably.
+  beta.2 adds `lance_audit_dropped_total` as a Prometheus counter.
+- **G9 `lance-admin meta restore --purge` had no safety gate.** A
+  typo in `--meta` could wipe a live cluster. beta.2 adds
+  `--dry-run` and `--yes`, requires confirmation on TTY when not
+  supplied, and refuses to proceed on non-interactive stdin without
+  `--yes`.
+- **Admin CLI's S3 branch had zero automated coverage.** All three
+  tests ran against FileMetaStore only. beta.2 exercises the
+  S3MetaStore path end-to-end.
+- **Python SDK silently routed localhost RPC through system proxy**
+  on WSL2 / Codespaces / VPN machines — the exact H24 symptom that
+  masqueraded as a LanceForge bug during alpha validation. beta.2
+  strips `HTTP_PROXY` / `HTTPS_PROXY` / `GRPC_PROXY` / `ALL_PROXY`
+  from the process env during `LanceForgeClient.__init__` (opt out
+  with `respect_proxy_env=True`).
+- **H25 had no regression test.** beta.1's soak caught an H21
+  leftover that force-exited every coord after exactly 65 s. The
+  fix landed but the next refactor could re-introduce it. beta.2
+  ships an 80 s integration test that fails if coord dies before
+  the 75 s mark.
+
+### Changes in detail
+
+- **F1 audit integrity**: `AuditSink::spawn` now takes a
+  `metrics: Arc<Metrics>` handle and bumps `audit_dropped_count`
+  on channel-full / sink-closed / file-write errors. A new
+  `validate_audit_path()` rejects OBS schemes at config time with
+  a diagnostic that points at the ROADMAP R3 item. Coordinator
+  exits 2 on bad config.
+- **F2 H25 regression test**:
+  `lance-integration/tools/e2e_h25_coord_uptime_test.py`. 80 s
+  wall-clock; nightly tier, not per-PR.
+- **F3 namespace gRPC e2e**:
+  `lance-integration/tools/e2e_beta2_ns_audit_test.py`. Exercises
+  CreateTable / AnnSearch / ListTables through the full gRPC
+  stack; 5 assertions spanning the allow path, the cross-ns reject
+  path, and the list-filter path.
+- **F4 audit-log e2e**: same file as F3 — asserts that real
+  CreateTable + AddRows gRPC calls land JSONL records in the
+  configured file, with the correct op / principal / target /
+  trace_id.
+- **F5 admin S3 round-trip**: `open_store_via_s3_branch_roundtrips`
+  drives `cmd_dump` + `cmd_restore` through S3MetaStore (via
+  `file://` URL, same pattern the meta crate's own tests use).
+- **F6 admin safety flags**: `--dry-run` renders a create / update /
+  delete plan and returns. `--yes` bypasses the TTY prompt for
+  `--purge`. Non-interactive `--purge` without `--yes` refuses to
+  proceed and leaves the target untouched. Four new tests.
+- **F7 `SECURITY.md` §5 restructure**: storage-layer isolation
+  caveat promoted to a boxed paragraph at the top of the section,
+  ahead of the scope list.
+- **F8 Python SDK proxy guard**: strips proxy env vars on
+  `__init__`. Three new unit tests.
+- **F9 `AuditRecord.trace_id` dedicated field**:
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`
+  adds a top-level key alongside the in-details substring.
+  Writers dual-write for one version; 0.3 drops the substring.
+  Consumers should prefer the top-level field from beta.2 onward.
+- **Lancedb panic fix (unblocks G5)**: coord sanitizes `/` → `__`
+  in `shard_name` construction. Worker `create_local_shard` adds
+  an input-validation guard that rejects names containing `/`,
+  `..`, or a leading `.` — belt-and-braces against any other
+  caller reaching the lancedb panic path. User-facing table_name
+  keeps `/` everywhere else.
+
+### Regression results
+
+| Gate | beta.1 | **beta.2** |
+|---|---:|---:|
+| workspace lib + admin | 311 + 3 | **319 + 6** |
+| SDK unit | 27 | **30** |
+| E2E phases | 6 / 6 | 6 / 6 |
+| Chaos worker_kill | 10 / 10 | 10 / 10 |
+| Chaos worker_stall | 10 / 10 | 10 / 10 |
+| New: F2 H25 uptime | — | PASS (75 s) |
+| New: F3 + F4 ns/audit e2e | — | 7 / 7 |
+
+### Deferred to 0.3
+
+Same list as beta.1. The "worker RSS warmup step under sustained
+read" question from LIMITATIONS §13 still needs a 4h+ soak to
+characterise the step cadence — not done here, not a ship blocker
+given the cache-warmup interpretation, but the commitment to
+re-measure with a 0.3 harness change stands.
+
+### Upgrade from 0.2.0-beta.1
+
+- No wire or on-disk schema break. Rolling restart of coordinators
+  is sufficient.
+- If you set `audit_log_path: s3://...`, coordinator will now refuse
+  to start; change it to a local path + an external log shipper,
+  per `SECURITY.md` §7.
+- SIEM parsers: start reading `trace_id` from the top-level JSONL
+  field rather than parsing the `details` substring.
+- Python SDK users on WSL2 / Codespaces previously had to manually
+  `unset HTTP_PROXY`; that's now automatic. If you rely on the
+  proxy for coord traffic (unusual), pass `respect_proxy_env=True`
+  to `LanceForgeClient`.
+- If you want to use G5 namespace binding with actual data writes,
+  you can now: beta.1's silent lancedb panic is fixed. Nothing to
+  change on your side.
+
+Full change list: [`CHANGELOG.md`](./CHANGELOG.md).
+
+---
+
 ## 0.2.0-beta.1 — 2026-04-19
 
 **First beta on the SaaS-first track.** Closes the Severity-1 gaps

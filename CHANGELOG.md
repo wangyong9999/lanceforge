@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.2] - 2026-04-20
+
+Posttag hardening for beta.1. F1-F9 close the "shipped-but-not-
+wired" gaps surfaced in the beta.1 postmortem, plus one unplanned
+lancedb-panic fix discovered by the new end-to-end tests.
+
+### Fixed
+- G5 namespace + lancedb panic: coordinator now sanitizes `/` → `__`
+  in the `shard_name` passed to lancedb, which previously
+  `.unwrap()`ed on validation and panicked the tokio task. Worker
+  adds an input-validation guard for belt-and-braces. User-visible
+  `table_name` keeps `/` everywhere else.
+- G7 OBS audit path silent drop: `validate_audit_path()` rejects
+  `s3://` / `gs://` / `az://` URIs at config time; coord exits 2.
+- G7 audit sink channel-full invisibility: new
+  `lance_audit_dropped_total` Prometheus counter.
+
+### Added
+- F1 `Metrics.audit_dropped_count` + counter export.
+  `AuditSink::spawn(..., metrics)` signature.
+- F2 `lance-integration/tools/e2e_h25_coord_uptime_test.py` nightly
+  regression for the H21 shutdown-timeout bug.
+- F3 + F4 `lance-integration/tools/e2e_beta2_ns_audit_test.py`:
+  7 gRPC e2e assertions covering the namespace allow/deny path,
+  ListTables filter, and real-RPC audit record landing.
+- F5 admin S3MetaStore round-trip test.
+- F6 `lance-admin meta restore --dry-run` and `--yes` flags;
+  purge without `--yes` on non-TTY refuses to proceed.
+- F7 `SECURITY.md` §5: storage-layer isolation caveat boxed at
+  top.
+- F8 Python SDK `LanceForgeClient` strips proxy env vars by
+  default; opt-out via `respect_proxy_env=True`.
+- F9 `AuditRecord.trace_id` top-level JSONL field (additive).
+
+### Changed
+- `AuditSink::spawn` signature now takes `metrics: Arc<Metrics>`.
+- `cmd_restore` signature takes `(meta, from, purge, dry_run, yes)`.
+- `open_store` in admin routes `file://` and `memory://` through
+  S3MetaStore so the CLI accepts every URI form the coordinator
+  config does.
+
+### Deferred to 0.3
+- Real OBS-append audit sink (R3).
+- Full OTLP exporter pipeline.
+- Grafana dashboard template bundle.
+- Async Python SDK.
+- MetaStore-side namespace enforcement.
+- Worker-side traceparent re-emission.
+- 4h+ soak to characterise worker RSS step cadence.
+
 ## [0.2.0-beta.1] - 2026-04-19
 
 First beta on the SaaS-first track. Closes the Severity-1 gaps
