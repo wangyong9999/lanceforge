@@ -232,6 +232,56 @@ CP ──► MetaStore (CAS)
 
 ---
 
+## 4.5 决策锁定（Phase C 开工前）
+
+这三条是 Phase C 启动前必须定的架构决策。每条都写清"选择 / 理由 / 证据"，避免实施中反复。
+
+### D1. QN routing cache 断连降级 — **选择：TTL 保底**
+
+**场景**：QN 通过 gRPC `SubscribeRouting` 长连接订阅 CP 的 routing 更新。连接断了怎么办？
+
+**选择**：本地 cache 带 30s TTL。订阅断连后继续用最后的 routing snapshot，直到 TTL 过期才开始拒服务。
+
+**理由**：CP 的 rolling restart / 网络抖动应该对客户端透明。Milvus DataCoord → QueryCoord 的通知也是这个 pattern（`milvus/internal/util/sessionutil`）。硬 fail 会放大 CP 故障域。
+
+### D2. CP 形态 — **选择：crate 库 + async task（Pattern B）**
+
+**场景**：CP 要不要独立进程 / 独立二进制 / 独立 gRPC server？
+
+**选择**：CP 是一个 `roles::cp::run(...)` 库函数；monolith 里和其他角色在同 runtime 里起 tokio task；Phase E 再打可选的独立 `lance-cp` bin（同 crate 不同 entry）。
+
+**理由 + 证据**：后 2020 分布式数据库的主流是 Pattern B——单 binary 按 role 组合，而不是 Pattern A 的强制拆进程。调研结果：
+
+| 系统 | Binary 数 | 可组合 | 模式 | 证据链接 |
+|---|---:|---|---|---|
+| Milvus | 1 | ✅ role flags | B | [cmd/roles](https://github.com/milvus-io/milvus/blob/master/cmd/roles/roles.go) |
+| CockroachDB | 1 | ✅ symmetric peer | B | [architecture](https://www.cockroachlabs.com/docs/stable/architecture/overview) |
+| Qdrant | 1 | ✅ peer Raft | B | [distributed](https://qdrant.tech/documentation/guides/distributed_deployment/) |
+| etcd | 1 + `embed` pkg | ✅ | B | [embed](https://pkg.go.dev/go.etcd.io/etcd/server/v3/embed) |
+| Consul | 1 | ✅ `-server` flag | B | [agent](https://developer.hashicorp.com/consul/commands/agent) |
+| Neon | 6+ | 部分（dev）| A (prod) | storage_controller is own bin |
+| TiDB PD | 3 | ❌ 独立 Raft | A | 小 quorum vs 大 TiKV fleet 规模不对称 |
+
+**7/8 票选 Pattern B**。TiDB 选 A 是因为 PD 本身是小 Raft quorum 要服务几千个 TiKV 节点，规模不对称。我们没这个不对称（多租户单集群场景）。
+
+选 B 没有锁死——Phase E 仍可以随时打 `lance-cp` 独立 bin（同 crate + 不同 `[[bin]]`）。选 A 则要立即承担部署 / 配置 / supervision 的额外税。
+
+### D3. Schema 存储 — **选择：MetaStore 集中版本化**
+
+**场景**：Arrow schema 目前只存在每个 shard 的 Lance manifest 里。GetSchema RPC 随便挑一个 PE 问。要改成 MetaStore 集中存吗？
+
+**选择**：改成 MetaStore 集中存。每张表一个 `schema_version: u64`（单调递增）+ 完整 Arrow IPC schema。
+
+**理由**：分散式 schema 导致**能力损失**：
+- **原子 DDL 做不了**：ALTER TABLE 要同时改 N 个 shard 的 schema；没有全局锚点就没法协调
+- **Schema 演化做不了**：add column / drop column 需要版本化（历史查询用旧 schema、新查询用新 schema）
+- **Time-travel 做不了**：客户端指定 version N 读取需要知道 version N 的 schema 长什么样
+- **GetSchema 性能差**：随便挑 worker 问，一次网络 RTT；集中存就是内存取
+
+**代价**：MetaStore 多一个 key family `/tables/{name}/schema/{version}`，一个写路径（CreateTable / DDL），一个读路径（scatter 前 resolve）。CAS 保证并发 DDL 的串行化。
+
+---
+
 ## 5. 竞品设计吸收
 
 | 能力 | 来源 | 应用点 |
