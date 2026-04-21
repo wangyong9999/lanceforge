@@ -1,0 +1,210 @@
+// LanceForge v2 architecture — Control Plane protocol.
+//
+// Phase C of docs/ARCHITECTURE_V2_PLAN.md. Two RPC services:
+//
+//   ClusterControl  — table routing / schema / policy resolution.
+//                     QN subscribes for push-invalidation, reads on
+//                     cache miss.
+//   NodeLifecycle   — node registration + heartbeat. Every role
+//                     (QN / PE / IDX) reports itself so CP maintains
+//                     the authoritative healthy_set.
+//
+// Design anchors (decisions locked in ARCHITECTURE_V2_PLAN.md §4.5):
+//
+//   D1: SubscribeRouting is a server-streaming RPC. QN keeps a local
+//       snapshot + 30s TTL; when the stream drops, QN keeps serving
+//       from cache for TTL before failing.
+//
+//   D2: CP is a library that gets bundled into the monolith bin and
+//       can optionally run as a standalone lance-cp bin. This proto
+//       is the same wire format in either shape — monolith loops it
+//       back over loopback, split deployments go over the network.
+//
+//   D3: Schema is centralised in MetaStore. GetSchema returns the
+//       current Arrow-IPC schema + version; callers pin a version
+//       via ResolveTable(min_schema_version) for time-travel.
+//
+// Phase C is additive: QN / PE / IDX can still run with pre-v2
+// routing paths. Phase E flips the switch.
+
+syntax = "proto3";
+package lance.distributed;
+
+// ═══════════════════════════════════════════════════════════════════
+// ClusterControl
+// ═══════════════════════════════════════════════════════════════════
+
+service ClusterControl {
+  // One-shot table resolution. Returns the current shard routing +
+  // schema version. Used by QN on first touch / cache miss.
+  rpc ResolveTable(ResolveTableRequest) returns (TableRouting);
+
+  // Server-streaming push of routing changes. QN opens this once at
+  // startup and keeps it alive; every CP-side routing mutation
+  // fans out as one RoutingUpdate. Stream close on CP restart is
+  // handled QN-side via the 30s TTL fallback (D1).
+  rpc SubscribeRouting(SubscribeRoutingRequest) returns (stream RoutingUpdate);
+
+  // Current Arrow-IPC schema for a table, optionally pinned to a
+  // version. Unset version = latest (D3). Renamed from GetSchema to
+  // avoid clashing with the existing LanceSchedulerService.GetSchema
+  // RPC which is a per-worker lookup without version support.
+  rpc ResolveSchema(ResolveSchemaRequest) returns (ResolvedSchema);
+
+  // Policy bundle for a given API key: RBAC role, per-key QPS
+  // limit, namespace binding. Hot-reloadable via MetaStore.
+  rpc GetPolicy(GetPolicyRequest) returns (PolicyBundle);
+}
+
+message ResolveTableRequest {
+  string table_name = 1;
+  // When set, require `current_schema_version >= min_schema_version`.
+  // Used for read-your-own-writes after DDL (future schema evolution
+  // work). Leave 0 for "whatever's current".
+  uint64 min_schema_version = 2;
+}
+
+message TableRouting {
+  string table_name = 1;
+  repeated ShardAssignment shards = 2;
+  uint64 schema_version = 3;
+  // Monotonic per-table version that bumps on routing mutation
+  // (rebalance / shard add / shard remove). Distinct from
+  // schema_version — schema is structural, routing_version is
+  // placement.
+  uint64 routing_version = 4;
+}
+
+message ShardAssignment {
+  string shard_name = 1;
+  string primary_executor = 2;
+  // Optional secondary for read failover (replica_factor > 1).
+  string secondary_executor = 3;
+  // Lance manifest URI for the shard. Persisted so replacement
+  // nodes can LoadShard without coord intervention.
+  string uri = 4;
+}
+
+message SubscribeRoutingRequest {
+  // Optional table filter — empty = all tables. QNs typically leave
+  // this empty and locally filter on RoutingUpdate.table_name.
+  repeated string table_names = 1;
+}
+
+message RoutingUpdate {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    TABLE_CHANGED = 1;   // shards / schema_version shifted
+    TABLE_DROPPED = 2;
+    HEALTHY_SET_CHANGED = 3;  // executor list changed (add / remove / health flip)
+  }
+  Kind kind = 1;
+  string table_name = 2;  // unset for HEALTHY_SET_CHANGED
+  TableRouting routing = 3;  // unset for TABLE_DROPPED
+  repeated ExecutorHealth healthy_executors = 4;  // only for HEALTHY_SET_CHANGED
+}
+
+message ExecutorHealth {
+  string executor_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  bool healthy = 4;
+}
+
+message ResolveSchemaRequest {
+  string table_name = 1;
+  // 0 = latest.
+  uint64 schema_version = 2;
+}
+
+message ResolvedSchema {
+  string table_name = 1;
+  uint64 schema_version = 2;
+  // Arrow IPC schema bytes (same encoding used by CreateTable).
+  bytes arrow_ipc_schema = 3;
+}
+
+message GetPolicyRequest {
+  // Opaque API key — CP hashes internally, never logs.
+  string api_key = 1;
+}
+
+message PolicyBundle {
+  // Role: admin / writer / reader. Empty string = unknown key.
+  string role = 1;
+  // Per-key QPS cap; 0 = unlimited.
+  uint32 qps_limit = 2;
+  // Namespace prefix binding (G5). Empty = no binding.
+  string namespace_prefix = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// NodeLifecycle
+// ═══════════════════════════════════════════════════════════════════
+
+service NodeLifecycle {
+  // Called by QN / PE / IDX at startup. Returns the node's assigned
+  // identity (in case of id reuse after pod restart). Idempotent.
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+
+  // Periodic liveness ping. CP aggregates these into healthy_set,
+  // which fans out through SubscribeRouting.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Graceful shutdown notification. CP proactively removes from
+  // healthy_set instead of waiting for heartbeat timeout. Optional —
+  // sudden death still gets caught by heartbeat timeout.
+  rpc DeregisterNode(DeregisterNodeRequest) returns (DeregisterNodeResponse);
+}
+
+message RegisterNodeRequest {
+  string node_id = 1;        // e.g., "w0" / "qn-pod-abc"
+  NodeRole role = 2;
+  string host = 3;
+  uint32 port = 4;
+  // Loaded shards (for PE). Empty for QN / IDX.
+  repeated string loaded_shards = 5;
+}
+
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  QN = 1;
+  PE = 2;
+  IDX = 3;
+  // Monolith registers under MONOLITH and CP tracks which internal
+  // roles it's hosting. Keeps the healthy_set homogeneous in the
+  // common case where operators run monolith everywhere.
+  MONOLITH = 4;
+}
+
+message RegisterNodeResponse {
+  // CP-assigned epoch. Incremented if CP detected a prior instance
+  // with the same node_id that's still in its map; node should log
+  // the previous epoch for debugging.
+  uint64 epoch = 1;
+  string error = 2;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  uint64 epoch = 2;
+  // Opaque role-specific payload. PE reports loaded_shards so CP can
+  // spot drift without a separate RPC. QN / IDX can leave empty.
+  repeated string loaded_shards = 3;
+}
+
+message HeartbeatResponse {
+  // If false, CP has evicted this node (e.g., epoch mismatch, stale
+  // node_id). Node should re-register and reload shards.
+  bool accepted = 1;
+  string error = 2;
+}
+
+message DeregisterNodeRequest {
+  string node_id = 1;
+  uint64 epoch = 2;
+}
+
+message DeregisterNodeResponse {
+  string error = 1;
+}
