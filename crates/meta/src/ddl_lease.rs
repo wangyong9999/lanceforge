@@ -301,6 +301,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acquire_on_corrupt_record_returns_storage_error() {
+        // A hand-corrupted lease record in MetaStore must surface as
+        // a Storage error (not a panic or a silent Held) so operators
+        // can tell something's wrong with the durable state.
+        let (store, _tmp) = new_store().await;
+        store
+            .put("ddl_lease/t", "not valid json {", 0)
+            .await
+            .unwrap();
+        let err = acquire(store, "t", "coord-a", None).await.unwrap_err();
+        assert!(
+            matches!(err, AcquireError::Storage(_)),
+            "expected Storage, got {err:?}"
+        );
+        // Message should include useful diagnostic.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ddl_lease"),
+            "diagnostic should mention ddl_lease, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
     async fn steal_on_expire_reports_new_holder() {
         let (store, _tmp) = new_store().await;
         let _ = acquire(store.clone(), "t", "old-holder", Some(5_000_000))

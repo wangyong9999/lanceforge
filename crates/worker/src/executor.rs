@@ -488,19 +488,25 @@ impl LanceTableRegistry {
     /// new column schema; all columns are treated as NULLABLE and
     /// filled with NULL on existing rows via Lance's
     /// `NewColumnTransform::AllNulls`.
+    ///
+    /// **Idempotency**: columns that already exist on the shard are
+    /// filtered out before calling Lance. This makes a retried
+    /// AlterTable safe when a prior attempt partially succeeded
+    /// (e.g., shard 1 added the column, shard 2's RPC timed out).
+    /// Operator just re-submits the same AlterTable with
+    /// `expected_schema_version = current` and every shard either
+    /// adds what's missing or no-ops.
     pub async fn add_columns_on_shard(
         &self,
         shard_name: &str,
         add_columns_arrow_ipc: &[u8],
     ) -> Result<()> {
+        use arrow::datatypes::{Field, Schema as ArrowSchema};
         use arrow::ipc::reader::StreamReader;
         use lance::dataset::NewColumnTransform;
+        use std::collections::HashSet;
         use std::sync::Arc;
 
-        // Decode the IPC payload to an Arrow schema. We accept a
-        // stream (same envelope as CreateTable/AddRows use) but
-        // only care about its schema — the caller isn't expected
-        // to attach any row data.
         let reader = StreamReader::try_new(std::io::Cursor::new(add_columns_arrow_ipc), None)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let new_schema = reader.schema();
@@ -508,14 +514,40 @@ impl LanceTableRegistry {
         let tables = self.tables.read().await;
         let targets = resolve_tables_inner(&tables, shard_name)?;
         for (name, table) in &targets {
+            let current_schema = table
+                .schema()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let existing: HashSet<String> = current_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect();
+            let missing: Vec<Field> = new_schema
+                .fields()
+                .iter()
+                .filter(|f| !existing.contains(f.name()))
+                .map(|f| (**f).clone())
+                .collect();
+            if missing.is_empty() {
+                info!(
+                    "ADD COLUMN on {}: all {} column(s) already present, no-op",
+                    name,
+                    new_schema.fields().len()
+                );
+                continue;
+            }
+            let missing_count = missing.len();
+            let add_schema = Arc::new(ArrowSchema::new(missing));
             table
-                .add_columns(NewColumnTransform::AllNulls(Arc::new((*new_schema).clone())), None)
+                .add_columns(NewColumnTransform::AllNulls(add_schema), None)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
             info!(
-                "ADD COLUMN on shard {}: +{} column(s)",
+                "ADD COLUMN on shard {}: +{} new column(s) ({} already present)",
                 name,
-                new_schema.fields().len()
+                missing_count,
+                new_schema.fields().len() - missing_count
             );
         }
         Ok(())

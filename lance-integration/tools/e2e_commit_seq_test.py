@@ -232,6 +232,40 @@ try:
     )
     assert_true("CountRows current ok", cr.count >= 3, f"count={cr.count}")
 
+    step("G. Upsert also bumps commit_seq")
+    upsert_ids = pa.array([1, 99], pa.int32())  # id=1 exists, id=99 new
+    upsert_vecs = np.random.rand(2, DIM).astype(np.float32)
+    upsert_fsl = pa.FixedSizeListArray.from_arrays(
+        pa.array(upsert_vecs.flatten().tolist(), pa.float32()), DIM
+    )
+    upsert_batch = pa.record_batch([upsert_ids, upsert_fsl], names=["id", "vector"])
+    u = stub.UpsertRows(
+        pb.UpsertRowsRequest(
+            table_name="t",
+            arrow_ipc_data=ipc_bytes(upsert_batch),
+            on_columns=["id"],
+        ),
+        timeout=10,
+    )
+    assert_eq("UpsertRows.error", u.error, "")
+    assert_true(
+        "UpsertRows commit_seq advances",
+        u.commit_seq > wr2.commit_seq,
+        f"prev={wr2.commit_seq} upsert={u.commit_seq}",
+    )
+
+    step("H. Delete also bumps commit_seq")
+    d = stub.DeleteRows(
+        pb.DeleteRowsRequest(table_name="t", filter="id = 99"),
+        timeout=10,
+    )
+    assert_eq("DeleteRows.error", d.error, "")
+    assert_true(
+        "DeleteRows commit_seq advances",
+        d.commit_seq > u.commit_seq,
+        f"prev={u.commit_seq} delete={d.commit_seq}",
+    )
+
 finally:
     c.send_signal(signal.SIGTERM)
     w.send_signal(signal.SIGTERM)

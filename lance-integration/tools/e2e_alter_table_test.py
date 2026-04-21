@@ -279,6 +279,36 @@ try:
     )
     assert_eq("CountRows min=1.count", count_ok.count, 3)
 
+    step("G. AlterTable with multiple columns at once")
+    multi_schema = pa.schema([
+        pa.field("country", pa.string(), nullable=True),
+        pa.field("revenue", pa.float64(), nullable=True),
+    ])
+    multi = stub.AlterTable(
+        pb.AlterTableRequest(
+            table_name="t",
+            add_columns_arrow_ipc=schema_ipc(multi_schema),
+            expected_schema_version=3,
+        ),
+        timeout=20,
+    )
+    assert_eq("AlterTable multi.error", multi.error, "")
+    assert_eq("AlterTable multi.new_v", multi.new_schema_version, 4)
+
+    step("H. Retry same AlterTable is idempotent (columns already exist)")
+    # Same columns, correct expected_v=4 — should succeed with v=5
+    # because worker-side skips already-present columns and returns OK.
+    retry = stub.AlterTable(
+        pb.AlterTableRequest(
+            table_name="t",
+            add_columns_arrow_ipc=schema_ipc(multi_schema),
+            expected_schema_version=4,
+        ),
+        timeout=20,
+    )
+    assert_eq("AlterTable retry.error", retry.error, "")
+    assert_eq("AlterTable retry.new_v", retry.new_schema_version, 5)
+
 finally:
     c.send_signal(signal.SIGTERM)
     w.send_signal(signal.SIGTERM)
