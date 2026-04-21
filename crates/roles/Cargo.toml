@@ -37,6 +37,7 @@ tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 tonic-prost = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
+thiserror = "1"
 
 # PE-side Lance runtime wants its own DataFusion SessionContext.
 # Kept at workspace version so the major bumps land in one place.
