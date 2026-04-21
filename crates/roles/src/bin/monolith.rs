@@ -136,7 +136,13 @@ fn parse_cli_from(args: &[String]) -> Result<Cli, String> {
 /// Validate a parsed Cli independent of the loaded config. Returns
 /// Err with an operator-facing message when the combination is
 /// untenable — currently only port collisions between the gRPC /
-/// REST / worker trio.
+/// REST / CP / worker quartet hosted inside one process.
+///
+/// Port convention (monolith only):
+///   coord_port       — Scheduler gRPC  (QN-facing)
+///   coord_port + 1   — REST / /metrics
+///   coord_port + 2   — ClusterControl + NodeLifecycle gRPC (CP)
+///   worker_port      — Executor gRPC  (PE)
 fn validate_cli_ports(cli: &Cli) -> Result<(), String> {
     if cli.coord_port == cli.worker_port {
         return Err(format!(
@@ -147,8 +153,15 @@ fn validate_cli_ports(cli: &Cli) -> Result<(), String> {
     if cli.coord_port + 1 == cli.worker_port {
         return Err(format!(
             "--worker-port {} collides with coord REST (coord_port+1 = {}). \
-             Choose worker-port >= coord-port + 2, or adjust coord-port.",
+             Choose worker-port >= coord-port + 3, or adjust coord-port.",
             cli.worker_port, cli.coord_port + 1
+        ));
+    }
+    if cli.coord_port + 2 == cli.worker_port {
+        return Err(format!(
+            "--worker-port {} collides with CP gRPC (coord_port+2 = {}). \
+             Choose worker-port >= coord-port + 3, or adjust coord-port.",
+            cli.worker_port, cli.coord_port + 2
         ));
     }
     Ok(())
@@ -227,44 +240,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_cli_ports(&cli).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     info!(
-        "lance-monolith '{}' starting: coord :{} + worker :{} ({} tables, {} executors)",
-        instance_id, cli.coord_port, cli.worker_port,
+        "lance-monolith '{}' starting: coord :{} + worker :{} + cp :{} ({} tables, {} executors)",
+        instance_id, cli.coord_port, cli.worker_port, cli.coord_port + 2,
         config.tables.len(), config.executors.len()
     );
 
+    // CP gets its own ShutdownSignal. A small SIGTERM/SIGINT
+    // listener task notifies it in parallel with the signal
+    // handlers that qn_cp/pe_idx install internally. Three
+    // independent signal paths is wasteful but benign — Tokio
+    // multiplexes one OS handler.
+    let cp_shutdown = lance_distributed_roles::common::new_shutdown();
+    let cp_shutdown_for_signal = cp_shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            } else {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        cp_shutdown_for_signal.notify_waiters();
+    });
+
+    let cp_port = cli.coord_port + 2;
     let coord_future = lance_distributed_roles::qn_cp::run(
         config.clone(),
         cli.coord_port,
         instance_id,
     );
     let worker_future = lance_distributed_roles::pe_idx::run(
-        config,
+        config.clone(),
         worker_id,
         cli.worker_port,
     );
-
-    // Both futures install their own SIGTERM / ctrl_c handlers via
-    // tokio::signal. Tokio's signal machinery shares a single OS
-    // handler across all waiters, so one SIGTERM notifies both
-    // futures and they drain in parallel. Propagate the first error
-    // seen; if the other future is still draining cleanly we let it
-    // finish — but cap the wait to avoid hanging the monolith when
-    // a runner panics unrecoverably.
-    //
-    // We use try_join rather than select: select would drop the
-    // still-running future (abandoning its drain), which loses
-    // in-flight requests on the other role.
-    let cap = Duration::from_secs(
-        config_query_timeout_secs_safe() * 2 + 10,
+    let cp_future = lance_distributed_roles::cp::run(
+        config,
+        cp_port,
+        cp_shutdown,
     );
+
+    // try_join3 waits for all three roles to drain. select would
+    // drop the still-running futures on first exit, abandoning
+    // in-flight drains on the other roles.
+    let cap = Duration::from_secs(config_query_timeout_secs_safe() * 2 + 10);
     let joined = tokio::time::timeout(cap, async {
-        tokio::try_join!(coord_future, worker_future)
+        tokio::try_join!(coord_future, worker_future, cp_future)
     })
     .await;
 
     match joined {
-        Ok(Ok(((), ()))) => {
-            info!("lance-monolith: both roles drained cleanly");
+        Ok(Ok(((), (), ()))) => {
+            info!("lance-monolith: all roles drained cleanly");
             Ok(())
         }
         Ok(Err(e)) => {
@@ -417,9 +453,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_ports_accepts_safe_gap() {
+    fn validate_ports_rejects_cp_collision() {
+        // coord_port+2 == worker_port — CP gRPC would collide with worker
         let cli = parse_cli_from(&args(&[
             "c.yaml", "--coord-port", "5050", "--worker-port", "5052",
+        ])).unwrap();
+        let err = validate_cli_ports(&cli).unwrap_err();
+        assert!(err.contains("CP"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ports_accepts_safe_gap() {
+        // coord + 3 is the smallest legal gap after adding CP at +2.
+        let cli = parse_cli_from(&args(&[
+            "c.yaml", "--coord-port", "5050", "--worker-port", "5053",
         ])).unwrap();
         assert!(validate_cli_ports(&cli).is_ok());
     }

@@ -35,6 +35,8 @@ lance-distributed-worker = { path = "../worker" }
 tokio = { workspace = true, features = ["full"] }
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 tonic-prost = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
 
 # PE-side Lance runtime wants its own DataFusion SessionContext.
 # Kept at workspace version so the major bumps land in one place.
@@ -45,6 +47,11 @@ rustls = { version = "0.23", features = ["ring"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 serde_yaml = "0.9"
+
+# Phase C.3 CP server: SubscribeRouting returns a streaming response,
+# which needs a Stream adapter around an mpsc receiver. Already a
+# workspace dep so nothing new hits the lockfile.
+tokio-stream = { workspace = true }
 
 # Match coordinator's optional OTLP support. With feature parity the
 # monolith binary (Phase B) can enable otel via the same cargo flag.
