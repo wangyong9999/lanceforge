@@ -165,24 +165,30 @@ CP ──► MetaStore (CAS)
 - CP 挂掉场景 QN 仍服务 30s
 - E2E 全绿
 
-### Phase D — IDX 独立 + JobQueue（2 周）
+### Phase D — **Deferred to 0.3**（原计划：JobQueue + async DDL，2 周）
 
-**目标**：Indexer 独立进程；从 CP 领 compact / index-build / orphan-gc job。
+**Re-scope 决策（C.5 完成后）**：Phase D 的 JobQueue + async DDL 原始
+scope 推迟到 0.3。理由：
 
-**改动**：
-- 新 proto `JobQueue` service：`Lease` / `Renew` / `Complete` / `Fail`
-- worker（PE）不再自己 compact
-- CP 实现 job lease / renew / TTL-based key on MetaStore
-- IDX long-poll lease
-- `orphan_gc` 从 coord 后台 → CP 入队 → IDX 执行
-- `create_index` RPC 由 CP 入队
+- **真正的 IDX 隔离**（= 混合 RW P99 改善）由 **Phase E 的 4-binary 拆分**
+  交付，不依赖 JobQueue。Job queue 只在**多 IDX worker 竞争同一任务**
+  时必要——当前部署规模下零客户诉求。
+- **Async DDL**（CreateIndexAsync 返 job_id）是性能优化。现有同步
+  `execute_create_index` 延迟可控；长 DDL 是 0.3 话题。
+- **最小代码路径**：Phase D 原 scope 会新增 1 个 proto、2 个 MetaStore
+  key family、4 个 RPC 方法、1 个 IDX 独立 runner。Phase E 本身就要
+  拆 IDX，这里的工作会重复。
 
-**风险**：R2.5 — 重复 compact 浪费 compute。Chaos：kill IDX 中途，job 在 < 2× TTL 内被接管。
+**仍在 Phase E 内完成的**（原 Phase D 的核心价值）：
+- `pe_idx::run` 拆成 `pe::run` + `idx::run`（独立 runner）
+- `lance-idx` 独立 bin
+- 混合 RW P99 改善 bench（Phase F gate）
 
-**退出**：
-- 24h soak 里 compact 不影响 query P99 > 5%
-- Chaos 测试通过
-- Grafana 加 IDX backlog 面板
+**推迟到 0.3 的（明确 backlog）**：
+- JobQueue proto + CP-side lease/renew
+- IDX long-poll lease（多实例竞争）
+- Async CreateIndex API
+- orphan_gc via JobQueue（当前 coord 后台任务已 OK）
 
 ### Phase E — 四 binary 发布（1 周）
 
