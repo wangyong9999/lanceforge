@@ -24,7 +24,7 @@
 - `scatter_gather.rs` 新增 12 个 end-to-end 测试覆盖：table-not-found / all-unhealthy / all-failed / partial-failure warning / IPC decode error / empty responses / merge-by-distance vs merge-by-score / outer timeout wrapper / trace_id injection / straggler warn 分支。
 - `connection_pool.rs` 新增 6 个 live-network 测试覆盖：connect_all 成功 / unreachable endpoint 跳过 / health_check_loop unhealthy 翻转 / remove_threshold 移除 / shutdown 停环 / LoadShard 恢复。
 - **Bug 发现 → 修复**：`health_check_loop` 的 Healthy 分支在 shard recovery 时持有 `workers` 写锁去调用 `self.get_healthy_client()`（读锁），tokio RwLock 是 write-preferring + 非 reentrant → 死锁。生产条件：shard_state 已接入 + 某个 worker 重启后 shard_names 少于分配。修复：先释放写锁再进入 recovery。
-- **行为纪要**（未改代码，仅测试中 pin 住现状）：`remove_threshold > unhealthy_threshold` 时移除分支实际不可达——worker 一旦翻到 !healthy，下一 tick 走 reconnect 路径而非 ping，失败计数不再增长。生产默认 (3, 5) 下永不触发。留作后续修复：reconnect 失败也计入 consecutive_failures。
+- **Bug 发现 → 修复 #2**：`remove_threshold > unhealthy_threshold` 时移除分支实际不可达——worker 一旦翻到 !healthy，下一 tick 走 reconnect 路径而非 ping，且 reconnect 失败不计入 `consecutive_failures`。生产默认 (3, 5) 下**永不触发**，永久离线的 worker 永远不会被驱逐。修复：reconnect 失败时也 push `Failed` 让计数继续累加；对"从未连上过"的 worker，Failed 分支 `get_mut` 返回 None 自然 no-op，行为不变。新增 test `test_permanently_offline_worker_is_evicted_at_remove_threshold` 作为回归保护。
 
 ## 二、缺口分析
 

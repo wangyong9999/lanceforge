@@ -323,6 +323,18 @@ impl ConnectionPool {
                             host: host.clone(),
                             port: *port,
                         }));
+                    } else {
+                        // Reconnect failed. Count this as a Failed tick so
+                        // `consecutive_failures` keeps climbing past
+                        // `unhealthy_threshold` towards `remove_threshold`.
+                        // Without this branch a permanently-offline worker
+                        // pegged at `unhealthy` never gets evicted: the
+                        // Failed path only runs on the ping side, which
+                        // we never take once !healthy. For a never-yet-
+                        // connected worker the Failed arm is a no-op
+                        // (get_mut returns None), so this only removes
+                        // workers that were once healthy and then died.
+                        results.push((wid.clone(), HealthCheckResult::Failed));
                     }
                     continue;
                 }
@@ -809,17 +821,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_check_removes_after_remove_threshold() {
-        // Coverage note: in the current code, a worker that flips to
-        // !healthy takes the reconnect path on the next tick instead of
-        // continuing to ping, so `consecutive_failures` stops climbing
-        // once it crosses `unhealthy_threshold`. That means
-        // `remove_threshold > unhealthy_threshold` is effectively
-        // unreachable in any scenario — the removal branch only fires
-        // when the two thresholds coincide. We pin that behaviour here
-        // (remove == unhealthy == 2); once someone changes the loop to
-        // also count reconnect-failure towards removal the assertion
-        // will still hold, and this test stops double-covering the same
-        // tick.
+        // Mock stays up but returns Err on every health_check. With the
+        // fix that counts reconnect-failure as a Failed tick, this case
+        // still works when (unhealthy, remove) coincide — the first
+        // two pings fail, failures reach unhealthy_threshold=2 and
+        // remove_threshold=2 in the same tick, worker evicted.
         let hc = HealthCheckConfig {
             interval_secs: 1,
             unhealthy_threshold: 2,
@@ -861,6 +867,59 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(saw_removed, "expected worker to be removed after remove_threshold failures");
+    }
+
+    #[tokio::test]
+    async fn test_permanently_offline_worker_is_evicted_at_remove_threshold() {
+        // Production defaults (unhealthy=3, remove=5) were effectively
+        // dead code before: once a worker flipped to !healthy, the loop
+        // stopped counting ping-side failures, and reconnect-side
+        // failures weren't counted at all — so a permanently-offline
+        // worker was pegged at unhealthy and never evicted. This test
+        // pins the fixed behaviour: kill the mock, and within
+        // ~remove_threshold × interval seconds the worker is removed.
+        let hc = HealthCheckConfig {
+            interval_secs: 1,
+            unhealthy_threshold: 2,
+            remove_threshold: 4,
+            refresh_interval_secs: 1,
+            reconciliation_interval_secs: 1,
+            connect_timeout_secs: 1,
+            ping_timeout_secs: 1,
+        };
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let port = mock.port;
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), port));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &hc, &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        // Take the mock offline. The listener closes; future connect()
+        // attempts will fail with ConnectionRefused, and pings on the
+        // last-known channel will fail too.
+        drop(mock);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut saw_removed = false;
+        while Instant::now() < deadline {
+            {
+                let workers = pool.workers.read().await;
+                if !workers.contains_key("w0") {
+                    saw_removed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(saw_removed,
+            "a permanently-offline worker must be evicted once consecutive_failures ≥ remove_threshold");
     }
 
     #[tokio::test]
