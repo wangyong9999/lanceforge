@@ -80,7 +80,25 @@ EOF
 sleep 3
 ```
 
-架构：`lance-coordinator` / `lance-worker` 保持行为兼容，beta.5-beta.6 期间 monolith 和双进程并存。详见 `docs/ARCHITECTURE_V2_PLAN.md`。
+架构：`lance-coordinator` / `lance-worker` 保持行为兼容，beta.5-beta.6 期间 monolith 和双进程并存。详见 `docs/ARCHITECTURE_V2.md`。
+
+**运维拆分模式**（生产，Phase E 起）：当需要 CP 或 IDX 独立扩缩容时：
+
+```bash
+# Worker 关闭 inline compaction (在 config.yaml 里设 compaction.enabled: false)
+./target/release/lance-worker $BASE/config.yaml w0 9100 &
+
+# Coordinator 正常
+./target/release/lance-coordinator $BASE/config.yaml 9200 &
+
+# 独立 CP（可选，目前主要被 RoutingClient 消费，0.3 才成为主路径）
+./target/release/lance-cp $BASE/config.yaml 50052 &
+
+# 独立 IDX：只跑 compaction，不抢 worker 的查询 CPU
+./target/release/lance-idx $BASE/config.yaml &
+```
+
+`lance-qn` 和 `lance-pe` 独立 bin 推迟到 0.3（需要 `CoordinatorService` 重构把 auth/audit/orphan_gc 搬到 CP-side）。
 
 健康检查：
 

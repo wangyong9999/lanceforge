@@ -1,8 +1,32 @@
-# LanceForge v2 架构演进计划
+# LanceForge v2 架构：已交付 + 未交付
 
-**建档时间**：2026-04-21
-**目标版本线**：beta.5（Phase A-B）→ beta.6 experimental（C-D）→ beta.7 stable（E-F）→ 0.3（移除旧二进制）
-**对应 ROADMAP 项**：取代 `ROADMAP_0.2.md` §B1 的 "SaaS 无状态化完整性审计" — v2 在无状态基础上进一步把角色物理拆开
+**建档时间**：2026-04-21（初稿） → 2026-04-21（Phase F 最终化）
+**当前状态**：Phase A-C + E 已落地；Phase D re-scoped 到 0.3；Phase F 完成文档与回归收敛
+**对应 ROADMAP 项**：取代 `ROADMAP_0.2.md` §B1 的 "SaaS 无状态化完整性审计"
+
+## 执行总结
+
+v2 把 LanceForge 从 "coord + worker 双层" 拆成 "QN + PE + IDX + CP 四角色"
+的组合架构。已交付：
+
+- `crates/roles` 作为角色组合层（`47963da`）
+- `lance-monolith` 单进程 all-in-one 二进制（`fa61a22`）
+- `ClusterControl` + `NodeLifecycle` gRPC proto（`67fc8f1`）
+- MetaStore schema 集中存储层（`6eaf4a0`）
+- CP library + monolith 集成（`82d0f0d`）
+- QN-side RoutingClient + TTL cache + stale-while-error（`cb2bcef`）
+- Chaos 测试（`6142dfb`）
+- `lance-cp` + `lance-idx` 独立 bin（Phase E）
+
+5 个 bin 可独立部署：`lance-coordinator`, `lance-worker`, `lance-monolith`,
+`lance-cp`, `lance-idx`。
+
+**推迟到 0.3**（明确 backlog）：
+- `lance-qn` + `lance-pe` 独立 bin（需要 `CoordinatorService` 重构）
+- JobQueue proto + async DDL（原 Phase D 核心）
+- Runtime-created table 的 IDX 自动发现（需 MetaStore poll）
+- 4-Deployment Helm chart 模板
+- 跨 shard 事务原语（global commit_seq / partition pruning）
 
 ---
 
@@ -190,18 +214,37 @@ scope 推迟到 0.3。理由：
 - Async CreateIndex API
 - orphan_gc via JobQueue（当前 coord 后台任务已 OK）
 
-### Phase E — 四 binary 发布（1 周）
+### Phase E — 独立 CP / IDX binary（1 周，re-scoped post-C）
 
-**目标**：发布 `lance-qn` / `lance-pe` / `lance-idx` / `lance-cp`；Helm chart 更新；旧 bin 加 deprecation warning。
+**Re-scope 决策**：原计划 4 个 bin（qn/pe/idx/cp）。实际 `qn_cp::run` 把
+auth hot-reload / audit sink / orphan GC / REST server 全包在一个
+`CoordinatorService` 里，干净剥 QN 出 CP 是多周重构。Phase E 聚焦
+**真带来部署价值**的两个 bin：
+
+**目标**：`lance-cp` + `lance-idx` 两个独立 bin，让运维可以把它们各自
+扩展。`lance-coordinator` / `lance-worker` / `lance-monolith` 继续保
+持现状。
 
 **改动**：
-- 4 bin crate，每个 10-20 行 wrapper
-- Helm chart 新增 4 个 Deployment/StatefulSet
-- coord/worker 启动打 deprecation log
+- 新 `[[bin]]` `lance-cp` — wraps `cp::run` (C.3)
+- 新 `[[bin]]` `lance-idx` + 实现 `idx::run` — 从 `pe_idx` 抽出 compaction
+  循环到独立可运行的 runner
+- `pe_idx::run` 继续默认 inline compaction（向后兼容）；运维通过
+  `compaction.enabled: false` 关闭 inline + 外部跑 `lance-idx` 来做
+  真正 CPU 隔离
+
+**推迟到 0.3（明确 backlog）**：
+- `lance-qn` / `lance-pe` bins — 需要 `CoordinatorService` 重构把
+  auth/audit/orphan_gc 搬到 CP-side
+- Helm chart 完整的 4-Deployment 模板
+- Per-role HPA metrics（IDX backlog 在当前架构下等同"上一轮 compact
+  秒数"，真指标需要 JobQueue）
 
 **退出**：
-- K8s 多 pod 4-binary 跑通 E2E
-- HPA metrics 接到 Prometheus（QN HTTP QPS / PE read_lat / IDX backlog）
+- `lance-cp` 启动正常，暴露 ClusterControl on configured port
+- `lance-idx` 启动正常，周期 compact 所有 config 指定的 shards
+- Monolith E2E 覆盖 cp + idx 仍正常；独立 `lance-cp` bin 也
+  能被 `RoutingClient` 连通（Phase C.4 的客户端直接可用）
 
 ### Phase F — 迁移文档 + 性能验证（1 周）
 
