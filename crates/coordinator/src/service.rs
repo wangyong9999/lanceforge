@@ -74,6 +74,12 @@ pub struct CoordinatorService {
     /// also appends a JSONL record to the configured path (local file or
     /// OBS URI).
     audit_sink: Option<lance_distributed_common::audit::AuditSink>,
+    /// #5.2 DDL lease holder identifier for multi-coordinator
+    /// deployments. Defaults to `coord-{pid}`. qn_cp::run overrides
+    /// with the operator-provided instance_id so lease logs identify
+    /// the owning pod cleanly. Used as the lease `holder` field in
+    /// `ddl_lease/{table}`.
+    instance_id: String,
 }
 
 /// How long a completed write's request_id stays deduplicatable.
@@ -280,7 +286,16 @@ impl CoordinatorService {
             ddl_locks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             write_dedup: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             audit_sink: None,
+            instance_id: format!("coord-{}", std::process::id()),
         }
+    }
+
+    /// Set the DDL lease holder id for multi-coord deployments. qn_cp
+    /// calls this with the operator-provided instance_id so lease
+    /// held-by diagnostics carry the pod name / cluster id.
+    pub fn with_instance_id(mut self, id: String) -> Self {
+        self.instance_id = id;
+        self
     }
 
     /// Install a persistent audit sink (G7). Every subsequent `audit()`
@@ -308,6 +323,39 @@ impl CoordinatorService {
             .get(table)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// #5.2 Acquire a cross-coordinator DDL lease for `table`. Only
+    /// active when MetaStore is configured — standalone / static
+    /// deployments fall back to the per-coord `ddl_locks`. Translates
+    /// `AcquireError::Held` into `Status::failed_precondition` with
+    /// the current holder id so clients get an actionable retry
+    /// signal. `None` return means no MetaStore; caller proceeds
+    /// with only the per-coord lock.
+    async fn acquire_ddl_lease(
+        &self,
+        table: &str,
+    ) -> Result<Option<lance_distributed_meta::ddl_lease::DdlLease>, Status> {
+        let Some(ref ms) = self.meta_state else {
+            return Ok(None);
+        };
+        match lance_distributed_meta::ddl_lease::acquire(
+            ms.store(),
+            table,
+            &self.instance_id,
+            None,
+        )
+        .await
+        {
+            Ok(lease) => Ok(Some(lease)),
+            Err(lance_distributed_meta::ddl_lease::AcquireError::Held { holder, age_ns }) => {
+                Err(Status::failed_precondition(format!(
+                    "DDL in progress on '{table}' (held by '{holder}', {}ms old). Retry shortly.",
+                    age_ns / 1_000_000
+                )))
+            }
+            Err(e) => Err(Status::internal(format!("ddl lease: {e}"))),
+        }
     }
 
     /// Build a handle that background tasks (orphan GC, etc.) can hold
@@ -1080,8 +1128,13 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
-        // DDL serialization: prevent concurrent CreateTable on same name
+        // DDL serialization: prevent concurrent CreateTable on same name.
+        // Local mutex first (fast path within a single coord); then the
+        // distributed lease for cross-coord correctness (#5.2). When no
+        // MetaStore is configured the lease is a no-op and we fall back
+        // to per-coord semantics.
         let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
         // Check if table already exists
         if !self.shard_state.get_shard_routing(&req.table_name).await.is_empty() {
             return Err(Status::already_exists(format!("Table '{}' already exists", req.table_name)));
@@ -1265,6 +1318,14 @@ impl LanceSchedulerService for CoordinatorService {
             if !req.on_columns.is_empty() { format!(", on_columns={:?}", req.on_columns) } else { String::new() }
         );
 
+        // Release the DDL lease promptly on success so the next DDL
+        // doesn't wait for TTL. Failures drop the handle and fall
+        // back to TTL expiry — cheaper than threading release through
+        // every error path.
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
+
         Ok(Response::new(pb::CreateTableResponse {
             table_name: req.table_name.clone(),
             num_rows,
@@ -1312,6 +1373,7 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::invalid_argument("table_name required"));
         }
         let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
         // Tell all workers (primary + secondary) to unload shards for this table
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         for (shard_name, primary, secondary) in &routing {
@@ -1360,6 +1422,9 @@ impl LanceSchedulerService for CoordinatorService {
         // Clean up DDL lock to prevent leak
         self.ddl_locks.write().await.remove(&req.table_name);
         info!("Dropped table '{}' (purged {} shard(s) from storage)", req.table_name, shard_uris.len());
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
         Ok(Response::new(pb::DropTableResponse { error: String::new() }))
     }
 
@@ -1376,6 +1441,12 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() || req.column.is_empty() {
             return Err(Status::invalid_argument("table_name and column required"));
         }
+
+        // #5.2 DDL lease — prevents concurrent CreateIndex on the
+        // same table from a peer coord (would otherwise race on
+        // Lance manifest CAS, wasting compute).
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
 
         // Fan out to all workers to create index on their local shards
         let executors = self.shard_state.executors_for_table(&req.table_name).await;
@@ -1406,6 +1477,9 @@ impl LanceSchedulerService for CoordinatorService {
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
         info!("CreateIndex on '{}' column '{}': {}", req.table_name, req.column,
             if error.is_empty() { "success" } else { &error });
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
         Ok(Response::new(pb::CreateIndexResponse { error }))
     }
 

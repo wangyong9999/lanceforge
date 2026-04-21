@@ -11,3 +11,4 @@ pub mod session;
 pub mod shard_manager;
 pub mod state;
 pub mod schema_store;
+pub mod ddl_lease;

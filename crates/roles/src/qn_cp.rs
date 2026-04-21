@@ -72,6 +72,10 @@ pub async fn run(
     } else {
         CoordinatorService::new(&config, query_timeout)
     };
+    // #5.2 DDL lease holder id. Identifies this coord in lease
+    // records so peers see a readable "held by <instance>" message
+    // instead of a pid.
+    service = service.with_instance_id(instance_id.clone());
 
     // ── CP: build auth registry ────────────────────────────────────
     // Build RBAC interceptor: prefer `api_keys_rbac`, fall back to legacy `api_keys`.
