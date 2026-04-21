@@ -161,6 +161,12 @@ message AnnSearchRequest {
   int32 metric_type = 9;       // 0=L2, 1=Cosine, 2=Dot
   optional string query_text = 10;  // If set, auto-embed to vector (requires embedding model config)
   uint32 offset = 11;          // Pagination: skip the first N globally-merged hits (0 = first page)
+  // #5.4 Schema-version consistency guard. 0 (default) = no check.
+  // Non-zero → coord rejects with FailedPrecondition when its
+  // current schema_version < this value. Useful for read-your-DDL-
+  // writes after AlterTable. Full time-travel to older versions
+  // (checkout <= N) is 0.3 work.
+  uint64 min_schema_version = 12;
 }
 
 message FtsSearchRequest {
@@ -171,6 +177,7 @@ message FtsSearchRequest {
   optional string filter = 5;
   repeated string columns = 6;
   uint32 offset = 7;
+  uint64 min_schema_version = 8; // #5.4: same guard semantics as AnnSearchRequest.
 }
 
 message HybridSearchRequest {
@@ -189,6 +196,7 @@ message HybridSearchRequest {
   repeated string columns = 10;
   int32 metric_type = 11;
   uint32 offset = 12;
+  uint64 min_schema_version = 13; // #5.4
 }
 
 message GetByIdsRequest {
@@ -439,6 +447,7 @@ message ColumnInfo {
 message CountRowsRequest {
   string table_name = 1;
   optional string filter = 2;    // Optional SQL WHERE filter
+  uint64 min_schema_version = 3; // #5.4
 }
 
 message CountRowsResponse {

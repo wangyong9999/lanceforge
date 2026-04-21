@@ -325,6 +325,40 @@ impl CoordinatorService {
             .unwrap_or_default()
     }
 
+    /// #5.4 Schema-version consistency guard.
+    ///
+    /// If `min > 0`, verify `current_schema_version(table) >= min`.
+    /// Fails with FailedPrecondition when the coord's view is
+    /// behind. Used by read RPCs for read-your-DDL-writes after a
+    /// client AlterTable returned `new_schema_version = N`.
+    ///
+    /// No-op when `min == 0` (default) or no MetaStore is configured
+    /// (static-config deployments don't track schema versions).
+    async fn check_min_schema_version(&self, table: &str, min: u64) -> Result<(), Status> {
+        if min == 0 {
+            return Ok(());
+        }
+        let Some(ref ms) = self.meta_state else {
+            return Err(Status::failed_precondition(
+                "min_schema_version requires a configured metadata_path",
+            ));
+        };
+        let schema_store =
+            lance_distributed_meta::schema_store::SchemaStore::new(ms.store());
+        let current = schema_store
+            .latest_version(table)
+            .await
+            .map_err(|e| Status::internal(format!("schema_store: {e}")))?
+            .unwrap_or(0);
+        if current < min {
+            return Err(Status::failed_precondition(format!(
+                "min_schema_version {} not satisfied; current = {}",
+                min, current
+            )));
+        }
+        Ok(())
+    }
+
     /// #5.2 Acquire a cross-coordinator DDL lease for `table`. Only
     /// active when MetaStore is configured — standalone / static
     /// deployments fall back to the per-coord `ddl_locks`. Translates
@@ -657,6 +691,12 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        // #5.4 Schema-version guard.
+        self.check_min_schema_version(
+            &request.get_ref().table_name,
+            request.get_ref().min_schema_version,
+        )
+        .await?;
         // B1: snapshot the incoming trace_id before into_inner() consumes
         // the Request. None when the client didn't send a traceparent.
         let trace_id = extract_trace_id(&request);
@@ -724,6 +764,11 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        self.check_min_schema_version(
+            &request.get_ref().table_name,
+            request.get_ref().min_schema_version,
+        )
+        .await?;
         let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
@@ -763,6 +808,11 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<SearchResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        self.check_min_schema_version(
+            &request.get_ref().table_name,
+            request.get_ref().min_schema_version,
+        )
+        .await?;
         let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
@@ -1709,6 +1759,11 @@ impl LanceSchedulerService for CoordinatorService {
     ) -> Result<Response<pb::CountRowsResponse>, Status> {
         self.check_perm(&request, super::auth::Permission::Read)?;
         self.check_ns(&request, &request.get_ref().table_name)?;
+        self.check_min_schema_version(
+            &request.get_ref().table_name,
+            request.get_ref().min_schema_version,
+        )
+        .await?;
         let req = request.into_inner();
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {

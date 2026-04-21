@@ -232,6 +232,53 @@ try:
     )
     assert_eq("AlterTable.v2→v3", newer.new_schema_version, 3)
 
+    step("F. Read with min_schema_version guard (#5.4)")
+    # Current schema is v=3. A read with min=3 must succeed.
+    ok_search = stub.AnnSearch(
+        pb.AnnSearchRequest(
+            table_name="t",
+            vector_column="vector",
+            query_vector=query_vec,
+            dimension=DIM,
+            k=3,
+            min_schema_version=3,
+        ),
+        timeout=10,
+    )
+    assert_eq("AnnSearch min=3.error", ok_search.error, "")
+    assert_true(
+        "AnnSearch min=3 returns rows",
+        ok_search.num_rows >= 1,
+        f"num_rows={ok_search.num_rows}",
+    )
+
+    # min=99 must fail.
+    try:
+        stub.AnnSearch(
+            pb.AnnSearchRequest(
+                table_name="t",
+                vector_column="vector",
+                query_vector=query_vec,
+                dimension=DIM,
+                k=3,
+                min_schema_version=99,
+            ),
+            timeout=10,
+        )
+        print("  FAIL min=99 should have been rejected")
+        results["failed"] += 1
+    except grpc.RpcError as e:
+        assert_eq(
+            "min=99 code", e.code(), grpc.StatusCode.FAILED_PRECONDITION
+        )
+
+    # CountRows with min_schema_version also honored.
+    count_ok = stub.CountRows(
+        pb.CountRowsRequest(table_name="t", min_schema_version=1),
+        timeout=10,
+    )
+    assert_eq("CountRows min=1.count", count_ok.count, 3)
+
 finally:
     c.send_signal(signal.SIGTERM)
     w.send_signal(signal.SIGTERM)

@@ -167,6 +167,13 @@ pub struct AnnSearchRequest {
     /// Pagination: skip the first N globally-merged hits (0 = first page)
     #[prost(uint32, tag = "11")]
     pub offset: u32,
+    /// \#5.4 Schema-version consistency guard. 0 (default) = no check.
+    /// Non-zero → coord rejects with FailedPrecondition when its
+    /// current schema_version \< this value. Useful for read-your-DDL-
+    /// writes after AlterTable. Full time-travel to older versions
+    /// (checkout \<= N) is 0.3 work.
+    #[prost(uint64, tag = "12")]
+    pub min_schema_version: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FtsSearchRequest {
@@ -184,6 +191,9 @@ pub struct FtsSearchRequest {
     pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint32, tag = "7")]
     pub offset: u32,
+    /// \#5.4: same guard semantics as AnnSearchRequest.
+    #[prost(uint64, tag = "8")]
+    pub min_schema_version: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HybridSearchRequest {
@@ -214,6 +224,9 @@ pub struct HybridSearchRequest {
     pub metric_type: i32,
     #[prost(uint32, tag = "12")]
     pub offset: u32,
+    /// \#5.4
+    #[prost(uint64, tag = "13")]
+    pub min_schema_version: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetByIdsRequest {
@@ -594,6 +607,9 @@ pub struct CountRowsRequest {
     /// Optional SQL WHERE filter
     #[prost(string, optional, tag = "2")]
     pub filter: ::core::option::Option<::prost::alloc::string::String>,
+    /// \#5.4
+    #[prost(uint64, tag = "3")]
+    pub min_schema_version: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CountRowsResponse {
