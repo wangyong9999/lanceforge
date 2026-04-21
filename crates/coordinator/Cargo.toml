@@ -54,3 +54,4 @@ otel = [
 [dev-dependencies]
 proptest = "1"
 tempfile = { workspace = true }
+tokio-stream = { workspace = true }

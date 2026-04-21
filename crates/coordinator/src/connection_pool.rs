@@ -366,13 +366,20 @@ impl ConnectionPool {
                         }
                     }
                     HealthCheckResult::Healthy { loaded_shards, total_rows, shard_names } => {
-                        let mut workers = self.workers.write().await;
-                        if let Some(ws) = workers.get_mut(&wid) {
-                            ws.healthy = true;
-                            ws.last_check = Instant::now();
-                            ws.consecutive_failures = 0;
-                            ws.loaded_shards = loaded_shards;
-                            ws.total_rows = total_rows;
+                        // Release the write guard before recovery. Shard
+                        // recovery calls self.get_healthy_client(), which
+                        // takes a read lock on `workers`; tokio RwLock is
+                        // write-preferring and not reentrant, so holding
+                        // the write guard here deadlocks the health loop.
+                        {
+                            let mut workers = self.workers.write().await;
+                            if let Some(ws) = workers.get_mut(&wid) {
+                                ws.healthy = true;
+                                ws.last_check = Instant::now();
+                                ws.consecutive_failures = 0;
+                                ws.loaded_shards = loaded_shards;
+                                ws.total_rows = total_rows;
+                            }
                         }
                         // Shard recovery: check if worker is missing expected shards
                         if let Some(ref ss) = shard_state {
@@ -704,6 +711,264 @@ mod tests {
         // caller falls back to whatever bootstrapping path they have.
         let pool = make_pool(vec![("w0", "127.0.0.1", 50100)]);
         assert!(pool.get_shard_uri("any_shard").await.is_none());
+    }
+
+    // ── beta.5: live-network coverage for connect_all + health_check_loop ──
+    //
+    // These exercise the paths that unit-level getters above can't reach:
+    // real gRPC connect, periodic ping, unhealthy→removed transition,
+    // reconnect-after-down, and shard recovery via LoadShard.
+
+    use crate::test_support::{
+        spawn_mock_worker, HealthBehavior, MockState, MockWorkerHandle, SearchBehavior,
+    };
+    use lance_distributed_common::config::{HealthCheckConfig, ServerConfig};
+
+    fn fast_hc() -> HealthCheckConfig {
+        HealthCheckConfig {
+            interval_secs: 1,
+            unhealthy_threshold: 2,
+            remove_threshold: 4,
+            refresh_interval_secs: 1,
+            reconciliation_interval_secs: 1,
+            connect_timeout_secs: 1,
+            ping_timeout_secs: 1,
+        }
+    }
+
+    async fn wait_healthy(pool: &Arc<ConnectionPool>, wid: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let statuses = pool.worker_statuses().await;
+            if statuses.iter().any(|s| s.0 == wid && s.3) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn wait_unhealthy(pool: &Arc<ConnectionPool>, wid: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let statuses = pool.worker_statuses().await;
+            if statuses.iter().any(|s| s.0 == wid && !s.3) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn test_connect_all_populates_healthy_client() {
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 2, total_rows: 123, shard_names: vec!["s0".into(), "s1".into()] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), mock.port));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &fast_hc(), &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        // get_healthy_client returns a usable channel
+        let _client = pool.get_healthy_client("w0").await.expect("should be healthy");
+        // Health check seeded totals from HealthCheckResponse
+        let statuses = pool.worker_statuses().await;
+        let (_, _, _, healthy, _, loaded_shards, total_rows) = statuses[0].clone();
+        assert!(healthy);
+        assert_eq!(loaded_shards, 2);
+        assert_eq!(total_rows, 123);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_marks_unhealthy_after_failures() {
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), mock.port));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &fast_hc(), &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        // Flip mock to return Err on every health check — the pool should
+        // mark it unhealthy after unhealthy_threshold=2 consecutive failures.
+        state.set_health(HealthBehavior::Err).await;
+        assert!(wait_unhealthy(&pool, "w0", Duration::from_secs(5)).await,
+            "pool must see sustained health errors and flip healthy=false");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_removes_after_remove_threshold() {
+        // Coverage note: in the current code, a worker that flips to
+        // !healthy takes the reconnect path on the next tick instead of
+        // continuing to ping, so `consecutive_failures` stops climbing
+        // once it crosses `unhealthy_threshold`. That means
+        // `remove_threshold > unhealthy_threshold` is effectively
+        // unreachable in any scenario — the removal branch only fires
+        // when the two thresholds coincide. We pin that behaviour here
+        // (remove == unhealthy == 2); once someone changes the loop to
+        // also count reconnect-failure towards removal the assertion
+        // will still hold, and this test stops double-covering the same
+        // tick.
+        let hc = HealthCheckConfig {
+            interval_secs: 1,
+            unhealthy_threshold: 2,
+            remove_threshold: 2,
+            refresh_interval_secs: 1,
+            reconciliation_interval_secs: 1,
+            connect_timeout_secs: 1,
+            ping_timeout_secs: 1,
+        };
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), mock.port));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &hc, &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        state.set_health(HealthBehavior::Err).await;
+        // After 2 consecutive ping failures the Failed arm fires
+        // should_remove=true and the worker is evicted from `workers`.
+        // A later tick will see needs_connect=true and re-insert via
+        // Reconnected, so the window where contains_key is false can be
+        // brief; poll frequently enough to catch it.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut saw_removed = false;
+        while Instant::now() < deadline {
+            {
+                let workers = pool.workers.read().await;
+                if !workers.contains_key("w0") {
+                    saw_removed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(saw_removed, "expected worker to be removed after remove_threshold failures");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_stops_health_check_loop() {
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), mock.port));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &fast_hc(), &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        // Capture call counter, signal shutdown, verify it stops climbing.
+        pool.shutdown();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let calls_before = state.health_calls.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let calls_after = state.health_calls.load(std::sync::atomic::Ordering::SeqCst);
+        // Allow a tolerance of 1 for a just-in-flight ping that landed
+        // before the shutdown notify was observed.
+        assert!(
+            calls_after <= calls_before + 1,
+            "shutdown must stop the health loop (before={} after={})",
+            calls_before, calls_after
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_all_skips_unreachable_endpoint() {
+        // Port 1 on localhost is reliably unreachable. The pool should not
+        // insert a worker entry at all — worker_statuses shows the endpoint
+        // row but healthy=false.
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), 1u16));
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(5), &fast_hc(), &ServerConfig::default(),
+        ));
+        pool.start_background(None);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let statuses = pool.worker_statuses().await;
+        assert_eq!(statuses.len(), 1);
+        assert!(!statuses[0].3, "unreachable endpoint should not be healthy");
+    }
+
+    #[tokio::test]
+    async fn test_shard_recovery_triggers_load_shard_on_missing() {
+        // Worker reports empty shard_names during health_check; pool's
+        // recovery branch should call LoadShard for any assigned shard
+        // not listed. This requires wiring a shard_state + shard_uri
+        // registry into the pool.
+        use lance_distributed_common::config::{
+            ClusterConfig, ExecutorConfig, ShardConfig, TableConfig,
+        };
+        use lance_distributed_common::shard_state::StaticShardState;
+
+        let state = MockState::new(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        );
+        let mock = spawn_mock_worker(state.clone()).await;
+        let cluster = ClusterConfig {
+            tables: vec![TableConfig {
+                name: "t".into(),
+                shards: vec![ShardConfig {
+                    name: "s0".into(),
+                    uri: "/tmp/mock-s0".into(),
+                    executors: vec!["w0".into()],
+                }],
+            }],
+            executors: vec![ExecutorConfig {
+                id: "w0".into(),
+                host: "127.0.0.1".into(),
+                port: mock.port,
+                role: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let shard_state: Arc<dyn ShardState> = Arc::new(StaticShardState::from_config(&cluster));
+
+        let mut uris_map = HashMap::new();
+        uris_map.insert("s0".to_string(), "/tmp/mock-s0".to_string());
+        let shard_uris = Arc::new(tokio::sync::RwLock::new(uris_map));
+
+        let mut endpoints = HashMap::new();
+        endpoints.insert("w0".to_string(), ("127.0.0.1".to_string(), mock.port));
+        let pool = Arc::new(
+            ConnectionPool::new(endpoints, Duration::from_secs(5), &fast_hc(), &ServerConfig::default())
+                .with_shard_uris(shard_uris)
+        );
+        pool.start_background(Some(shard_state));
+        assert!(wait_healthy(&pool, "w0", Duration::from_secs(3)).await);
+
+        // Wait at least one health cycle for the recovery branch to fire.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_load = false;
+        while Instant::now() < deadline {
+            if state.load_shard_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                saw_load = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(saw_load, "expected at least one LoadShard to be issued");
     }
 
     #[tokio::test]

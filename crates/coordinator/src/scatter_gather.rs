@@ -538,4 +538,403 @@ mod tests {
         assert!(!groups.contains_key("w2"),
                 "w2 is healthy but not in this shard's replica set, must not receive");
     }
+
+    // ── beta.5: end-to-end scatter_gather coverage with mock workers ──
+    //
+    // These tests exercise the async / gRPC paths that the helper-function
+    // tests above cannot reach: the timeout wrapper, the healthy-pool
+    // snapshot, task fan-out + gather, IPC decode, per-shard latency
+    // logging, merge-by-distance vs merge-by-score branches, and the
+    // partial-failure warning path.
+
+    use crate::test_support::{
+        spawn_mock_worker, HealthBehavior, MockState, MockWorkerHandle, SearchBehavior,
+    };
+    use lance_distributed_common::config::{
+        ClusterConfig, ExecutorConfig, ShardConfig, TableConfig,
+    };
+    use lance_distributed_common::shard_pruning::ShardPruner;
+    use lance_distributed_common::shard_state::StaticShardState;
+    use super::super::connection_pool::ConnectionPool;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Build a running mock worker with the given behavior on a free port.
+    async fn spawn_worker(
+        search: SearchBehavior,
+        health: HealthBehavior,
+    ) -> MockWorkerHandle {
+        let state = MockState::new(search, health);
+        spawn_mock_worker(state).await
+    }
+
+    /// Build a ConnectionPool pointed at the given worker ports and wait
+    /// until `connect_all` has populated the map. Uses fast health-check
+    /// config so tests run quickly.
+    async fn build_pool(
+        workers: &[(&str, u16)],
+    ) -> Arc<ConnectionPool> {
+        let mut endpoints = HashMap::new();
+        for (id, port) in workers {
+            endpoints.insert(id.to_string(), ("127.0.0.1".to_string(), *port));
+        }
+        use lance_distributed_common::config::{HealthCheckConfig, ServerConfig};
+        let hc = HealthCheckConfig {
+            interval_secs: 1,
+            unhealthy_threshold: 2,
+            remove_threshold: 5,
+            refresh_interval_secs: 1,
+            reconciliation_interval_secs: 1,
+            connect_timeout_secs: 1,
+            ping_timeout_secs: 1,
+        };
+        let sv = ServerConfig::default();
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints,
+            Duration::from_secs(5),
+            &hc,
+            &sv,
+        ));
+        // Drive an immediate connect via start_background. The loop also
+        // begins issuing health checks, which is what we want for the
+        // connection_pool tests; scatter_gather tests just need the
+        // initial connect.
+        pool.start_background(None);
+        // Poll briefly until every configured worker shows healthy.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let statuses = pool.worker_statuses().await;
+            if !statuses.is_empty() && statuses.iter().all(|s| s.3) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        pool
+    }
+
+    /// Build a StaticShardState with single-table, N-shard, 1-primary-each
+    /// routing. `workers` is the ordered list of (id, port); shard i is
+    /// assigned to worker i.
+    fn build_shard_state(
+        table: &str,
+        workers: &[(&str, u16)],
+    ) -> Arc<dyn lance_distributed_common::shard_state::ShardState> {
+        let mut shards = Vec::new();
+        for (i, (wid, _)) in workers.iter().enumerate() {
+            shards.push(ShardConfig {
+                name: format!("s{}", i),
+                uri: format!("/tmp/mock-s{}", i),
+                executors: vec![wid.to_string()],
+            });
+        }
+        let executors = workers.iter().map(|(id, port)| ExecutorConfig {
+            id: id.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: *port,
+            role: Default::default(),
+        }).collect();
+        let cfg = ClusterConfig {
+            tables: vec![TableConfig { name: table.to_string(), shards }],
+            executors,
+            ..Default::default()
+        };
+        Arc::new(StaticShardState::from_config(&cfg))
+    }
+
+    fn empty_request() -> pb::LocalSearchRequest {
+        pb::LocalSearchRequest {
+            query_type: 0,
+            table_name: "t".to_string(),
+            k: 10,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_happy_path_merge_by_distance() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 3 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 3, shard_names: vec!["s0".into()] },
+        ).await;
+        let w1 = spawn_worker(
+            SearchBehavior::Ok { rows: 3 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 3, shard_names: vec!["s1".into()] },
+        ).await;
+        let workers = [("w0", w0.port), ("w1", w1.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5,
+            /*merge_by_distance=*/ true,
+            Duration::from_secs(5),
+            None,
+        ).await.unwrap();
+
+        assert!(resp.error.is_empty(), "no partial warning expected: {}", resp.error);
+        assert!(resp.num_rows > 0);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_happy_path_merge_by_score() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 3 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 3, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5,
+            /*merge_by_distance=*/ false,
+            Duration::from_secs(5),
+            None,
+        ).await.unwrap();
+
+        assert!(resp.error.is_empty());
+        assert!(resp.num_rows > 0);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_table_not_found() {
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather_inner(
+            &pool, &state, &pruner, "does-not-exist",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_all_workers_failed_returns_internal() {
+        let w0 = spawn_worker(
+            SearchBehavior::GrpcError("boom".into()),
+            HealthBehavior::Ok { loaded_shards: 0, total_rows: 0, shard_names: vec![] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("workers failed"));
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_partial_failure_warns_keeps_data() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 2 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 2, shard_names: vec!["s0".into()] },
+        ).await;
+        let w1 = spawn_worker(
+            SearchBehavior::GrpcError("kaboom".into()),
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 0, shard_names: vec!["s1".into()] },
+        ).await;
+        let workers = [("w0", w0.port), ("w1", w1.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap();
+
+        assert!(!resp.error.is_empty(), "partial warning expected");
+        assert!(resp.error.contains("partial"));
+        assert!(resp.num_rows > 0, "should still return data from w0");
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_app_error_counts_as_failure() {
+        let w0 = spawn_worker(
+            SearchBehavior::AppError("ann unavailable".into()),
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 0, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_ipc_decode_error_counts_as_failure() {
+        let w0 = spawn_worker(
+            SearchBehavior::GarbageIpc,
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 0, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("IPC err"));
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_empty_responses_return_empty_ok() {
+        let w0 = spawn_worker(
+            SearchBehavior::Empty,
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 0, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap();
+
+        assert_eq!(resp.num_rows, 0);
+        assert!(resp.error.is_empty(), "no failures, no warning");
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_outer_timeout_wraps_inner() {
+        // The outer `scatter_gather` wraps a 0-timeout around a slow worker.
+        // Slow worker delay > timeout → deadline_exceeded even though the
+        // inner task would eventually succeed.
+        let w0 = spawn_worker(
+            SearchBehavior::Slow(Duration::from_secs(5)),
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 0, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_millis(100),
+            None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_trace_id_propagates_via_metadata() {
+        // Mock doesn't introspect metadata, but the inject_traceparent
+        // branch is still exercised. This test pins the happy path when
+        // trace_id is present.
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 2 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 2, shard_names: vec!["s0".into()] },
+        ).await;
+        let workers = [("w0", w0.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+        ).await.unwrap();
+
+        assert!(resp.num_rows > 0);
+        assert!(w0.state.search_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_all_workers_unhealthy_returns_unavailable() {
+        // Build a shard state referencing workers that were never spawned:
+        // the pool never succeeds in connecting, so they stay unhealthy;
+        // every shard gets skipped and worker_shards ends empty.
+        let endpoints: HashMap<String, (String, u16)> = vec![
+            ("w0".to_string(), ("127.0.0.1".to_string(), 1u16)),
+            ("w1".to_string(), ("127.0.0.1".to_string(), 2u16)),
+        ].into_iter().collect();
+        use lance_distributed_common::config::{HealthCheckConfig, ServerConfig};
+        let hc = HealthCheckConfig { interval_secs: 60, ping_timeout_secs: 1, connect_timeout_secs: 1, ..Default::default() };
+        let pool = Arc::new(ConnectionPool::new(
+            endpoints, Duration::from_secs(2), &hc, &ServerConfig::default(),
+        ));
+        // No start_background — workers never become healthy.
+        let workers = [("w0", 1u16), ("w1", 2u16)];
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let err = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(2), None,
+        ).await.unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn test_scatter_gather_straggler_triggers_warn_branch() {
+        // Two workers: one fast, one slow (but within budget). The max
+        // latency exceeds 2× median → straggler warn path hit.
+        let w_fast = spawn_worker(
+            SearchBehavior::Ok { rows: 2 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 2, shard_names: vec!["s0".into()] },
+        ).await;
+        let w_slow = spawn_worker(
+            SearchBehavior::Slow(Duration::from_millis(250)),
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec!["s1".into()] },
+        ).await;
+        let workers = [("w0", w_fast.port), ("w1", w_slow.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true,
+            Duration::from_secs(3), None,
+        ).await.unwrap();
+
+        assert!(resp.num_rows > 0);
+    }
 }

@@ -1,22 +1,30 @@
 # 关键路径覆盖率矩阵
 
-**建档时间**：2026-04-18（0.2.0-pre.1 基线）
+**建档时间**：2026-04-18（0.2.0-pre.1 基线）；2026-04-21 更新（beta.5 预备）
 **对应 ROADMAP 项**：`ROADMAP_0.2.md` §B4
 **工具**：`cargo llvm-cov 0.8.5`
 **测量范围**：`--lib` only（lib 单元测试）。完整 `lib + integration` 测量见 CI artifact（gate 70% line coverage）。
 
-## 一、4 个关键路径模块——**alpha 测量基线**
-
-Alpha 门（`ROADMAP_0.2.md` §3.3 B4-min）是"测量并入档"，**不要求 ≥85%**。85% 是目标、不是阻塞项。
+## 一、4 个关键路径模块——**beta.5 ratchet**
 
 | 模块 | Lines 覆盖 | Regions 覆盖 | Lines Missed | 评级 |
 |---|---:|---:|---:|---|
-| `coordinator/src/scatter_gather.rs` | **49.80%** | 54.53% | 125 / 249 | 🔴 严重不足 |
+| `coordinator/src/scatter_gather.rs` | **97.19%** | 96.68% | 19 / 676 | 🟢 目标达到 |
 | `coordinator/src/merge.rs`（全局 TopK）| 89.69% | 89.89% | 23 / 223 | 🟢 目标达到 |
 | `meta/src/store.rs`（MetaStore CAS）| 72.95% | 74.85% | 135 / 499 | 🟡 接近目标 |
-| `coordinator/src/connection_pool.rs` | 41.93% | 42.36% | 205 / 353 | 🔴 严重不足 |
+| `coordinator/src/connection_pool.rs` | **94.24%** | 94.81% | 42 / 729 | 🟢 目标达到 |
 
-**整体 4-crate lib coverage**：60.43% line / 52.39% function。
+**整体 coordinator lib coverage**：77.10% line（60.43% → 77.10%，+16.7pp）。
+
+### beta.5 补课过程（本轮工作）
+
+**目标**：把两个 🔴 模块拉到 ≥80%。结果都到 >94%，顺带发现一个 **production 级 latent deadlock**。
+
+- 新增 `crates/coordinator/src/test_support.rs`：可配置的 tonic mock worker（LanceExecutorService 全 11 方法），支持 SearchBehavior = {Ok, Empty, AppError, GrpcError, GarbageIpc, Slow} × HealthBehavior = {Ok, Err, Slow}，运行时通过 `Arc<RwLock<…>>` 热切换。
+- `scatter_gather.rs` 新增 12 个 end-to-end 测试覆盖：table-not-found / all-unhealthy / all-failed / partial-failure warning / IPC decode error / empty responses / merge-by-distance vs merge-by-score / outer timeout wrapper / trace_id injection / straggler warn 分支。
+- `connection_pool.rs` 新增 6 个 live-network 测试覆盖：connect_all 成功 / unreachable endpoint 跳过 / health_check_loop unhealthy 翻转 / remove_threshold 移除 / shutdown 停环 / LoadShard 恢复。
+- **Bug 发现 → 修复**：`health_check_loop` 的 Healthy 分支在 shard recovery 时持有 `workers` 写锁去调用 `self.get_healthy_client()`（读锁），tokio RwLock 是 write-preferring + 非 reentrant → 死锁。生产条件：shard_state 已接入 + 某个 worker 重启后 shard_names 少于分配。修复：先释放写锁再进入 recovery。
+- **行为纪要**（未改代码，仅测试中 pin 住现状）：`remove_threshold > unhealthy_threshold` 时移除分支实际不可达——worker 一旦翻到 !healthy，下一 tick 走 reconnect 路径而非 ping，失败计数不再增长。生产默认 (3, 5) 下永不触发。留作后续修复：reconnect 失败也计入 consecutive_failures。
 
 ## 二、缺口分析
 

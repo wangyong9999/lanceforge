@@ -4271,6 +4271,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic 0.14.5",
  "tonic-prost",
  "tracing",

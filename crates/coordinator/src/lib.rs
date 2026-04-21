@@ -11,5 +11,8 @@ pub mod rest;
 pub mod scatter_gather;
 pub mod service;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // Convenience re-exports
 pub use service::CoordinatorService;
