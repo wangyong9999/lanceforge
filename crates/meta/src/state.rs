@@ -259,6 +259,45 @@ impl MetaShardState {
         let version = self.store.get(&key).await.ok().flatten().map(|v| v.version).unwrap_or(0);
         let _ = self.store.put(&key, &value, version).await;
     }
+
+    fn table_on_columns_key(&self) -> String {
+        format!("{}/table_on_columns", self.prefix)
+    }
+
+    /// Load per-table hash-partition column lists. Maps table_name →
+    /// on_columns (e.g., ["id"]). Used by coordinator to drive read-
+    /// side partition pruning (see `shard_pruning::hash_route_shard`).
+    /// Empty map if never populated.
+    pub async fn get_table_on_columns(&self) -> HashMap<String, Vec<String>> {
+        let key = self.table_on_columns_key();
+        match self.store.get(&key).await {
+            Ok(Some(v)) => serde_json::from_str(&v.value).unwrap_or_default(),
+            _ => HashMap::new(),
+        }
+    }
+
+    /// Record a table's on_columns. Creates the entry or overwrites
+    /// an existing one. Other tables in the same blob are preserved.
+    pub async fn put_table_on_columns(&self, table_name: &str, cols: &[String]) {
+        let key = self.table_on_columns_key();
+        let mut current = self.get_table_on_columns().await;
+        current.insert(table_name.to_string(), cols.to_vec());
+        let value = serde_json::to_string(&current).unwrap_or_default();
+        let version = self.store.get(&key).await.ok().flatten().map(|v| v.version).unwrap_or(0);
+        let _ = self.store.put(&key, &value, version).await;
+    }
+
+    /// Forget a table's on_columns (used on DropTable).
+    pub async fn remove_table_on_columns(&self, table_name: &str) {
+        let key = self.table_on_columns_key();
+        let mut current = self.get_table_on_columns().await;
+        if current.remove(table_name).is_none() {
+            return;
+        }
+        let value = serde_json::to_string(&current).unwrap_or_default();
+        let version = self.store.get(&key).await.ok().flatten().map(|v| v.version).unwrap_or(0);
+        let _ = self.store.put(&key, &value, version).await;
+    }
 }
 
 #[cfg(test)]

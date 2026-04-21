@@ -82,10 +82,11 @@ pub async fn scatter_gather(
     merge_by_distance: bool,
     query_timeout: Duration,
     trace_id: Option<String>,
+    on_columns: &[String],
 ) -> Result<pb::SearchResponse, tonic::Status> {
     // Enforce global timeout on entire scatter-gather (routing + dispatch + merge)
     match tokio::time::timeout(query_timeout, scatter_gather_inner(
-        pool, shard_state, pruner, table_name, local_req, k, merge_by_distance, query_timeout, trace_id,
+        pool, shard_state, pruner, table_name, local_req, k, merge_by_distance, query_timeout, trace_id, on_columns,
     )).await {
         Ok(result) => result,
         Err(_) => Err(tonic::Status::deadline_exceeded(
@@ -123,6 +124,7 @@ async fn scatter_gather_inner(
     merge_by_distance: bool,
     query_timeout: Duration,
     trace_id: Option<String>,
+    on_columns: &[String],
 ) -> Result<pb::SearchResponse, tonic::Status> {
     let filter = local_req.filter.as_deref();
 
@@ -134,7 +136,45 @@ async fn scatter_gather_inner(
         }
         let all_shard_names: Vec<String> = routing.iter().map(|(s, _, _)| s.clone()).collect();
         let eligible = pruner.prune(&all_shard_names, filter);
-        routing.into_iter().filter(|(s, _, _)| eligible.contains(s)).collect::<Vec<_>>()
+        let mut pruned: Vec<_> = routing.into_iter()
+            .filter(|(s, _, _)| eligible.contains(s))
+            .collect();
+
+        // #5.1 Partition pruning: if on_columns is declared AND the
+        // filter is a single-column equality on a hash key, route to
+        // exactly one shard. The shard index convention matches
+        // `partition_batch_by_hash` in service.rs — shards are named
+        // `{safe_stem}_shard_{idx:02}` (CreateTable) or listed in
+        // config order for static tables; we match by the `_shard_NN`
+        // suffix. Unrecognised names → fall through to full scatter.
+        let num_shards = pruned.len();
+        if let Some(target_idx) = lance_distributed_common::shard_pruning::hash_route_shard(
+            filter, on_columns, num_shards,
+        ) {
+            let suffix = format!("_shard_{:02}", target_idx);
+            let before = pruned.len();
+            let retained: Vec<_> = pruned
+                .iter()
+                .filter(|(name, _, _)| name.ends_with(&suffix))
+                .cloned()
+                .collect();
+            if !retained.is_empty() {
+                debug!(
+                    "Partition pruning: {} → 1 shard (idx {}, suffix {}) for {}",
+                    before, target_idx, suffix, table_name
+                );
+                pruned = retained;
+            } else {
+                // Shard naming didn't match the expected convention —
+                // fall back to full scatter rather than miss data.
+                log::warn!(
+                    "Partition pruning: target idx {} (suffix {}) not found \
+                     in routing for {}, falling back to full scatter",
+                    target_idx, suffix, table_name
+                );
+            }
+        }
+        pruned
     };
 
     if shard_routing.is_empty() {
@@ -653,6 +693,157 @@ mod tests {
         }
     }
 
+    /// Build a ShardState whose shard names follow the CreateTable
+    /// convention `{table}_shard_{idx:02}`, required by partition
+    /// pruning to match shard_index → shard_name. Regular tests use
+    /// `build_shard_state` which produces s0/s1/... and therefore
+    /// exercises the fall-back full-scatter path.
+    fn build_pruning_shard_state(
+        table: &str,
+        workers: &[(&str, u16)],
+    ) -> Arc<dyn lance_distributed_common::shard_state::ShardState> {
+        use lance_distributed_common::config::{
+            ClusterConfig, ExecutorConfig, ShardConfig, TableConfig,
+        };
+        let mut shards = Vec::new();
+        for (i, (wid, _)) in workers.iter().enumerate() {
+            shards.push(ShardConfig {
+                name: format!("{}_shard_{:02}", table, i),
+                uri: format!("/tmp/prune-shard-{}", i),
+                executors: vec![wid.to_string()],
+            });
+        }
+        let executors = workers.iter().map(|(id, port)| ExecutorConfig {
+            id: id.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: *port,
+            role: Default::default(),
+        }).collect();
+        let cfg = ClusterConfig {
+            tables: vec![TableConfig { name: table.to_string(), shards }],
+            executors,
+            ..Default::default()
+        };
+        Arc::new(StaticShardState::from_config(&cfg))
+    }
+
+    #[tokio::test]
+    async fn partition_pruning_targets_single_shard() {
+        // Four workers, table with on_columns=["id"], filter `id = 'abc'`.
+        // Exactly one worker should receive the search RPC; the other
+        // three should see zero calls.
+        let _ = env_logger::builder().is_test(true).try_init();
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let w1 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let w2 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let w3 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let workers = [
+            ("w0", w0.port), ("w1", w1.port), ("w2", w2.port), ("w3", w3.port),
+        ];
+        let pool = build_pool(&workers).await;
+        let state = build_pruning_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let mut req = empty_request();
+        req.filter = Some("id = 'abc'".to_string());
+        let resp = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            req, 5, true, Duration::from_secs(2), None,
+            &["id".to_string()],
+        ).await.unwrap();
+
+        assert!(resp.error.is_empty(), "unexpected partial warning: {}", resp.error);
+
+        // Authoritative target index from the shared helper.
+        let target_idx = lance_distributed_common::shard_pruning::hash_route_shard(
+            Some("id = 'abc'"), &["id".to_string()], 4,
+        ).expect("hash route should resolve");
+        let handles = [&w0, &w1, &w2, &w3];
+        let total_calls: u64 = handles
+            .iter()
+            .map(|h| h.state.search_calls.load(std::sync::atomic::Ordering::SeqCst))
+            .sum();
+        assert_eq!(total_calls, 1, "only the target shard should have been called");
+        assert_eq!(
+            handles[target_idx]
+                .state
+                .search_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "target shard (idx {target_idx}) must receive the one call"
+        );
+    }
+
+    #[tokio::test]
+    async fn partition_pruning_falls_back_when_filter_missing() {
+        // Same setup as the pruning test, but no filter — all shards
+        // should receive a call (full scatter, zero regression).
+        let _ = env_logger::builder().is_test(true).try_init();
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let w1 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let workers = [("w0", w0.port), ("w1", w1.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_pruning_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        // No filter → on_columns doesn't help, full scatter.
+        let _ = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            empty_request(), 5, true, Duration::from_secs(2), None,
+            &["id".to_string()],
+        ).await.unwrap();
+
+        assert_eq!(w0.state.search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(w1.state.search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn partition_pruning_falls_back_when_on_columns_empty() {
+        // Filter present but no on_columns declared — this is the pre-
+        // 5.1 behaviour and must be preserved exactly.
+        let w0 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let w1 = spawn_worker(
+            SearchBehavior::Ok { rows: 1 },
+            HealthBehavior::Ok { loaded_shards: 1, total_rows: 1, shard_names: vec![] },
+        ).await;
+        let workers = [("w0", w0.port), ("w1", w1.port)];
+        let pool = build_pool(&workers).await;
+        let state = build_pruning_shard_state("t", &workers);
+        let pruner = Arc::new(ShardPruner::empty());
+
+        let mut req = empty_request();
+        req.filter = Some("id = 'abc'".to_string());
+        let _ = scatter_gather_inner(
+            &pool, &state, &pruner, "t",
+            req, 5, true, Duration::from_secs(2), None,
+            &[], // empty on_columns — no pruning
+        ).await.unwrap();
+
+        assert_eq!(w0.state.search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(w1.state.search_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn test_scatter_gather_happy_path_merge_by_distance() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -675,6 +866,7 @@ mod tests {
             /*merge_by_distance=*/ true,
             Duration::from_secs(5),
             None,
+            &[],
         ).await.unwrap();
 
         assert!(resp.error.is_empty(), "no partial warning expected: {}", resp.error);
@@ -699,6 +891,7 @@ mod tests {
             /*merge_by_distance=*/ false,
             Duration::from_secs(5),
             None,
+            &[],
         ).await.unwrap();
 
         assert!(resp.error.is_empty());
@@ -720,6 +913,7 @@ mod tests {
             &pool, &state, &pruner, "does-not-exist",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -740,6 +934,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::Internal);
@@ -766,6 +961,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap();
 
         assert!(!resp.error.is_empty(), "partial warning expected");
@@ -788,6 +984,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::Internal);
@@ -808,6 +1005,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::Internal);
@@ -829,6 +1027,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap();
 
         assert_eq!(resp.num_rows, 0);
@@ -854,6 +1053,7 @@ mod tests {
             empty_request(), 5, true,
             Duration::from_millis(100),
             None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
@@ -878,6 +1078,7 @@ mod tests {
             empty_request(), 5, true,
             Duration::from_secs(2),
             Some("0123456789abcdef0123456789abcdef".to_string()),
+            &[],
         ).await.unwrap();
 
         assert!(resp.num_rows > 0);
@@ -907,6 +1108,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(2), None,
+            &[],
         ).await.unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -933,6 +1135,7 @@ mod tests {
             &pool, &state, &pruner, "t",
             empty_request(), 5, true,
             Duration::from_secs(3), None,
+            &[],
         ).await.unwrap();
 
         assert!(resp.num_rows > 0);

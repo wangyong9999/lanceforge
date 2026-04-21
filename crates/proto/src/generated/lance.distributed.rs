@@ -475,6 +475,15 @@ pub struct CreateTableRequest {
     /// IVF partitions (default 32)
     #[prost(uint32, tag = "5")]
     pub index_num_partitions: u32,
+    /// Hash-partition keys. When set, AnnSearch/FtsSearch/Hybrid with
+    /// a filter of the form `col = value` where col is in this list
+    /// will be routed to a single shard (partition pruning). Write-
+    /// side AddRows callers should pass matching on_columns to keep
+    /// writes collocated with the query shard. Read-side pruning
+    /// currently only engages for the single-column case. Empty = no
+    /// pruning.
+    #[prost(string, repeated, tag = "6")]
+    pub on_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateTableResponse {

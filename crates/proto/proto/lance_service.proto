@@ -346,6 +346,14 @@ message CreateTableRequest {
   string uri = 3;                 // Storage URI (e.g., "s3://bucket/table.lance")
   string index_column = 4;        // Column to index (optional, auto-creates IVF_FLAT)
   uint32 index_num_partitions = 5; // IVF partitions (default 32)
+  // Hash-partition keys. When set, AnnSearch/FtsSearch/Hybrid with
+  // a filter of the form `col = value` where col is in this list
+  // will be routed to a single shard (partition pruning). Write-
+  // side AddRows callers should pass matching on_columns to keep
+  // writes collocated with the query shard. Read-side pruning
+  // currently only engages for the single-column case. Empty = no
+  // pruning.
+  repeated string on_columns = 6;
 }
 
 message CreateTableResponse {

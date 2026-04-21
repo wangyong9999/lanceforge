@@ -44,6 +44,12 @@ pub struct CoordinatorService {
     max_concurrent_queries: usize,
     /// Shard name → URI registry for LoadShard RPCs during rebalance.
     shard_uris: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// #5.1 Partition pruning: per-table hash-partition columns
+    /// declared at CreateTable. Read-side lookup on AnnSearch/
+    /// FtsSearch/Hybrid with a `col = val` filter routes to a single
+    /// shard when the column is in on_columns. Populated from
+    /// MetaStore at startup + on each CreateTable.
+    table_on_columns: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<String>>>>,
     /// Auth + RBAC interceptor (None = no auth).
     auth: Option<Arc<super::auth::ApiKeyInterceptor>>,
     /// Max bytes per SearchResponse (0 = unlimited).
@@ -164,10 +170,13 @@ impl CoordinatorService {
         // Recover persisted shard URIs from MetaStore (survives restarts)
         let persisted_uris = meta_state.get_shard_uris().await;
         let recovered_count = persisted_uris.len();
+        // #5.1: also recover per-table on_columns for read-side pruning.
+        let persisted_on_cols = meta_state.get_table_on_columns().await;
+        let on_cols_count = persisted_on_cols.len();
 
         let meta_arc = Arc::new(meta_state);
-        info!("Using MetaStore at {} ({} tables, {} shard URIs recovered)",
-            metadata_path, meta_arc.all_tables().await.len(), recovered_count);
+        info!("Using MetaStore at {} ({} tables, {} shard URIs recovered, {} on_columns entries)",
+            metadata_path, meta_arc.all_tables().await.len(), recovered_count, on_cols_count);
 
         let mut svc = Self::with_shard_state(config, query_timeout, meta_arc.clone() as Arc<dyn ShardState>);
         // Merge persisted URIs into the in-memory map (YAML URIs already loaded)
@@ -175,6 +184,13 @@ impl CoordinatorService {
             let mut uris = svc.shard_uris.write().await;
             for (k, v) in persisted_uris {
                 uris.entry(k).or_insert(v);
+            }
+        }
+        // Merge persisted on_columns into the in-memory cache.
+        {
+            let mut on_cols = svc.table_on_columns.write().await;
+            for (t, cols) in persisted_on_cols {
+                on_cols.entry(t).or_insert(cols);
             }
         }
         svc.meta_state = Some(meta_arc);
@@ -254,6 +270,7 @@ impl CoordinatorService {
             write_counter: std::sync::atomic::AtomicUsize::new(0),
             max_concurrent_queries: max_queries,
             shard_uris: shard_uris_arc,
+            table_on_columns: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             auth: None,
             max_response_bytes: config.server.max_response_bytes,
             max_k: config.server.max_k,
@@ -279,6 +296,18 @@ impl CoordinatorService {
     pub fn with_auth(mut self, auth: Arc<super::auth::ApiKeyInterceptor>) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    /// #5.1 Look up the declared hash-partition columns for a table.
+    /// Empty = no pruning. Populated at CreateTable + restored from
+    /// MetaStore on startup (see `with_meta_state`).
+    async fn on_columns_for(&self, table: &str) -> Vec<String> {
+        self.table_on_columns
+            .read()
+            .await
+            .get(table)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Build a handle that background tasks (orphan GC, etc.) can hold
@@ -625,9 +654,11 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
+        let on_cols = self.on_columns_for(&req.table_name).await;
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
+            &on_cols,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -662,9 +693,11 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
+        let on_cols = self.on_columns_for(&req.table_name).await;
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
+            &on_cols,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -704,9 +737,11 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
+        let on_cols = self.on_columns_for(&req.table_name).await;
         let result = super::scatter_gather::scatter_gather(
             &self.pool, &self.shard_state, &self.pruner,
             &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
+            &on_cols,
         ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
@@ -1210,8 +1245,25 @@ impl LanceSchedulerService for CoordinatorService {
             ms.put_shard_uris(&uri_map).await;
         }
 
-        info!("Created table '{}' ({} rows across {} shards on {} workers)",
-            req.table_name, total_created, n_shards, healthy.len());
+        // #5.1 Partition pruning: stash on_columns for read-side routing.
+        // No-op when caller didn't declare hash keys. Written to both the
+        // in-memory cache (hot read path) and MetaStore (survives restart
+        // + visible to other coord instances via auth-reload-style sync
+        // if Phase C.4's cache is ever extended to poll this key).
+        if !req.on_columns.is_empty() {
+            self.table_on_columns
+                .write()
+                .await
+                .insert(req.table_name.clone(), req.on_columns.clone());
+            if let Some(ref ms) = self.meta_state {
+                ms.put_table_on_columns(&req.table_name, &req.on_columns).await;
+            }
+        }
+
+        info!("Created table '{}' ({} rows across {} shards on {} workers{})",
+            req.table_name, total_created, n_shards, healthy.len(),
+            if !req.on_columns.is_empty() { format!(", on_columns={:?}", req.on_columns) } else { String::new() }
+        );
 
         Ok(Response::new(pb::CreateTableResponse {
             table_name: req.table_name.clone(),
@@ -1295,6 +1347,11 @@ impl LanceSchedulerService for CoordinatorService {
         }
         if let Some(ref ms) = self.meta_state {
             ms.remove_shard_uris(&dropped_names).await;
+        }
+        // #5.1: drop on_columns cache + MetaStore entry.
+        self.table_on_columns.write().await.remove(&req.table_name);
+        if let Some(ref ms) = self.meta_state {
+            ms.remove_table_on_columns(&req.table_name).await;
         }
         // Remove from shard state (set empty mapping)
         let empty: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
@@ -1937,9 +1994,13 @@ impl LanceSchedulerService for CoordinatorService {
             let merge_k = k;
 
             let tid = trace_id.clone();
+            // #5.1 batch_search: capture on_columns once up-front, reuse
+            // across every sub-query task spawned for this batch.
+            let on_cols = self.on_columns_for(&table).await;
             tasks.spawn(async move {
                 super::scatter_gather::scatter_gather(
                     &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout, tid,
+                    &on_cols,
                 ).await
             });
         }

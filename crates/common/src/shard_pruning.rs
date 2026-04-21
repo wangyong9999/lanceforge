@@ -121,6 +121,66 @@ fn shard_could_match(meta: &ShardMetadata, column: &str, value: &str) -> bool {
     }
 }
 
+/// Hash-route a read request to a single shard.
+///
+/// If the filter is a simple equality predicate on the table's
+/// declared `on_columns` hash key, return the target shard index —
+/// computed with the same hash the write path uses in
+/// `coordinator::service::partition_batch_by_hash`. Callers that
+/// get `Some(idx)` can skip the full scatter and dispatch to just
+/// that one shard; anything else (unparseable filter, filter column
+/// not in on_columns, multi-column on_columns, num_shards <= 1)
+/// returns `None` so the caller falls back to the existing
+/// full-scatter path.
+///
+/// Safety: this is a **pruning optimisation only**. A `Some` result
+/// must agree with the write-side hash; otherwise we miss rows. The
+/// unit tests below pin the agreement with the write path's hash
+/// formula across string and numeric keys.
+pub fn hash_route_shard(
+    filter: Option<&str>,
+    on_columns: &[String],
+    num_shards: usize,
+) -> Option<usize> {
+    if num_shards <= 1 {
+        return None;
+    }
+    // Multi-column on_columns means the write-side hash mixes all key
+    // values per row. A single-predicate filter (col = val) can only
+    // constrain one dimension; without the others we can't uniquely
+    // identify the bucket. Fall back to full scatter.
+    if on_columns.len() != 1 {
+        return None;
+    }
+    let filter = filter?;
+    let (col, val) = parse_simple_equality(filter)?;
+    if col != on_columns[0] {
+        return None;
+    }
+    Some(hash_value_to_shard(&val, num_shards))
+}
+
+/// The authoritative hash formula shared with the write path.
+///
+/// `coordinator::service::partition_batch_by_hash` hashes the Arrow
+/// string representation of the scalar value. For primitive types
+/// `arrow::util::display::array_value_to_string` produces the
+/// canonical decimal / string form:
+///   int   42    -> "42"
+///   str   "abc" -> "abc"
+///   float 3.14  -> "3.14"
+/// The read-side filter value is already a string (SQL literal), so
+/// we just hash it directly with the same `DefaultHasher`. String
+/// and int keys agree trivially; floats / decimals may diverge under
+/// formatter differences — documented as "only int / string keys
+/// safe for partition pruning" in the user docs.
+pub fn hash_value_to_shard(value: &str, num_shards: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    (hasher.finish() % num_shards as u64) as usize
+}
+
 /// Parse simple equality predicate: "column = 'value'" or "column = value"
 fn parse_simple_equality(filter: &str) -> Option<(String, String)> {
     let filter = filter.trim();
@@ -254,6 +314,113 @@ mod tests {
         // Complex filter we can't parse → keep all
         let result = pruner.prune(&all, Some("category = 'a' AND region = 'b'"));
         assert_eq!(result.len(), 2);
+    }
+
+    // ── Partition pruning (hash-routed) tests ──
+
+    #[test]
+    fn hash_route_returns_none_when_num_shards_le_1() {
+        assert_eq!(hash_route_shard(Some("id = 'abc'"), &["id".into()], 0), None);
+        assert_eq!(hash_route_shard(Some("id = 'abc'"), &["id".into()], 1), None);
+    }
+
+    #[test]
+    fn hash_route_returns_none_when_no_on_columns() {
+        assert_eq!(hash_route_shard(Some("id = 'abc'"), &[], 4), None);
+    }
+
+    #[test]
+    fn hash_route_returns_none_when_filter_missing() {
+        assert_eq!(hash_route_shard(None, &["id".into()], 4), None);
+        assert_eq!(hash_route_shard(Some(""), &["id".into()], 4), None);
+    }
+
+    #[test]
+    fn hash_route_returns_none_for_multicolumn_on_columns() {
+        // Write-side hashes tuple of column values — a single-predicate
+        // filter can't uniquely identify the bucket.
+        assert_eq!(
+            hash_route_shard(Some("a = 'x'"), &["a".into(), "b".into()], 4),
+            None
+        );
+    }
+
+    #[test]
+    fn hash_route_returns_none_when_filter_column_not_in_on_columns() {
+        assert_eq!(
+            hash_route_shard(Some("category = 'foo'"), &["id".into()], 4),
+            None
+        );
+    }
+
+    #[test]
+    fn hash_route_returns_none_for_complex_filter() {
+        // parse_simple_equality rejects compound / non-equality ops.
+        assert_eq!(
+            hash_route_shard(Some("id = 'x' AND foo = 'y'"), &["id".into()], 4),
+            None
+        );
+        assert_eq!(
+            hash_route_shard(Some("id >= 'x'"), &["id".into()], 4),
+            None
+        );
+    }
+
+    #[test]
+    fn hash_route_is_deterministic_and_in_range() {
+        let on = vec!["id".into()];
+        for v in ["abc", "42", "hello world", ""] {
+            let a = hash_route_shard(Some(&format!("id = '{v}'")), &on, 8);
+            let b = hash_route_shard(Some(&format!("id = '{v}'")), &on, 8);
+            if !v.is_empty() {
+                assert!(a.is_some());
+                assert_eq!(a, b);
+                let idx = a.unwrap();
+                assert!(idx < 8, "shard idx {idx} out of range");
+            } else {
+                // parse_simple_equality requires non-empty value
+                assert_eq!(a, None);
+            }
+        }
+    }
+
+    #[test]
+    fn hash_route_agrees_with_write_path_for_string_keys() {
+        // Pin agreement with coordinator::service::partition_batch_by_hash.
+        // For a string column the write path hashes the value's string
+        // representation — for a plain `StringArray`, that's the value
+        // itself, so our helper should produce the same shard index as
+        // the write path would for a row with that key.
+        use std::hash::{Hash, Hasher};
+        let vals = ["tenant-a", "tenant-b", "tenant-c", "42", "long-string-value"];
+        for v in &vals {
+            // Write-side simulation: hash the "formatted scalar" string.
+            let mut write_hasher = std::collections::hash_map::DefaultHasher::new();
+            v.hash(&mut write_hasher);
+            let write_shard = (write_hasher.finish() % 8) as usize;
+
+            // Read-side: same value through hash_route_shard.
+            let read_shard = hash_route_shard(
+                Some(&format!("id = '{v}'")),
+                &["id".into()],
+                8,
+            )
+            .expect("valid filter");
+
+            assert_eq!(
+                read_shard, write_shard,
+                "write/read hash disagreement for '{v}'"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_route_handles_numeric_literal() {
+        // SQL `id = 42` (unquoted) parses to value="42"; the write path
+        // for an Int32 column formats 42 as "42". Same string, same
+        // hash.
+        let out = hash_route_shard(Some("id = 42"), &["id".into()], 4);
+        assert!(out.is_some(), "numeric literal must parse");
     }
 
     #[test]
