@@ -431,6 +431,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_resolves_during_outage_are_consistent() {
+        // Chaos E2E (Phase C.5 scope): N concurrent resolves while CP
+        // transitions between fresh / stale / expired. Every call
+        // should see a coherent state — never partially-updated cache,
+        // never a deadlock, and the stale-to-expired transition
+        // applies uniformly.
+        let tmp = TempDir::new().unwrap();
+        let (client, shutdown, handle, _port) = spawn_cp_and_client(
+            minimal_config(&tmp),
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        )
+        .await;
+
+        // Prime the cache.
+        let _ = client.resolve("t").await.unwrap();
+
+        // Kill CP.
+        shutdown.notify_waiters();
+        let _ = handle.await;
+
+        // Fire 16 concurrent resolves during the stale window. All
+        // should succeed from cache without any deadlock.
+        tokio::time::sleep(Duration::from_millis(80)).await; // past TTL, within stale
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move { c.resolve("t").await }));
+        }
+        for task in tasks {
+            let r = task.await.unwrap().unwrap();
+            assert_eq!(r.table_name, "t");
+        }
+
+        // Past stale_limit, all 16 concurrent calls should fail with
+        // the same error class.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move { c.resolve("t").await }));
+        }
+        for task in tasks {
+            let e = task.await.unwrap().unwrap_err();
+            assert!(
+                matches!(e, ResolveError::CpUnreachable(_)),
+                "got: {e:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn fresh_cache_does_not_hit_cp() {
         let tmp = TempDir::new().unwrap();
         // Long TTL so second call stays fresh.

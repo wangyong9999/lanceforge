@@ -58,7 +58,7 @@ def cleanup():
     # TIME_WAIT for the kernel's default 60s, which makes the bind
     # fail with AddrInUse. Poll until the kernel releases them
     # before we start the monolith.
-    for p in (COORD_PORT, COORD_PORT + 1, WORKER_PORT):
+    for p in (COORD_PORT, COORD_PORT + 1, COORD_PORT + 2, WORKER_PORT):
         _wait_port_free(p, timeout=90)
 
 
@@ -133,9 +133,27 @@ assert wait_for_grpc("127.0.0.1", WORKER_PORT, timeout=20), "worker port never a
 assert wait_for_grpc("127.0.0.1", COORD_PORT, timeout=20), "coord port never accepted"
 
 # ── A. Single binary boots ──
-step("A. Single binary exposes coord + worker on loopback")
+step("A. Single binary exposes coord + worker + CP on loopback")
 chan = grpc.insecure_channel(f"127.0.0.1:{COORD_PORT}")
 stub = pbg.LanceSchedulerServiceStub(chan)
+
+# Phase C.3/C.5: monolith also spawns the CP role on coord_port + 2.
+# A plain TCP probe is enough to confirm the server is accepting; we
+# don't have generated Python stubs for ClusterControl yet so we
+# stop short of a real RPC.
+CP_PORT = COORD_PORT + 2
+import socket as _socket
+_s = _socket.socket()
+_s.settimeout(2)
+try:
+    _s.connect(("127.0.0.1", CP_PORT))
+    print(f"  PASS CP port {CP_PORT} accepts connections")
+    results["passed"] += 1
+except OSError as e:
+    print(f"  FAIL CP port {CP_PORT} unreachable: {e}")
+    results["failed"] += 1
+finally:
+    _s.close()
 
 # ── B. CreateTable + AddRows + Search ──
 step("B. CreateTable + AddRows + AnnSearch round-trip")
