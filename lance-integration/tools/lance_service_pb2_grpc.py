@@ -90,6 +90,11 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.CreateIndexRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.CreateIndexResponse.FromString,
                 _registered_method=True)
+        self.AlterTable = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/AlterTable',
+                request_serializer=lance__service__pb2.AlterTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.AlterTableResponse.FromString,
+                _registered_method=True)
         self.GetSchema = channel.unary_unary(
                 '/lance.distributed.LanceSchedulerService/GetSchema',
                 request_serializer=lance__service__pb2.GetSchemaRequest.SerializeToString,
@@ -205,6 +210,14 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AlterTable(self, request, context):
+        """#5.3 Schema evolution: ADD COLUMN NULLABLE. Atomic across shards
+        via the DDL lease (#5.2); bumps schema_version in MetaStore.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetSchema(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -313,6 +326,11 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.CreateIndex,
                     request_deserializer=lance__service__pb2.CreateIndexRequest.FromString,
                     response_serializer=lance__service__pb2.CreateIndexResponse.SerializeToString,
+            ),
+            'AlterTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.AlterTable,
+                    request_deserializer=lance__service__pb2.AlterTableRequest.FromString,
+                    response_serializer=lance__service__pb2.AlterTableResponse.SerializeToString,
             ),
             'GetSchema': grpc.unary_unary_rpc_method_handler(
                     servicer.GetSchema,
@@ -664,6 +682,33 @@ class LanceSchedulerService(object):
             _registered_method=True)
 
     @staticmethod
+    def AlterTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/AlterTable',
+            lance__service__pb2.AlterTableRequest.SerializeToString,
+            lance__service__pb2.AlterTableResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def GetSchema(request,
             target,
             options=(),
@@ -940,6 +985,11 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.QueryRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.LocalSearchResponse.FromString,
                 _registered_method=True)
+        self.ExecuteAlterTable = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteAlterTable',
+                request_serializer=lance__service__pb2.LocalAlterTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.LocalAlterTableResponse.FromString,
+                _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/HealthCheck',
                 request_serializer=lance__service__pb2.HealthCheckRequest.SerializeToString,
@@ -1011,6 +1061,14 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExecuteAlterTable(self, request, context):
+        """#5.3 Per-shard schema mutation — ADD COLUMN NULLABLE. Caller
+        (coord) must hold the DDL lease (#5.2) before fanning this out.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """Health check (Scheduler periodically pings Executors)
         """
@@ -1070,6 +1128,11 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.LocalQuery,
                     request_deserializer=lance__service__pb2.QueryRequest.FromString,
                     response_serializer=lance__service__pb2.LocalSearchResponse.SerializeToString,
+            ),
+            'ExecuteAlterTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteAlterTable,
+                    request_deserializer=lance__service__pb2.LocalAlterTableRequest.FromString,
+                    response_serializer=lance__service__pb2.LocalAlterTableResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -1348,6 +1411,33 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/LocalQuery',
             lance__service__pb2.QueryRequest.SerializeToString,
             lance__service__pb2.LocalSearchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteAlterTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteAlterTable',
+            lance__service__pb2.LocalAlterTableRequest.SerializeToString,
+            lance__service__pb2.LocalAlterTableResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -22,7 +22,9 @@ tests=(e2e_phase11_test.py e2e_phase12_test.py e2e_phase13_test.py
        e2e_beta3_rest_trace_test.py
        e2e_audit_dropped_test.py
        # beta.5 additions (v2 architecture Phase B):
-       e2e_monolith_test.py)
+       e2e_monolith_test.py
+       # beta.5 additions (v2 #5.3 schema evolution):
+       e2e_alter_table_test.py)
 
 pass=0
 fail=0

@@ -240,6 +240,18 @@ impl LanceExecutorService for MockExecutor {
         }))
     }
 
+    async fn execute_alter_table(
+        &self,
+        _req: Request<pb::LocalAlterTableRequest>,
+    ) -> Result<Response<pb::LocalAlterTableResponse>, Status> {
+        // Mock worker: no-op success. Coord integration tests that
+        // actually care about the schema mutation run against a
+        // real lance-worker binary via the Python E2E suite.
+        Ok(Response::new(pb::LocalAlterTableResponse {
+            error: String::new(),
+        }))
+    }
+
     async fn health_check(
         &self,
         _req: Request<pb::HealthCheckRequest>,

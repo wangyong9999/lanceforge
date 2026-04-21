@@ -20,6 +20,9 @@ service LanceSchedulerService {
   rpc ListTables (ListTablesRequest) returns (ListTablesResponse) {}
   rpc DropTable (DropTableRequest) returns (DropTableResponse) {}
   rpc CreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
+  // #5.3 Schema evolution: ADD COLUMN NULLABLE. Atomic across shards
+  // via the DDL lease (#5.2); bumps schema_version in MetaStore.
+  rpc AlterTable (AlterTableRequest) returns (AlterTableResponse) {}
   rpc GetSchema (GetSchemaRequest) returns (GetSchemaResponse) {}
   rpc CountRows (CountRowsRequest) returns (CountRowsResponse) {}
   rpc Rebalance (RebalanceRequest) returns (RebalanceResponse) {}
@@ -74,8 +77,21 @@ service LanceExecutorService {
   rpc CreateLocalShard (CreateLocalShardRequest) returns (CreateLocalShardResponse) {}
   rpc LocalGetByIds (GetByIdsRequest) returns (LocalSearchResponse) {}
   rpc LocalQuery (QueryRequest) returns (LocalSearchResponse) {}
+  // #5.3 Per-shard schema mutation — ADD COLUMN NULLABLE. Caller
+  // (coord) must hold the DDL lease (#5.2) before fanning this out.
+  rpc ExecuteAlterTable (LocalAlterTableRequest) returns (LocalAlterTableResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
+}
+
+message LocalAlterTableRequest {
+  string shard_name = 1;
+  // Arrow IPC carrying the new column schema (NULLABLE all).
+  bytes add_columns_arrow_ipc = 2;
+}
+
+message LocalAlterTableResponse {
+  string error = 1;
 }
 
 message CreateLocalShardRequest {
@@ -360,6 +376,24 @@ message CreateTableResponse {
   string table_name = 1;
   uint64 num_rows = 2;
   string error = 3;
+}
+
+// #5.3 Schema evolution.
+message AlterTableRequest {
+  string table_name = 1;
+  // Arrow IPC stream carrying ONLY the new column schema. All
+  // added columns are treated as NULLABLE and filled with NULL
+  // on existing rows (Lance NewColumnTransform::AllNulls).
+  bytes add_columns_arrow_ipc = 2;
+  // CAS guard: if non-zero, alter only proceeds when the current
+  // schema_version equals this. Prevents stale client requests
+  // from racing with another coord's DDL. 0 = unconditional.
+  uint64 expected_schema_version = 3;
+}
+
+message AlterTableResponse {
+  uint64 new_schema_version = 1;
+  string error = 2;
 }
 
 message ListTablesRequest {}

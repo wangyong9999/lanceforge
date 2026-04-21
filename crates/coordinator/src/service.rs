@@ -1313,6 +1313,40 @@ impl LanceSchedulerService for CoordinatorService {
             }
         }
 
+        // #5.3 Schema evolution basement: persist the CreateTable
+        // schema at version=1 so ALTER TABLE has a monotonic
+        // baseline to bump from. The arrow_ipc_data payload already
+        // carries both schema and initial rows; we strip it down to
+        // just the schema for storage.
+        if let Some(ref ms) = self.meta_state {
+            // Schema-only IPC = a zero-row slice of the CreateTable
+            // batch. Worker decoder reads `reader.schema()` and
+            // ignores row content.
+            let empty = batch.slice(0, 0);
+            let schema_bytes = lance_distributed_common::ipc::record_batch_to_ipc(&empty)
+                .map_err(|e| Status::internal(format!("schema IPC: {e}")))?;
+            let schema_store = lance_distributed_meta::schema_store::SchemaStore::new(
+                ms.store(),
+            );
+            // Create-only write at v=1. If a peer coord already
+            // wrote v=1 for this name, ignore — we're past the
+            // shard-state duplicate-name check above, so they did
+            // the work first.
+            match schema_store.put_schema(&req.table_name, 1, &schema_bytes).await {
+                Ok(()) => {}
+                Err(lance_distributed_meta::store::MetaError::VersionConflict { .. }) => {
+                    log::debug!(
+                        "CreateTable '{}': schema v=1 already stored by another coord",
+                        req.table_name
+                    );
+                }
+                Err(e) => log::warn!(
+                    "CreateTable '{}': schema persist failed: {} (continuing)",
+                    req.table_name, e
+                ),
+            }
+        }
+
         info!("Created table '{}' ({} rows across {} shards on {} workers{})",
             req.table_name, total_created, n_shards, healthy.len(),
             if !req.on_columns.is_empty() { format!(", on_columns={:?}", req.on_columns) } else { String::new() }
@@ -1329,6 +1363,164 @@ impl LanceSchedulerService for CoordinatorService {
         Ok(Response::new(pb::CreateTableResponse {
             table_name: req.table_name.clone(),
             num_rows,
+            error: String::new(),
+        }))
+    }
+
+    /// #5.3 ADD COLUMN NULLABLE across all shards atomically.
+    ///
+    /// Orchestration:
+    ///   1. Acquire DDL lease (cross-coord serialisation).
+    ///   2. Read current schema from SchemaStore; enforce
+    ///      `expected_schema_version` CAS guard if non-zero.
+    ///   3. Fan out LocalAlterTable to every shard. All must
+    ///      succeed — first failure aborts without a rollback
+    ///      attempt, because Lance's add_columns is idempotent (re-
+    ///      running with the same new-column schema is a no-op
+    ///      if already applied). Operator retries via a repeat
+    ///      AlterTable; expected_schema_version keeps double-applies
+    ///      safe.
+    ///   4. Compute merged schema = old ++ new columns, write at
+    ///      version+1 in SchemaStore.
+    ///   5. Release lease.
+    async fn alter_table(
+        &self,
+        request: Request<pb::AlterTableRequest>,
+    ) -> Result<Response<pb::AlterTableResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        self.audit(
+            &request,
+            "AlterTable",
+            &request.get_ref().table_name,
+            &format!(
+                "expected_v={} new_schema_bytes={}",
+                request.get_ref().expected_schema_version,
+                request.get_ref().add_columns_arrow_ipc.len()
+            ),
+        );
+        let req = request.into_inner();
+        if req.table_name.is_empty() {
+            return Err(Status::invalid_argument("table_name required"));
+        }
+        if req.add_columns_arrow_ipc.is_empty() {
+            return Err(Status::invalid_argument(
+                "add_columns_arrow_ipc required (Arrow IPC schema of new columns)",
+            ));
+        }
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+
+        // Precondition checks BEFORE acquiring the cross-coord DDL
+        // lease so that failed validations (routing missing, no
+        // MetaStore, schema_version mismatch) don't leave a stale
+        // lease hanging for TTL. The local `_ddl_guard` still
+        // serialises within this process.
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table {}", req.table_name)));
+        }
+        let Some(ref ms) = self.meta_state else {
+            return Err(Status::failed_precondition(
+                "AlterTable requires a configured metadata_path (MetaStore)",
+            ));
+        };
+        let schema_store =
+            lance_distributed_meta::schema_store::SchemaStore::new(ms.store());
+        let (current_version, current_schema_bytes) = schema_store
+            .get_latest(&req.table_name)
+            .await
+            .map_err(|e| Status::internal(format!("schema_store: {e}")))?
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "no schema recorded for table '{}' — CreateTable predates v2 schema storage?",
+                    req.table_name
+                ))
+            })?;
+        if req.expected_schema_version > 0 && req.expected_schema_version != current_version {
+            return Err(Status::failed_precondition(format!(
+                "expected_schema_version {} does not match current {}",
+                req.expected_schema_version, current_version
+            )));
+        }
+
+        // Preconditions clean — now take the distributed lease.
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
+
+        // Parse both schemas so we can merge post-success.
+        let parse_schema = |bytes: &[u8]| -> Result<arrow::datatypes::Schema, Status> {
+            use arrow::ipc::reader::StreamReader;
+            let reader = StreamReader::try_new(std::io::Cursor::new(bytes), None)
+                .map_err(|e| Status::internal(format!("parse schema IPC: {e}")))?;
+            Ok((*reader.schema()).clone())
+        };
+        let old_schema = parse_schema(&current_schema_bytes)?;
+        let new_cols_schema = parse_schema(&req.add_columns_arrow_ipc)?;
+
+        // Fan out LocalAlterTable to every shard (primary only —
+        // secondary replicas converge via Lance manifest refresh).
+        let mut errors: Vec<String> = Vec::new();
+        for (shard_name, primary, _secondary) in &routing {
+            let Ok(mut client) = self.pool.get_healthy_client(primary).await else {
+                errors.push(format!("shard {}: worker {} unreachable", shard_name, primary));
+                continue;
+            };
+            match client
+                .execute_alter_table(Request::new(pb::LocalAlterTableRequest {
+                    shard_name: shard_name.clone(),
+                    add_columns_arrow_ipc: req.add_columns_arrow_ipc.clone(),
+                }))
+                .await
+            {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() {
+                        errors.push(format!("shard {}: {}", shard_name, r.error));
+                    }
+                }
+                Err(e) => errors.push(format!("shard {}: {}", shard_name, e)),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(Status::internal(format!(
+                "AlterTable fan-out failed: {}",
+                errors.join("; ")
+            )));
+        }
+
+        // Compute merged schema and persist at version+1.
+        let mut merged_fields: Vec<arrow::datatypes::Field> =
+            old_schema.fields().iter().map(|f| (**f).clone()).collect();
+        for f in new_cols_schema.fields() {
+            // Force nullable — the worker's NewColumnTransform::AllNulls
+            // semantics require it.
+            let mut nullable_field = (**f).clone();
+            nullable_field = nullable_field.with_nullable(true);
+            merged_fields.push(nullable_field);
+        }
+        let merged_schema = arrow::datatypes::Schema::new(merged_fields);
+        let merged_bytes = {
+            let empty = arrow::array::RecordBatch::new_empty(std::sync::Arc::new(merged_schema));
+            lance_distributed_common::ipc::record_batch_to_ipc(&empty)
+                .map_err(|e| Status::internal(format!("merged schema IPC: {e}")))?
+        };
+        let new_version = current_version + 1;
+        schema_store
+            .put_schema(&req.table_name, new_version, &merged_bytes)
+            .await
+            .map_err(|e| Status::internal(format!("schema_store put v{}: {}", new_version, e)))?;
+
+        info!(
+            "AlterTable '{}': ADD COLUMN +{} → schema v={}→{}",
+            req.table_name,
+            new_cols_schema.fields().len(),
+            current_version,
+            new_version
+        );
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
+        Ok(Response::new(pb::AlterTableResponse {
+            new_schema_version: new_version,
             error: String::new(),
         }))
     }

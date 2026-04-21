@@ -44,6 +44,19 @@ pub struct RegisterWorkerResponse {
     #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalAlterTableRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    /// Arrow IPC carrying the new column schema (NULLABLE all).
+    #[prost(bytes = "vec", tag = "2")]
+    pub add_columns_arrow_ipc: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalAlterTableResponse {
+    #[prost(string, tag = "1")]
+    pub error: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateLocalShardRequest {
     #[prost(string, tag = "1")]
@@ -492,6 +505,29 @@ pub struct CreateTableResponse {
     #[prost(uint64, tag = "2")]
     pub num_rows: u64,
     #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
+/// \#5.3 Schema evolution.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AlterTableRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    /// Arrow IPC stream carrying ONLY the new column schema. All
+    /// added columns are treated as NULLABLE and filled with NULL
+    /// on existing rows (Lance NewColumnTransform::AllNulls).
+    #[prost(bytes = "vec", tag = "2")]
+    pub add_columns_arrow_ipc: ::prost::alloc::vec::Vec<u8>,
+    /// CAS guard: if non-zero, alter only proceeds when the current
+    /// schema_version equals this. Prevents stale client requests
+    /// from racing with another coord's DDL. 0 = unconditional.
+    #[prost(uint64, tag = "3")]
+    pub expected_schema_version: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AlterTableResponse {
+    #[prost(uint64, tag = "1")]
+    pub new_schema_version: u64,
+    #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -959,6 +995,37 @@ pub mod lance_scheduler_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// \#5.3 Schema evolution: ADD COLUMN NULLABLE. Atomic across shards
+        /// via the DDL lease (#5.2); bumps schema_version in MetaStore.
+        pub async fn alter_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AlterTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AlterTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/AlterTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "AlterTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn get_schema(
             &mut self,
             request: impl tonic::IntoRequest<super::GetSchemaRequest>,
@@ -1260,6 +1327,15 @@ pub mod lance_scheduler_service_server {
             request: tonic::Request<super::CreateIndexRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CreateIndexResponse>,
+            tonic::Status,
+        >;
+        /// \#5.3 Schema evolution: ADD COLUMN NULLABLE. Atomic across shards
+        /// via the DDL lease (#5.2); bumps schema_version in MetaStore.
+        async fn alter_table(
+            &self,
+            request: tonic::Request<super::AlterTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AlterTableResponse>,
             tonic::Status,
         >;
         async fn get_schema(
@@ -1888,6 +1964,52 @@ pub mod lance_scheduler_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CreateIndexSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/AlterTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct AlterTableSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::AlterTableRequest>
+                    for AlterTableSvc<T> {
+                        type Response = super::AlterTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AlterTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::alter_table(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AlterTableSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2694,6 +2816,37 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// \#5.3 Per-shard schema mutation — ADD COLUMN NULLABLE. Caller
+        /// (coord) must hold the DDL lease (#5.2) before fanning this out.
+        pub async fn execute_alter_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LocalAlterTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LocalAlterTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/ExecuteAlterTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "ExecuteAlterTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Health check (Scheduler periodically pings Executors)
         pub async fn health_check(
             &mut self,
@@ -2804,6 +2957,15 @@ pub mod lance_executor_service_server {
             request: tonic::Request<super::QueryRequest>,
         ) -> std::result::Result<
             tonic::Response<super::LocalSearchResponse>,
+            tonic::Status,
+        >;
+        /// \#5.3 Per-shard schema mutation — ADD COLUMN NULLABLE. Caller
+        /// (coord) must hold the DDL lease (#5.2) before fanning this out.
+        async fn execute_alter_table(
+            &self,
+            request: tonic::Request<super::LocalAlterTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LocalAlterTableResponse>,
             tonic::Status,
         >;
         /// Health check (Scheduler periodically pings Executors)
@@ -3353,6 +3515,55 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = LocalQuerySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/ExecuteAlterTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteAlterTableSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LocalAlterTableRequest>
+                    for ExecuteAlterTableSvc<T> {
+                        type Response = super::LocalAlterTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LocalAlterTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::execute_alter_table(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteAlterTableSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

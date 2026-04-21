@@ -482,6 +482,45 @@ impl LanceTableRegistry {
         Ok(())
     }
 
+    /// #5.3 ADD COLUMN NULLABLE on the shard's Lance dataset.
+    ///
+    /// `add_columns_arrow_ipc` is an Arrow IPC stream carrying the
+    /// new column schema; all columns are treated as NULLABLE and
+    /// filled with NULL on existing rows via Lance's
+    /// `NewColumnTransform::AllNulls`.
+    pub async fn add_columns_on_shard(
+        &self,
+        shard_name: &str,
+        add_columns_arrow_ipc: &[u8],
+    ) -> Result<()> {
+        use arrow::ipc::reader::StreamReader;
+        use lance::dataset::NewColumnTransform;
+        use std::sync::Arc;
+
+        // Decode the IPC payload to an Arrow schema. We accept a
+        // stream (same envelope as CreateTable/AddRows use) but
+        // only care about its schema — the caller isn't expected
+        // to attach any row data.
+        let reader = StreamReader::try_new(std::io::Cursor::new(add_columns_arrow_ipc), None)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let new_schema = reader.schema();
+
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        for (name, table) in &targets {
+            table
+                .add_columns(NewColumnTransform::AllNulls(Arc::new((*new_schema).clone())), None)
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            info!(
+                "ADD COLUMN on shard {}: +{} column(s)",
+                name,
+                new_schema.fields().len()
+            );
+        }
+        Ok(())
+    }
+
     /// Get names of all loaded shards (for health check reporting).
     pub async fn shard_names(&self) -> Vec<String> {
         self.shard_row_counts.read().await.keys().cloned().collect()

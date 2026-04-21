@@ -196,6 +196,24 @@ impl LanceExecutorService for WorkerService {
         }
     }
 
+    /// #5.3 Schema evolution — ADD COLUMN NULLABLE on this worker's
+    /// shard. Coord holds the cross-coord DDL lease (#5.2) before
+    /// fanning out; this handler does no locking of its own.
+    async fn execute_alter_table(
+        &self,
+        request: Request<pb::LocalAlterTableRequest>,
+    ) -> Result<Response<pb::LocalAlterTableResponse>, Status> {
+        let req = request.into_inner();
+        match self
+            .registry
+            .add_columns_on_shard(&req.shard_name, &req.add_columns_arrow_ipc)
+            .await
+        {
+            Ok(()) => Ok(Response::new(pb::LocalAlterTableResponse { error: String::new() })),
+            Err(e) => Ok(Response::new(pb::LocalAlterTableResponse { error: e.to_string() })),
+        }
+    }
+
     async fn get_table_info(
         &self,
         request: Request<pb::GetTableInfoRequest>,
