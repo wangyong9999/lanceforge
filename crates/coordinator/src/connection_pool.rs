@@ -111,8 +111,9 @@ impl ConnectionPool {
 
     /// Pick the best-matched candidate from a list of healthy workers
     /// given the desired role. Preference order (B2.2):
-    ///   - `for_reads=true`:  ReadPrimary > Either > WritePrimary
-    ///   - `for_reads=false`: WritePrimary > Either > ReadPrimary
+    /// - `for_reads=true`:  ReadPrimary > Either > WritePrimary
+    /// - `for_reads=false`: WritePrimary > Either > ReadPrimary
+    ///
     /// Single-candidate shards and all-`Either` clusters are unaffected.
     /// Returns an index into `candidates` or None if the slice is empty.
     pub async fn pick_by_role(&self, candidates: &[String], for_reads: bool) -> Option<usize> {
@@ -732,7 +733,7 @@ mod tests {
     // reconnect-after-down, and shard recovery via LoadShard.
 
     use crate::test_support::{
-        spawn_mock_worker, HealthBehavior, MockState, MockWorkerHandle, SearchBehavior,
+        spawn_mock_worker, HealthBehavior, MockState, SearchBehavior,
     };
     use lance_distributed_common::config::{HealthCheckConfig, ServerConfig};
 

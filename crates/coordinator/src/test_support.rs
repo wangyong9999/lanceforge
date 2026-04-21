@@ -7,6 +7,11 @@
 // single test can flip a worker from healthy → unhealthy → back.
 
 #![cfg(test)]
+// Some variants / methods are deliberate future-use scaffolding kept
+// alongside their sibling variants so adding a new test scenario
+// doesn't require editing the harness. Phase C/D tests will exercise
+// `Slow`, `set_search`, and `MockWorkerHandle::shutdown`.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

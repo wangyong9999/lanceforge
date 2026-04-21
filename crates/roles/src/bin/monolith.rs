@@ -43,6 +43,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 const DEFAULT_COORD_PORT: u16 = 50050;
 const DEFAULT_WORKER_PORT: u16 = 50100;
 
+#[derive(Debug)]
 struct Cli {
     config_path: String,
     coord_port: u16,
@@ -55,6 +56,12 @@ struct Cli {
 
 fn parse_cli() -> Result<Cli, String> {
     let args: Vec<String> = std::env::args().collect();
+    parse_cli_from(&args)
+}
+
+/// Testable parse: takes argv (including argv[0] = program name) and
+/// returns a structured Cli. Pure function — no std::env reads.
+fn parse_cli_from(args: &[String]) -> Result<Cli, String> {
     if args.len() < 2 {
         return Err(usage_string());
     }
@@ -126,6 +133,27 @@ fn parse_cli() -> Result<Cli, String> {
     })
 }
 
+/// Validate a parsed Cli independent of the loaded config. Returns
+/// Err with an operator-facing message when the combination is
+/// untenable — currently only port collisions between the gRPC /
+/// REST / worker trio.
+fn validate_cli_ports(cli: &Cli) -> Result<(), String> {
+    if cli.coord_port == cli.worker_port {
+        return Err(format!(
+            "--coord-port and --worker-port must differ (both {})",
+            cli.coord_port
+        ));
+    }
+    if cli.coord_port + 1 == cli.worker_port {
+        return Err(format!(
+            "--worker-port {} collides with coord REST (coord_port+1 = {}). \
+             Choose worker-port >= coord-port + 2, or adjust coord-port.",
+            cli.worker_port, cli.coord_port + 1
+        ));
+    }
+    Ok(())
+}
+
 fn usage_string() -> String {
     format!(
         "lance-monolith — single-process LanceForge composing all roles.\n\
@@ -192,23 +220,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ).into());
     }
 
-    // Preflight: coord hosts its REST/metrics server on coord_port+1.
-    // That can silently collide with worker_port in monolith deployments
-    // because both halves are in the same process. Catch it at startup
-    // instead of letting the coord half die mid-boot with AddrInUse.
-    if cli.coord_port + 1 == cli.worker_port {
-        return Err(format!(
-            "--worker-port {} collides with coord REST (coord_port+1 = {}). \
-             Choose worker-port >= coord-port + 2, or adjust coord-port.",
-            cli.worker_port, cli.coord_port + 1
-        ).into());
-    }
-    if cli.coord_port == cli.worker_port {
-        return Err(format!(
-            "--coord-port and --worker-port must differ (both {})",
-            cli.coord_port
-        ).into());
-    }
+    // Preflight: reject port combinations where coord's REST server
+    // (coord_port+1) would collide with worker_port. Logic lives in
+    // `validate_cli_ports` so the same checks are pinned by unit
+    // tests without needing to boot the binary.
+    validate_cli_ports(&cli).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     info!(
         "lance-monolith '{}' starting: coord :{} + worker :{} ({} tables, {} executors)",
@@ -316,4 +332,107 @@ fn init_tracing_with_optional_otel(filter: EnvFilter) {
         fmt::layer().with_target(true).boxed()
     };
     tracing_subscriber::registry().with(filter).with(fmt_layer).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        let mut out = vec!["lance-monolith".to_string()];
+        out.extend(v.iter().map(|s| s.to_string()));
+        out
+    }
+
+    #[test]
+    fn defaults_apply_when_only_config_given() {
+        let cli = parse_cli_from(&args(&["config.yaml"])).unwrap();
+        assert_eq!(cli.config_path, "config.yaml");
+        assert_eq!(cli.coord_port, DEFAULT_COORD_PORT);
+        assert_eq!(cli.worker_port, DEFAULT_WORKER_PORT);
+        assert_eq!(cli.roles, vec!["qn", "cp", "pe", "idx"]);
+    }
+
+    #[test]
+    fn missing_config_errors_with_usage() {
+        let err = parse_cli_from(&["lance-monolith".to_string()]).unwrap_err();
+        assert!(err.contains("lance-monolith"), "usage string expected, got: {err}");
+    }
+
+    #[test]
+    fn help_flag_returns_usage() {
+        for flag in &["-h", "--help"] {
+            let err = parse_cli_from(&args(&[flag])).unwrap_err();
+            assert!(err.contains("lance-monolith"), "usage expected for {flag}");
+        }
+    }
+
+    #[test]
+    fn unknown_flag_errors() {
+        let err = parse_cli_from(&args(&["config.yaml", "--nope"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "got: {err}");
+    }
+
+    #[test]
+    fn extra_positional_errors() {
+        let err = parse_cli_from(&args(&["config.yaml", "another.yaml"])).unwrap_err();
+        assert!(err.contains("unexpected positional"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_port_errors() {
+        let err = parse_cli_from(&args(&["c.yaml", "--coord-port", "notanumber"])).unwrap_err();
+        assert!(err.contains("--coord-port"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_role_errors() {
+        let err = parse_cli_from(&args(&["c.yaml", "--roles", "qn,nope"])).unwrap_err();
+        assert!(err.contains("unknown role 'nope'"), "got: {err}");
+    }
+
+    #[test]
+    fn valid_roles_subset_parsed() {
+        let cli = parse_cli_from(&args(&["c.yaml", "--roles", "qn,cp"])).unwrap();
+        assert_eq!(cli.roles, vec!["qn", "cp"]);
+    }
+
+    #[test]
+    fn validate_ports_rejects_equal() {
+        let cli = parse_cli_from(&args(&[
+            "c.yaml", "--coord-port", "5050", "--worker-port", "5050",
+        ])).unwrap();
+        let err = validate_cli_ports(&cli).unwrap_err();
+        assert!(err.contains("must differ"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ports_rejects_rest_collision() {
+        // coord_port+1 == worker_port — REST would collide with worker
+        let cli = parse_cli_from(&args(&[
+            "c.yaml", "--coord-port", "5050", "--worker-port", "5051",
+        ])).unwrap();
+        let err = validate_cli_ports(&cli).unwrap_err();
+        assert!(err.contains("REST"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_ports_accepts_safe_gap() {
+        let cli = parse_cli_from(&args(&[
+            "c.yaml", "--coord-port", "5050", "--worker-port", "5052",
+        ])).unwrap();
+        assert!(validate_cli_ports(&cli).is_ok());
+    }
+
+    #[test]
+    fn roles_case_insensitive_and_trimmed() {
+        let cli = parse_cli_from(&args(&["c.yaml", "--roles", "QN, CP , Pe"])).unwrap();
+        assert_eq!(cli.roles, vec!["qn", "cp", "pe"]);
+    }
+
+    #[test]
+    fn worker_id_overrides_default() {
+        let cli = parse_cli_from(&args(&["c.yaml", "--worker-id", "custom-w"])).unwrap();
+        assert_eq!(cli.worker_id.as_deref(), Some("custom-w"));
+    }
 }

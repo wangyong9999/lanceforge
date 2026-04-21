@@ -28,18 +28,37 @@ pip install grpcio grpcio-tools pyarrow lance lancedb numpy
 ```bash
 cd lance-ballista
 cargo build --release
-# 产物: target/release/lance-coordinator, target/release/lance-worker
+# 产物: target/release/lance-{coordinator,worker,monolith}
 ```
 
 ## Step 2 — 启动最小集群
 
-最快的方式是用内置脚本：
+**推荐：单进程 `lance-monolith`**（beta.5 起）。所有角色（QN / PE / IDX / CP）在同一 tokio runtime 内跑，loopback 对接，开发和小规模部署首选：
 
 ```bash
-# 本地 fs 模式，2 worker + 1 coordinator
 BASE=/tmp/lanceforge_demo
 rm -rf $BASE && mkdir -p $BASE
 
+cat > $BASE/config.yaml <<'EOF'
+tables: []
+executors:
+  - id: w0
+    host: 127.0.0.1
+    port: 9102   # 必须 >= coord-port + 2（9200 + 2），避免和 REST (9201) 撞
+default_table_path: /tmp/lanceforge_demo
+server:
+  max_k: 10000
+  slow_query_ms: 1000
+EOF
+
+./target/release/lance-monolith $BASE/config.yaml \
+    --coord-port 9200 --worker-port 9102 &
+sleep 3
+```
+
+**传统双进程模式**（coord + worker，生产模板）：
+
+```bash
 cat > $BASE/config.yaml <<'EOF'
 tables: []
 executors:
@@ -60,6 +79,8 @@ EOF
 ./target/release/lance-coordinator $BASE/config.yaml 9200 &
 sleep 3
 ```
+
+架构：`lance-coordinator` / `lance-worker` 保持行为兼容，beta.5-beta.6 期间 monolith 和双进程并存。详见 `docs/ARCHITECTURE_V2_PLAN.md`。
 
 健康检查：
 

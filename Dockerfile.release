@@ -12,8 +12,12 @@ RUN groupadd -r lance && useradd -r -g lance -d /home/lance -s /usr/sbin/nologin
 
 COPY dist/lance-coordinator /usr/local/bin/lance-coordinator
 COPY dist/lance-worker /usr/local/bin/lance-worker
+# v2 architecture Phase B: single-process composite binary for dev /
+# small-scale deployments. `docker run lanceforge:TAG lance-monolith
+# /config/config.yaml`.
+COPY dist/lance-monolith /usr/local/bin/lance-monolith
 
-RUN chmod +x /usr/local/bin/lance-coordinator /usr/local/bin/lance-worker
+RUN chmod +x /usr/local/bin/lance-coordinator /usr/local/bin/lance-worker /usr/local/bin/lance-monolith
 
 USER lance
 

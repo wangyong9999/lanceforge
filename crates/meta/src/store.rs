@@ -45,13 +45,13 @@ impl std::error::Error for MetaError {}
 /// Current on-disk / on-OBS schema version for the MetaStore snapshot.
 ///
 /// ROADMAP_0.2 §B3.2. Versioning rules:
-///   - 0 = implicit pre-0.2 snapshot (no `schema_version` field in JSON).
-///         Deserializes to `StoreData::default()` schema_version via serde
-///         default, then gets stamped to `CURRENT_SCHEMA_VERSION` on the
-///         next successful write. Reads keep working.
-///   - 1 = 0.2-alpha baseline. Same shape as 0 but explicit.
-///   - Future bumps MUST land with a migration in `migrate_snapshot` and
-///     be documented in `docs/COMPAT_POLICY.md` (B3.5).
+/// - 0 = implicit pre-0.2 snapshot (no `schema_version` field in JSON).
+///   Deserializes to `StoreData::default()` schema_version via serde
+///   default, then gets stamped to `CURRENT_SCHEMA_VERSION` on the
+///   next successful write. Reads keep working.
+/// - 1 = 0.2-alpha baseline. Same shape as 0 but explicit.
+/// - Future bumps MUST land with a migration in `migrate_snapshot` and
+///   be documented in `docs/COMPAT_POLICY.md` (B3.5).
 ///
 /// A snapshot with a version strictly greater than `CURRENT_SCHEMA_VERSION`
 /// is rejected at load time — we cannot safely read a format authored by a

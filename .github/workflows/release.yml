@@ -74,18 +74,17 @@ jobs:
       # uses plain release for push/PR speed.)
       - name: Build release-lto binaries
         run: |
-          cargo build --profile release-lto \
-            -p lance-distributed-coordinator \
-            -p lance-distributed-worker
+          cargo build --profile release-lto --bin lance-coordinator --bin lance-worker --bin lance-monolith
 
       - name: Package tar.gz
         run: |
           mkdir -p dist
           cp target/release-lto/lance-coordinator dist/
           cp target/release-lto/lance-worker dist/
-          strip dist/lance-coordinator dist/lance-worker
+          cp target/release-lto/lance-monolith dist/
+          strip dist/lance-coordinator dist/lance-worker dist/lance-monolith
           tar czf dist/lanceforge-${{ steps.version.outputs.tag }}-linux-x86_64.tar.gz \
-            -C dist lance-coordinator lance-worker
+            -C dist lance-coordinator lance-worker lance-monolith
 
       # ── Python wheel ──
       - name: Build Python wheel
@@ -118,7 +117,7 @@ jobs:
           # Remove leading spaces (heredoc indentation)
           sed -i 's/^          //' $DEB/DEBIAN/control
 
-          cp dist/lance-coordinator dist/lance-worker $DEB/usr/bin/
+          cp dist/lance-coordinator dist/lance-worker dist/lance-monolith $DEB/usr/bin/
 
           # Minimal config
           cat > $DEB/etc/lanceforge/config.yaml <<'YAML'
@@ -172,7 +171,7 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd dist
-          rm -f lance-coordinator lance-worker  # remove loose binaries
+          rm -f lance-coordinator lance-worker lance-monolith  # remove loose binaries
           rm -rf deb
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -222,7 +221,7 @@ jobs:
           path: dist/
 
       - name: Fix binary permissions
-        run: chmod +x dist/lance-coordinator dist/lance-worker 2>/dev/null || true
+        run: chmod +x dist/lance-coordinator dist/lance-worker dist/lance-monolith 2>/dev/null || true
 
       # Rebuild binaries if not in artifact (tar.gz only has them inside)
       - name: Extract binaries from tarball
@@ -230,7 +229,7 @@ jobs:
           if [ ! -f dist/lance-coordinator ]; then
             tar xzf dist/lanceforge-*-linux-x86_64.tar.gz -C dist/
           fi
-          chmod +x dist/lance-coordinator dist/lance-worker
+          chmod +x dist/lance-coordinator dist/lance-worker dist/lance-monolith
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3

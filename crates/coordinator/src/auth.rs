@@ -102,6 +102,7 @@ impl RateBucket {
 /// maps keyed by the same API key. Updated by `reload()` alongside the
 /// role map.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)] // double Arc<RwLock<Arc<_>>> is intentional: outer Arc for sharing across threads, inner Arc for lock-free reload swap
 pub struct ApiKeyInterceptor {
     /// Map from key → role. Empty map = no auth required (all allowed as Admin).
     keys: Arc<std::sync::RwLock<Arc<HashMap<String, Role>>>>,

@@ -46,22 +46,25 @@ jobs:
       # debt, and it has its own test suite that covers those crates.
       - name: Clippy (deny warnings on lance-distributed-* + lanceforge)
         run: |
-          cargo clippy --lib --tests \
+          cargo clippy --lib --tests --bins \
             -p lance-distributed-common \
             -p lance-distributed-proto \
             -p lance-distributed-meta \
             -p lance-distributed-coordinator \
             -p lance-distributed-worker \
+            -p lance-distributed-roles \
             -p lanceforge \
             -- -D warnings
 
       - name: Check (zero warnings)
         run: |
-          cargo check -p lance-distributed-proto \
+          cargo check --bins \
+                       -p lance-distributed-proto \
                        -p lance-distributed-common \
                        -p lance-distributed-coordinator \
                        -p lance-distributed-worker \
-                       -p lance-distributed-meta 2>&1 | tee /tmp/check.log
+                       -p lance-distributed-meta \
+                       -p lance-distributed-roles 2>&1 | tee /tmp/check.log
           ! grep "^warning:" /tmp/check.log
 
       - name: Unit tests — proto
@@ -78,6 +81,13 @@ jobs:
 
       - name: Unit tests — worker
         run: cargo test -p lance-distributed-worker --lib
+
+      # v2 architecture Phase A/B: roles crate owns the lance-coordinator /
+      # lance-worker / lance-monolith binaries. The monolith bin has
+      # CLI unit tests in-file (port validation, role parsing, etc.)
+      # that only fire under `--bins`.
+      - name: Unit tests — roles (bin CLI tests)
+        run: cargo test -p lance-distributed-roles --bins
 
   integration-tests:
     name: Integration Tests
@@ -176,9 +186,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release \
-            -p lance-distributed-coordinator \
-            -p lance-distributed-worker
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -232,9 +240,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release \
-            -p lance-distributed-coordinator \
-            -p lance-distributed-worker
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -317,9 +323,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release \
-            -p lance-distributed-coordinator \
-            -p lance-distributed-worker
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -375,9 +379,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release \
-            -p lance-distributed-coordinator \
-            -p lance-distributed-worker
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow

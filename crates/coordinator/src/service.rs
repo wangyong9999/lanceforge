@@ -2190,7 +2190,7 @@ fn validate_vector_dimension(query_vector: &[u8], declared_dim: u32) -> std::res
     if query_vector.is_empty() {
         return Ok(declared_dim);
     }
-    if query_vector.len() % 4 != 0 {
+    if !query_vector.len().is_multiple_of(4) {
         return Err(Status::invalid_argument(format!(
             "query_vector length {} is not a multiple of 4 bytes (little-endian f32 expected)",
             query_vector.len()
