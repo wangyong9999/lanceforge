@@ -16,6 +16,15 @@ path = "src/bin/coordinator.rs"
 name = "lance-worker"
 path = "src/bin/worker.rs"
 
+# Phase B: single-process binary composing all roles in-process on
+# loopback. Primary deployment target for dev, CI, single-node, and
+# the monolith quickstart path. Production clusters will still use
+# the individual role binaries (lance-qn / lance-pe / lance-idx /
+# lance-cp) introduced in Phase E.
+[[bin]]
+name = "lance-monolith"
+path = "src/bin/monolith.rs"
+
 [dependencies]
 lance-distributed-proto = { path = "../proto" }
 lance-distributed-common = { path = "../common" }

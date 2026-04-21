@@ -20,7 +20,9 @@ tests=(e2e_phase11_test.py e2e_phase12_test.py e2e_phase13_test.py
        e2e_h25_coord_uptime_test.py
        # beta.4 additions (C-series + D-series):
        e2e_beta3_rest_trace_test.py
-       e2e_audit_dropped_test.py)
+       e2e_audit_dropped_test.py
+       # beta.5 additions (v2 architecture Phase B):
+       e2e_monolith_test.py)
 
 pass=0
 fail=0

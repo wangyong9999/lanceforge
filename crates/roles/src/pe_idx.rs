@@ -28,7 +28,6 @@ use lance_distributed_proto::lance_executor_service_server::LanceExecutorService
 use lance_distributed_worker::executor::LanceTableRegistry;
 use lance_distributed_worker::service::WorkerService;
 use log::info;
-use tokio::signal;
 
 /// Run the composite PE + IDX lifecycle inside the current tokio
 /// runtime. Returns when the server has drained after SIGTERM /
@@ -137,16 +136,37 @@ pub async fn run(
         server = server.tls_config(tls_config)?;
     }
 
+    // Accept both SIGINT (ctrl+c, dev) and SIGTERM (K8s pod
+    // termination). Previously only ctrl_c was observed, so K8s
+    // SIGTERM was ignored for the duration of the
+    // `terminationGracePeriodSeconds` budget — the pod looked hung.
+    // Also blocks clean drain in the monolith binary where coord's
+    // H25 seatbelt would force-exit before the worker half noticed.
+    let shutdown = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received — draining in-flight requests..."),
+                _ = sigterm.recv() => info!("SIGTERM received — draining in-flight requests..."),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutdown signal received — draining in-flight requests...");
+        }
+    };
+
     server
         .add_service(
             LanceExecutorServiceServer::new(service)
                 .max_decoding_message_size(worker_cap.saturating_add(16 * 1024 * 1024))
                 .max_encoding_message_size(worker_cap.saturating_add(16 * 1024 * 1024)),
         )
-        .serve_with_shutdown(addr, async {
-            signal::ctrl_c().await.ok();
-            info!("Shutdown signal received — draining in-flight requests...");
-        })
+        .serve_with_shutdown(addr, shutdown)
         .await?;
 
     // Stop registry background (version poller) and the compaction loop.
