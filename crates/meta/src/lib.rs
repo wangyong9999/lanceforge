@@ -10,3 +10,4 @@ pub mod store;
 pub mod session;
 pub mod shard_manager;
 pub mod state;
+pub mod schema_store;
