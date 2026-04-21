@@ -4308,6 +4308,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lance-distributed-roles"
+version = "0.2.0-beta.4"
+dependencies = [
+ "anyhow",
+ "datafusion",
+ "lance-distributed-common",
+ "lance-distributed-coordinator",
+ "lance-distributed-meta",
+ "lance-distributed-proto",
+ "lance-distributed-worker",
+ "log",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "rustls",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tonic 0.14.5",
+ "tonic-prost",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lance-distributed-worker"
 version = "0.2.0-beta.4"
 dependencies = [

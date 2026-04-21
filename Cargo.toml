@@ -26,6 +26,7 @@ members = [
     "crates/worker",
     "crates/meta",
     "crates/admin",
+    "crates/roles",
     # Ballista — kept in the workspace so ballista/* can still inherit
     # [workspace.package] / [workspace.dependencies], but excluded from
     # `default-members` so `cargo build` / `cargo test` (no flags) at the
@@ -48,6 +49,7 @@ default-members = [
     "crates/worker",
     "crates/meta",
     "crates/admin",
+    "crates/roles",
 ]
 resolver = "3"
 

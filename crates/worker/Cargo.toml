@@ -4,9 +4,9 @@ version = "0.2.0-beta.4"
 edition = "2024"
 license = "Apache-2.0"
 
-[[bin]]
-name = "lance-worker"
-path = "src/bin/main.rs"
+# Binary moved to crates/roles (`src/bin/worker.rs`) in Phase A of
+# the v2 architecture. This crate is library-only. See
+# docs/ARCHITECTURE_V2_PLAN.md.
 
 [dependencies]
 lance-distributed-proto = { path = "../proto" }
