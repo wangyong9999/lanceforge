@@ -16,8 +16,13 @@ COPY dist/lance-worker /usr/local/bin/lance-worker
 # small-scale deployments. `docker run lanceforge:TAG lance-monolith
 # /config/config.yaml`.
 COPY dist/lance-monolith /usr/local/bin/lance-monolith
+# v2 architecture Phase E: standalone CP and IDX binaries for split
+# deployments that want independent scaling of control plane and
+# compaction capacity.
+COPY dist/lance-cp /usr/local/bin/lance-cp
+COPY dist/lance-idx /usr/local/bin/lance-idx
 
-RUN chmod +x /usr/local/bin/lance-coordinator /usr/local/bin/lance-worker /usr/local/bin/lance-monolith
+RUN chmod +x /usr/local/bin/lance-coordinator /usr/local/bin/lance-worker /usr/local/bin/lance-monolith /usr/local/bin/lance-cp /usr/local/bin/lance-idx
 
 USER lance
 

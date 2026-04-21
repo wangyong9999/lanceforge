@@ -25,6 +25,18 @@ path = "src/bin/worker.rs"
 name = "lance-monolith"
 path = "src/bin/monolith.rs"
 
+# Phase E: standalone CP and IDX binaries for split-deployment
+# operators. lance-qn / lance-pe are deferred to 0.3 (needs
+# CoordinatorService refactor to strip auth/audit/orphan_gc into
+# CP-side). See docs/ARCHITECTURE_V2_PLAN.md §3 Phase E.
+[[bin]]
+name = "lance-cp"
+path = "src/bin/cp.rs"
+
+[[bin]]
+name = "lance-idx"
+path = "src/bin/idx.rs"
+
 [dependencies]
 lance-distributed-proto = { path = "../proto" }
 lance-distributed-common = { path = "../common" }

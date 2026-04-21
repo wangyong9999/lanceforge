@@ -186,7 +186,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith --bin lance-cp --bin lance-idx
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -240,7 +240,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith --bin lance-cp --bin lance-idx
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -323,7 +323,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith --bin lance-cp --bin lance-idx
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
@@ -379,7 +379,7 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith
+          cargo build --release --bin lance-coordinator --bin lance-worker --bin lance-monolith --bin lance-cp --bin lance-idx
 
       - name: Install Python deps
         run: pip install lance pylance numpy pyyaml grpcio grpcio-tools pyarrow
