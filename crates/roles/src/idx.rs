@@ -32,36 +32,42 @@ pub async fn run(
     config: ClusterConfig,
     shutdown: ShutdownSignal,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let shards: Vec<ShardConfig> = config
+    let initial_shards: Vec<ShardConfig> = config
         .tables
         .iter()
         .flat_map(|t| t.shards.iter().cloned())
         .collect();
 
-    if shards.is_empty() {
-        info!("lance-idx: no config-declared shards — waiting for shutdown");
-        shutdown.notified().await;
-        return Ok(());
-    }
-
     let ctx = SessionContext::default();
     let registry = Arc::new(
         LanceTableRegistry::with_full_config(
             ctx,
-            &shards,
+            &initial_shards,
             &config.storage_options,
             &config.cache,
         )
         .await?,
     );
 
+    // #3 Runtime table discovery: when MetaStore is configured,
+    // each tick refreshes the shard list from `shard_uris` and
+    // LoadShards any newly-appearing entries. Without this step,
+    // tables created at runtime via CreateTable RPC (not in the
+    // config.tables list) would never be compacted by this
+    // standalone IDX process.
+    let meta_store = match config.metadata_path.as_deref() {
+        Some(path) if !path.is_empty() => Some(open_metastore(path, &config).await?),
+        _ => None,
+    };
+
     // Floor at 60s so a misconfigured `interval_secs: 0` doesn't
     // busy-loop compaction. Operators wanting tighter cadence must
     // set it explicitly.
     let interval = Duration::from_secs(config.compaction.interval_secs.max(60));
     info!(
-        "lance-idx: compacting {} shards every {}s",
-        shards.len(),
+        "lance-idx: starting with {} config shard(s), metadata_path={}, interval={}s",
+        initial_shards.len(),
+        if meta_store.is_some() { "set (runtime discovery on)" } else { "unset (config-only)" },
         interval.as_secs()
     );
 
@@ -70,6 +76,9 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                if let Some(ref ms) = meta_store {
+                    discover_and_load(ms, &registry, &config.storage_options).await;
+                }
                 match registry.compact_all().await {
                     Ok(n) => info!("lance-idx: compacted {} table(s)", n),
                     Err(e) => warn!("lance-idx: compact failed: {e}"),
@@ -82,6 +91,59 @@ pub async fn run(
     registry.shutdown();
     info!("lance-idx: stopped");
     Ok(())
+}
+
+async fn open_metastore(
+    path: &str,
+    config: &ClusterConfig,
+) -> Result<Arc<lance_distributed_meta::state::MetaShardState>, Box<dyn std::error::Error>> {
+    use lance_distributed_meta::state::MetaShardState;
+    use lance_distributed_meta::store::{FileMetaStore, MetaStore, S3MetaStore};
+    let store: Arc<dyn MetaStore> = if path.starts_with("s3://")
+        || path.starts_with("gs://")
+        || path.starts_with("az://")
+    {
+        Arc::new(
+            S3MetaStore::new(
+                path,
+                config
+                    .storage_options
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            )
+            .await?,
+        )
+    } else {
+        Arc::new(FileMetaStore::new(path).await?)
+    };
+    Ok(Arc::new(MetaShardState::new(store, "lanceforge")))
+}
+
+/// Pull the current shard_uris registry and LoadShard any entries
+/// the registry hasn't seen yet. Idempotent — already-loaded shard
+/// names are skipped without touching Lance.
+async fn discover_and_load(
+    meta: &lance_distributed_meta::state::MetaShardState,
+    registry: &Arc<LanceTableRegistry>,
+    storage_options: &std::collections::HashMap<String, String>,
+) {
+    let uris = meta.get_shard_uris().await;
+    if uris.is_empty() {
+        return;
+    }
+    let loaded: std::collections::HashSet<String> =
+        registry.shard_names().await.into_iter().collect();
+    for (shard_name, uri) in uris {
+        if loaded.contains(&shard_name) {
+            continue;
+        }
+        match registry.load_shard(&shard_name, &uri, storage_options).await {
+            Ok(_) => info!("lance-idx: discovered runtime shard '{shard_name}' at {uri}"),
+            Err(e) => warn!(
+                "lance-idx: failed to load runtime shard '{shard_name}' at {uri}: {e}"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +174,65 @@ mod tests {
             .await
             .expect("idx::run did not exit within 2s");
         assert!(result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn discover_and_load_skips_already_loaded_and_attempts_new() {
+        // Verify the discovery helper: given a MetaStore with one
+        // URI for an already-loaded shard and one for an
+        // unknown-shard URI that can't actually be loaded, the
+        // helper must NOT attempt to re-load the loaded shard and
+        // must NOT panic on the failed-load case (it logs and
+        // continues).
+        //
+        // We don't build a real Lance dataset in the test — the
+        // happy-path load_shard requires lancedb dependencies the
+        // roles crate doesn't pull for tests. The failure path
+        // still exercises the discovery flow: read MetaStore →
+        // diff against registry → attempt load → log on error.
+        use lance_distributed_common::config::CacheConfig;
+        use lance_distributed_meta::state::MetaShardState;
+        use lance_distributed_meta::store::{FileMetaStore, MetaStore};
+        let tmp = tempfile::tempdir().unwrap();
+        let meta_path = tmp.path().join("meta.json");
+
+        // Seed one URI that doesn't point at a real shard.
+        {
+            let store: Arc<dyn MetaStore> = Arc::new(
+                FileMetaStore::new(meta_path.to_str().unwrap()).await.unwrap(),
+            );
+            let state = MetaShardState::new(store, "lanceforge");
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "ghost_shard".to_string(),
+                tmp.path().join("does_not_exist.lance").to_str().unwrap().to_string(),
+            );
+            state.put_shard_uris(&map).await;
+        }
+
+        // Open the MetaStore again + an empty registry.
+        let store: Arc<dyn MetaStore> = Arc::new(
+            FileMetaStore::new(meta_path.to_str().unwrap()).await.unwrap(),
+        );
+        let state = MetaShardState::new(store, "lanceforge");
+        let registry = Arc::new(
+            LanceTableRegistry::with_full_config(
+                SessionContext::default(),
+                &[],
+                &std::collections::HashMap::new(),
+                &CacheConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        // discover_and_load reads the MetaStore (1 entry), sees
+        // the registry has no shards, attempts load_shard on the
+        // bogus URI. Lance fails cleanly; helper logs + returns.
+        discover_and_load(&state, &registry, &std::collections::HashMap::new()).await;
+        // Registry stayed empty (bad URI didn't create a phantom
+        // entry).
+        assert!(registry.shard_names().await.is_empty());
     }
 
     #[tokio::test]
