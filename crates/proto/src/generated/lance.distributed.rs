@@ -174,6 +174,12 @@ pub struct AnnSearchRequest {
     /// (checkout \<= N) is 0.3 work.
     #[prost(uint64, tag = "12")]
     pub min_schema_version: u64,
+    /// \#5.5 Global commit_seq guard. 0 = no check. Non-zero → coord
+    /// rejects with FailedPrecondition when current global_commit_seq
+    /// \< this value. Client gets this value from a prior WriteResponse
+    /// and uses it to enforce read-your-own-writes across shards.
+    #[prost(uint64, tag = "13")]
+    pub min_commit_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FtsSearchRequest {
@@ -194,6 +200,9 @@ pub struct FtsSearchRequest {
     /// \#5.4: same guard semantics as AnnSearchRequest.
     #[prost(uint64, tag = "8")]
     pub min_schema_version: u64,
+    /// \#5.5
+    #[prost(uint64, tag = "9")]
+    pub min_commit_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HybridSearchRequest {
@@ -227,6 +236,9 @@ pub struct HybridSearchRequest {
     /// \#5.4
     #[prost(uint64, tag = "13")]
     pub min_schema_version: u64,
+    /// \#5.5
+    #[prost(uint64, tag = "14")]
+    pub min_commit_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetByIdsRequest {
@@ -411,6 +423,12 @@ pub struct WriteResponse {
     /// empty if success
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
+    /// \#5.5 Global commit sequence after this write. Monotonically
+    /// increases across the cluster; client can pass this back as
+    /// `min_commit_seq` on subsequent reads for read-your-own-writes.
+    /// 0 when no MetaStore is configured (static deployments).
+    #[prost(uint64, tag = "4")]
+    pub commit_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalWriteRequest {
@@ -610,6 +628,9 @@ pub struct CountRowsRequest {
     /// \#5.4
     #[prost(uint64, tag = "3")]
     pub min_schema_version: u64,
+    /// \#5.5
+    #[prost(uint64, tag = "4")]
+    pub min_commit_seq: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CountRowsResponse {

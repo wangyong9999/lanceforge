@@ -325,6 +325,42 @@ impl CoordinatorService {
             .unwrap_or_default()
     }
 
+    /// #5.5 Bump the global commit sequence via MetaStore-backed
+    /// atomic increment. Returns 0 when no MetaStore is configured
+    /// (static deployments have no durable counter). Called at the
+    /// tail of every successful write path so clients can thread
+    /// the returned seq into subsequent read requests for read-
+    /// your-own-writes.
+    async fn bump_commit_seq(&self) -> u64 {
+        match &self.meta_state {
+            Some(ms) => ms.incr_commit_seq().await,
+            None => 0,
+        }
+    }
+
+    /// #5.5 Current global commit_seq without mutating it.
+    async fn current_commit_seq(&self) -> u64 {
+        match &self.meta_state {
+            Some(ms) => ms.get_commit_seq().await,
+            None => 0,
+        }
+    }
+
+    /// #5.5 min_commit_seq guard for reads.
+    async fn check_min_commit_seq(&self, min: u64) -> Result<(), Status> {
+        if min == 0 {
+            return Ok(());
+        }
+        let current = self.current_commit_seq().await;
+        if current < min {
+            return Err(Status::failed_precondition(format!(
+                "min_commit_seq {} not satisfied; current = {}",
+                min, current
+            )));
+        }
+        Ok(())
+    }
+
     /// #5.4 Schema-version consistency guard.
     ///
     /// If `min > 0`, verify `current_schema_version(table) >= min`.
@@ -675,10 +711,18 @@ impl CoordinatorService {
         }
 
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        // #5.5 Bump global commit_seq on successful write + surface
+        // to client. No MetaStore → seq stays 0.
+        let commit_seq = if error.is_empty() {
+            self.bump_commit_seq().await
+        } else {
+            0
+        };
         Ok(Response::new(pb::WriteResponse {
             affected_rows: total_affected,
             new_version: max_version,
             error,
+            commit_seq,
         }))
     }
 }
@@ -697,6 +741,7 @@ impl LanceSchedulerService for CoordinatorService {
             request.get_ref().min_schema_version,
         )
         .await?;
+        self.check_min_commit_seq(request.get_ref().min_commit_seq).await?;
         // B1: snapshot the incoming trace_id before into_inner() consumes
         // the Request. None when the client didn't send a traceparent.
         let trace_id = extract_trace_id(&request);
@@ -769,6 +814,7 @@ impl LanceSchedulerService for CoordinatorService {
             request.get_ref().min_schema_version,
         )
         .await?;
+        self.check_min_commit_seq(request.get_ref().min_commit_seq).await?;
         let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
@@ -813,6 +859,7 @@ impl LanceSchedulerService for CoordinatorService {
             request.get_ref().min_schema_version,
         )
         .await?;
+        self.check_min_commit_seq(request.get_ref().min_commit_seq).await?;
         let trace_id = extract_trace_id(&request);
         let _permit = self.query_semaphore.try_acquire().map_err(|_| {
             Status::resource_exhausted(format!("Too many concurrent queries (max {})", self.max_concurrent_queries))
@@ -972,10 +1019,16 @@ impl LanceSchedulerService for CoordinatorService {
             .map_err(|e| Status::internal(format!("Worker error: {}", e)))?;
 
         let resp = result.into_inner();
+        let commit_seq = if resp.error.is_empty() {
+            self.bump_commit_seq().await
+        } else {
+            0
+        };
         let write_resp = pb::WriteResponse {
             affected_rows: resp.affected_rows,
             new_version: resp.new_version,
             error: resp.error,
+            commit_seq,
         };
         self.record_dedup(&request_id, &write_resp).await;
         Ok(Response::new(write_resp))
@@ -1051,10 +1104,18 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        // #5.5 Bump global commit_seq on successful write + surface
+        // to client. No MetaStore → seq stays 0.
+        let commit_seq = if error.is_empty() {
+            self.bump_commit_seq().await
+        } else {
+            0
+        };
         Ok(Response::new(pb::WriteResponse {
             affected_rows: total_affected,
             new_version: max_version,
             error,
+            commit_seq,
         }))
     }
 
@@ -1158,10 +1219,16 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        let commit_seq = if error.is_empty() {
+            self.bump_commit_seq().await
+        } else {
+            0
+        };
         let write_resp = pb::WriteResponse {
             affected_rows: total_affected,
             new_version: max_version,
             error,
+            commit_seq,
         };
         self.record_dedup(&request_id, &write_resp).await;
         Ok(Response::new(write_resp))
@@ -1764,6 +1831,7 @@ impl LanceSchedulerService for CoordinatorService {
             request.get_ref().min_schema_version,
         )
         .await?;
+        self.check_min_commit_seq(request.get_ref().min_commit_seq).await?;
         let req = request.into_inner();
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
@@ -3012,7 +3080,7 @@ mod tests {
     async fn test_dedup_empty_id_never_caches() {
         let svc = make_dedup_service();
         // Empty id: record is a no-op, check returns None.
-        let resp = pb::WriteResponse { affected_rows: 100, new_version: 1, error: String::new() };
+        let resp = pb::WriteResponse { affected_rows: 100, new_version: 1, error: String::new() , commit_seq: 0 };
         svc.record_dedup("", &resp).await;
         assert!(svc.check_dedup("").await.is_none(),
                 "empty request_id must never be cached (0.1 behaviour)");
@@ -3021,7 +3089,7 @@ mod tests {
     #[tokio::test]
     async fn test_dedup_roundtrip() {
         let svc = make_dedup_service();
-        let resp = pb::WriteResponse { affected_rows: 42, new_version: 7, error: String::new() };
+        let resp = pb::WriteResponse { affected_rows: 42, new_version: 7, error: String::new() , commit_seq: 0 };
         svc.record_dedup("req-abc", &resp).await;
         let got = svc.check_dedup("req-abc").await.expect("cache hit expected");
         assert_eq!(got.affected_rows, 42);
@@ -3031,7 +3099,7 @@ mod tests {
     #[tokio::test]
     async fn test_dedup_miss_on_unknown_id() {
         let svc = make_dedup_service();
-        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
+        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() , commit_seq: 0 };
         svc.record_dedup("known", &resp).await;
         assert!(svc.check_dedup("unknown").await.is_none());
     }
@@ -3045,7 +3113,7 @@ mod tests {
         let past = std::time::Instant::now()
             .checked_sub(WRITE_DEDUP_TTL + Duration::from_secs(10))
             .expect("Instant subtraction did not underflow in test env");
-        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
+        let resp = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() , commit_seq: 0 };
         svc.write_dedup.write().await.insert("stale".into(), (past, resp));
         assert!(svc.check_dedup("stale").await.is_none(),
                 "TTL-expired entries must not be served even if reaper hasn't run");
@@ -3058,8 +3126,8 @@ mod tests {
         // reuse ids across different payloads) but documents the
         // last-writer-wins semantics for anyone reading the code.
         let svc = make_dedup_service();
-        let a = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() };
-        let b = pb::WriteResponse { affected_rows: 99, new_version: 2, error: String::new() };
+        let a = pb::WriteResponse { affected_rows: 1, new_version: 1, error: String::new() , commit_seq: 0 };
+        let b = pb::WriteResponse { affected_rows: 99, new_version: 2, error: String::new() , commit_seq: 0 };
         svc.record_dedup("same", &a).await;
         svc.record_dedup("same", &b).await;
         let got = svc.check_dedup("same").await.unwrap();
@@ -3073,10 +3141,7 @@ mod tests {
         // logical error gives the same outcome, so clients get the
         // same error back on retry rather than a surprise success.
         let svc = make_dedup_service();
-        let failed = pb::WriteResponse {
-            affected_rows: 0, new_version: 0,
-            error: "table not found".into(),
-        };
+        let failed = pb::WriteResponse { affected_rows: 0, new_version: 0, error: "table not found".into(), commit_seq: 0 };
         svc.record_dedup("failed-req", &failed).await;
         let got = svc.check_dedup("failed-req").await.unwrap();
         assert_eq!(got.error, "table not found");

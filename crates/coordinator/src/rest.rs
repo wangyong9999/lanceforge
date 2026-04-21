@@ -187,6 +187,7 @@ async fn handle_search(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) ->
                 query_text: None,
                 offset: 0,
                 min_schema_version: 0,
+                min_commit_seq: 0,
             };
             match client.ann_search(apply_passthrough(tonic::Request::new(req), hdrs)).await {
                 Ok(resp) => {
@@ -232,6 +233,7 @@ async fn handle_fts(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> (&
                 columns: vec![],
                 offset: 0,
                 min_schema_version: 0,
+                min_commit_seq: 0,
             };
             match client.fts_search(apply_passthrough(tonic::Request::new(req), hdrs)).await {
                 Ok(resp) => {
@@ -264,7 +266,7 @@ async fn handle_count(grpc_port: u16, body: &str, hdrs: &PassthroughHeaders) -> 
     match connect_grpc(grpc_port).await {
         Ok(mut client) => {
             match client.count_rows(apply_passthrough(tonic::Request::new(
-                pb::CountRowsRequest { table_name: table.to_string(), filter: None, min_schema_version: 0 }
+                pb::CountRowsRequest { table_name: table.to_string(), filter: None, min_schema_version: 0, min_commit_seq: 0 }
             ), hdrs)).await {
                 Ok(resp) => {
                     let r = resp.into_inner();
