@@ -1666,8 +1666,17 @@ impl LanceSchedulerService for CoordinatorService {
         }))
     }
 
-    /// R3: Create a tag on the table's single Lance dataset. Picks the
-    /// shard's owner worker and forwards ExecuteCreateTag.
+    /// alpha.3: Create a tag on every shard of the table. Each shard
+    /// tags the version `req.version` (or its current version if 0) on
+    /// its own Lance dataset. Fan-out with DDL lease, matching the
+    /// AlterTable pattern.
+    ///
+    /// Bounded-staleness note: if writes are landing concurrently, the
+    /// "current version" captured on shard_0 vs shard_N may differ by
+    /// one or two writes. The DDL lease prevents concurrent tag
+    /// creations across coords, but does not freeze the write path.
+    /// Users who need strict point-in-time consistency should quiesce
+    /// writes before tagging (application-level concern).
     async fn create_tag(
         &self,
         request: Request<pb::CreateTagRequest>,
@@ -1680,27 +1689,55 @@ impl LanceSchedulerService for CoordinatorService {
             &format!("tag={} v={}", request.get_ref().tag_name, request.get_ref().version),
         );
         let req = request.into_inner();
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
             return Err(Status::not_found(format!("table '{}'", req.table_name)));
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(s) = secondary {
-            s.clone()
-        } else {
-            return Err(Status::unavailable("no healthy worker"));
-        };
-        let mut client = self.pool.get_healthy_client(&owner).await?;
-        let resp = client.execute_create_tag(Request::new(pb::LocalCreateTagRequest {
-            shard_name: shard_name.clone(),
-            tag_name: req.tag_name.clone(),
-            version: req.version,
-        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
-        Ok(Response::new(resp.into_inner()))
+        let mut errors: Vec<String> = Vec::new();
+        let mut max_tagged_version: u64 = 0;
+        for (shard_name, primary, _secondary) in &routing {
+            let Ok(mut client) = self.pool.get_healthy_client(primary).await else {
+                errors.push(format!("{}: worker {} unreachable", shard_name, primary));
+                continue;
+            };
+            match client.execute_create_tag(Request::new(pb::LocalCreateTagRequest {
+                shard_name: shard_name.clone(),
+                tag_name: req.tag_name.clone(),
+                version: req.version,
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() {
+                        errors.push(format!("{}: {}", shard_name, r.error));
+                    } else {
+                        max_tagged_version = max_tagged_version.max(r.tagged_version);
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {}", shard_name, e)),
+            }
+        }
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
+        if !errors.is_empty() {
+            return Ok(Response::new(pb::CreateTagResponse {
+                tagged_version: 0,
+                error: format!("CreateTag fan-out failed on {} shard(s): {}",
+                    errors.len(), errors.join("; ")),
+            }));
+        }
+        Ok(Response::new(pb::CreateTagResponse {
+            tagged_version: max_tagged_version,
+            error: String::new(),
+        }))
     }
 
+    /// alpha.3: List tags. Because CreateTag fans out to every shard,
+    /// the tag set is (eventually) identical across shards. We query
+    /// any one healthy shard — intersection semantics are unnecessary
+    /// as long as CreateTag doesn't silently succeed on a subset.
     async fn list_tags(
         &self,
         request: Request<pb::ListTagsRequest>,
@@ -1712,21 +1749,29 @@ impl LanceSchedulerService for CoordinatorService {
         if routing.is_empty() {
             return Err(Status::not_found(format!("table '{}'", req.table_name)));
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(s) = secondary {
-            s.clone()
-        } else {
-            return Err(Status::unavailable("no healthy worker"));
-        };
-        let mut client = self.pool.get_healthy_client(&owner).await?;
-        let resp = client.execute_list_tags(Request::new(pb::LocalListTagsRequest {
-            shard_name: shard_name.clone(),
-        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
-        Ok(Response::new(resp.into_inner()))
+        // Iterate shards, return the first one that responds. Preserves
+        // availability when shard 0's worker is down.
+        let mut last_err = String::from("no healthy worker");
+        for (shard_name, primary, secondary) in &routing {
+            let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+                primary.clone()
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { s.clone() } else { continue }
+            } else { continue };
+            let Ok(mut client) = self.pool.get_healthy_client(&owner).await else { continue };
+            match client.execute_list_tags(Request::new(pb::LocalListTagsRequest {
+                shard_name: shard_name.clone(),
+            })).await {
+                Ok(resp) => return Ok(Response::new(resp.into_inner())),
+                Err(e) => last_err = format!("{}: {}", shard_name, e),
+            }
+        }
+        Err(Status::unavailable(last_err))
     }
 
+    /// alpha.3: Delete a tag on every shard. Fan-out under DDL lease;
+    /// individual shard failures are surfaced but don't halt the pass
+    /// (tag semantics are already idempotent per shard).
     async fn delete_tag(
         &self,
         request: Request<pb::DeleteTagRequest>,
@@ -1739,26 +1784,52 @@ impl LanceSchedulerService for CoordinatorService {
             &request.get_ref().tag_name.clone(),
         );
         let req = request.into_inner();
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
             return Err(Status::not_found(format!("table '{}'", req.table_name)));
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(s) = secondary {
-            s.clone()
-        } else {
-            return Err(Status::unavailable("no healthy worker"));
-        };
-        let mut client = self.pool.get_healthy_client(&owner).await?;
-        let resp = client.execute_delete_tag(Request::new(pb::LocalDeleteTagRequest {
-            shard_name: shard_name.clone(),
-            tag_name: req.tag_name,
-        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
-        Ok(Response::new(resp.into_inner()))
+        let mut errors: Vec<String> = Vec::new();
+        for (shard_name, primary, _secondary) in &routing {
+            let Ok(mut client) = self.pool.get_healthy_client(primary).await else {
+                errors.push(format!("{}: worker {} unreachable", shard_name, primary));
+                continue;
+            };
+            match client.execute_delete_tag(Request::new(pb::LocalDeleteTagRequest {
+                shard_name: shard_name.clone(),
+                tag_name: req.tag_name.clone(),
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() {
+                        errors.push(format!("{}: {}", shard_name, r.error));
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {}", shard_name, e)),
+            }
+        }
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
+        if !errors.is_empty() {
+            return Ok(Response::new(pb::DeleteTagResponse {
+                error: format!("DeleteTag fan-out partial: {}", errors.join("; ")),
+            }));
+        }
+        Ok(Response::new(pb::DeleteTagResponse { error: String::new() }))
     }
 
+    /// alpha.3: Restore every shard to the given version (on each
+    /// shard's native Lance version counter) or tag name. Fan-out
+    /// under DDL lease. All shards must succeed or the caller gets an
+    /// error listing the failures.
+    ///
+    /// Caveat: Lance restore creates a new manifest pointing at old
+    /// data. If shard A restores successfully and shard B fails, the
+    /// cluster is temporarily in a split-version state. Retrying the
+    /// RestoreTable call brings both shards in line (Lance restore is
+    /// idempotent over a given target version).
     async fn restore_table(
         &self,
         request: Request<pb::RestoreTableRequest>,
@@ -1771,25 +1842,49 @@ impl LanceSchedulerService for CoordinatorService {
             &format!("version={} tag={}", request.get_ref().version, request.get_ref().tag),
         );
         let req = request.into_inner();
+        let _ddl_guard = self.ddl_lock(&req.table_name).await;
+        let ddl_lease = self.acquire_ddl_lease(&req.table_name).await?;
         let routing = self.shard_state.get_shard_routing(&req.table_name).await;
         if routing.is_empty() {
             return Err(Status::not_found(format!("table '{}'", req.table_name)));
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(s) = secondary {
-            s.clone()
-        } else {
-            return Err(Status::unavailable("no healthy worker"));
-        };
-        let mut client = self.pool.get_healthy_client(&owner).await?;
-        let resp = client.execute_restore_table(Request::new(pb::LocalRestoreTableRequest {
-            shard_name: shard_name.clone(),
-            version: req.version,
-            tag: req.tag,
-        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
-        Ok(Response::new(resp.into_inner()))
+        let mut errors: Vec<String> = Vec::new();
+        let mut max_new_version: u64 = 0;
+        for (shard_name, primary, _secondary) in &routing {
+            let Ok(mut client) = self.pool.get_healthy_client(primary).await else {
+                errors.push(format!("{}: worker {} unreachable", shard_name, primary));
+                continue;
+            };
+            match client.execute_restore_table(Request::new(pb::LocalRestoreTableRequest {
+                shard_name: shard_name.clone(),
+                version: req.version,
+                tag: req.tag.clone(),
+            })).await {
+                Ok(resp) => {
+                    let r = resp.into_inner();
+                    if !r.error.is_empty() {
+                        errors.push(format!("{}: {}", shard_name, r.error));
+                    } else {
+                        max_new_version = max_new_version.max(r.new_version);
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {}", shard_name, e)),
+            }
+        }
+        if let Some(lease) = ddl_lease {
+            lease.release().await;
+        }
+        if !errors.is_empty() {
+            return Ok(Response::new(pb::RestoreTableResponse {
+                new_version: 0,
+                error: format!("RestoreTable fan-out failed on {} shard(s); retry is safe: {}",
+                    errors.len(), errors.join("; ")),
+            }));
+        }
+        Ok(Response::new(pb::RestoreTableResponse {
+            new_version: max_new_version,
+            error: String::new(),
+        }))
     }
 
     async fn list_tables(
