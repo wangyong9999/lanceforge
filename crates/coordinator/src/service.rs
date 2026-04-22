@@ -1000,14 +1000,16 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
-        // Two routing modes:
-        //   on_columns set  → hash-partition by key, fan out to matching shards.
-        //                     Same hash UpsertRows uses, so mixed Add/Upsert with
-        //                     the same key land on the same shard (no
-        //                     duplication). See LIMITATIONS.md §1.
-        //   on_columns empty → historical round-robin over shards (one call,
-        //                      one shard). Kept for backward compat.
-        if !req.on_columns.is_empty() {
+        // v0.3 single-dataset: whether or not on_columns is set, if the
+        // table maps to exactly one shard, the whole batch goes to that
+        // shard's owner. on_columns becomes a merge_insert hint only
+        // (ADR-003). Legacy multi-shard routing (>1) still hash-
+        // partitions — retired in R4/R6.
+        //
+        // When routing.len() == 1 and on_columns is empty, the existing
+        // "round-robin to the only shard" path below is already the
+        // single-worker flow; fall through.
+        if !req.on_columns.is_empty() && routing.len() > 1 {
             let resp = self.add_rows_hash_partitioned(req, routing).await?;
             self.record_dedup(&request_id, resp.get_ref()).await;
             return Ok(resp);
