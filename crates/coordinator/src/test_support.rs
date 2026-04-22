@@ -56,6 +56,7 @@ pub struct MockState {
     pub search_calls: AtomicU64,
     pub health_calls: AtomicU64,
     pub load_shard_calls: AtomicU64,
+    pub open_table_calls: AtomicU64,
 }
 
 impl MockState {
@@ -66,6 +67,7 @@ impl MockState {
             search_calls: AtomicU64::new(0),
             health_calls: AtomicU64::new(0),
             load_shard_calls: AtomicU64::new(0),
+            open_table_calls: AtomicU64::new(0),
         })
     }
 
@@ -183,6 +185,7 @@ impl LanceExecutorService for MockExecutor {
         &self,
         _req: Request<pb::OpenTableRequest>,
     ) -> Result<Response<pb::OpenTableResponse>, Status> {
+        self.state.open_table_calls.fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(pb::OpenTableResponse {
             num_rows: 0,
             error: String::new(),

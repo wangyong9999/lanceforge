@@ -976,10 +976,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_shard_recovery_triggers_load_shard_on_missing() {
-        // Worker reports empty shard_names during health_check; pool's
-        // recovery branch should call LoadShard for any assigned shard
-        // not listed. This requires wiring a shard_state + shard_uri
-        // registry into the pool.
+        // R2: Worker reports empty shard_names during health_check; pool's
+        // recovery branch now calls OpenTable (was LoadShard in v0.2)
+        // for any table not present on the reconnected worker. Counter
+        // `open_table_calls` replaces the v0.2 `load_shard_calls`.
         use lance_distributed_common::config::{
             ClusterConfig, ExecutorConfig, ShardConfig, TableConfig,
         };
@@ -1026,13 +1026,13 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut saw_load = false;
         while Instant::now() < deadline {
-            if state.load_shard_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+            if state.open_table_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
                 saw_load = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(saw_load, "expected at least one LoadShard to be issued");
+        assert!(saw_load, "expected at least one OpenTable to be issued");
     }
 
     #[tokio::test]
