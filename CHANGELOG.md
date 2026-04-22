@@ -32,7 +32,7 @@ delivers the remaining pieces needed to call the realignment
 - `scatter_gather.rs` (1143 LOC): multi-worker fan-out dispatch.
 - `shard_pruning.rs`: hash-partition predicate pruning (ADR-003
   replaces this with Lance scalar indexes).
-- `partition_batch_by_hash` + its seven unit tests: row-level
+- `partition_batch_by_hash` + its seven unit tests: per-row
   hash partitioning at the coord. Lance's internal IVF handles
   the intra-dataset distribution.
 - `ShardPruner` field on `CoordinatorService` and the
@@ -49,8 +49,9 @@ delivers the remaining pieces needed to call the realignment
 ### Changed
 - **CreateTable creates exactly one shard per table**. Runtime
   auto-sharding across workers is retired. Lance's internal
-  fragments provide row-level parallelism inside the single
-  dataset.
+  fragments give fragment-level task parallelism (~256 concurrent
+  scans) plus SIMD vectorisation inside each fragment, covering
+  what the v0.2 multi-shard scatter-gather was hand-rolling.
 - `inject_traceparent` moves from `scatter_gather` into
   `worker_select`, colocated with single-worker dispatch.
 - Connection-pool recovery uses `OpenTable` (v0.3) instead of

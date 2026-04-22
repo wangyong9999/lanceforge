@@ -1199,9 +1199,11 @@ impl LanceSchedulerService for CoordinatorService {
 
         // Determine shard count: min(healthy workers, data size threshold)
         // R6 / v0.3 alpha.2: always one shard per table. Lance's
-        // internal fragments provide row-level parallelism; splitting
-        // into multiple Lance datasets at CreateTable time is exactly
-        // the anti-pattern we retired.
+        // internal fragments give us fragment-level task parallelism
+        // (~256 concurrent scans by default) plus SIMD vectorisation
+        // inside each fragment. Splitting into multiple Lance datasets
+        // at CreateTable time is the anti-pattern we retired — it
+        // reinvents what the format already does at a coarser grain.
         let n_shards = 1;
         let _ = num_rows;
 
