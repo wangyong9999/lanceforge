@@ -127,3 +127,4 @@ examples/rag_beir/datasets/
 lance-integration/sdk/python/build/
 lance-integration/sdk/python/dist/
 lance-integration/sdk/python/*.egg-info/
+.claude/
