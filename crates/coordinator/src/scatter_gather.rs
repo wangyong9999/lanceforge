@@ -100,7 +100,7 @@ pub async fn scatter_gather(
 /// mint a fresh 16-hex span_id per outbound RPC so Jaeger/Tempo can
 /// thread spans even though we're not yet emitting spans ourselves
 /// (0.3 OTLP work — for now the value is cross-process log grep).
-pub(crate) fn inject_traceparent<T>(mut req: Request<T>, trace_id: &str) -> Request<T> {
+pub fn inject_traceparent<T>(mut req: Request<T>, trace_id: &str) -> Request<T> {
     use std::time::{SystemTime, UNIX_EPOCH};
     // Cheap 64-bit randomish span_id from nanos; uniqueness across
     // fan-out isn't cryptographic, only enough that log grep can

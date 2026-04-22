@@ -325,6 +325,52 @@ impl CoordinatorService {
             .unwrap_or_default()
     }
 
+    /// v0.3 single-dataset dispatch for read-type queries. When the
+    /// table maps to exactly one shard (the common case post-R4 and
+    /// the only case in fresh v0.3 deployments), issues a single
+    /// RPC to the shard's current owner. Legacy multi-shard routing
+    /// still fans out — retired in R4/R6.
+    ///
+    /// Note: R1b preserves ownership (primary/secondary worker per
+    /// shard) because shard data still physically lives on the
+    /// worker. Full fungible routing lands in R2, after R1c removes
+    /// the shard → worker mapping.
+    async fn dispatch_read(
+        &self,
+        table_name: &str,
+        local_req: pb::LocalSearchRequest,
+        merge_limit: u32,
+        trace_id: Option<String>,
+    ) -> Result<pb::SearchResponse, Status> {
+        let routing = self.shard_state.get_shard_routing(table_name).await;
+        if routing.len() > 1 {
+            let on_cols = self.on_columns_for(table_name).await;
+            return super::scatter_gather::scatter_gather(
+                &self.pool, &self.shard_state, &self.pruner,
+                table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
+                &on_cols,
+            ).await;
+        }
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table '{table_name}' has no shards")));
+        }
+        let (shard_name, primary, secondary) = &routing[0];
+        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary.clone()
+        } else if let Some(sec) = secondary.as_ref() {
+            sec.clone()
+        } else {
+            return Err(Status::unavailable(format!(
+                "primary worker '{primary}' for table '{table_name}' is unhealthy and no secondary available"
+            )));
+        };
+        let mut local_req = local_req;
+        local_req.table_name = shard_name.clone();
+        super::worker_select::single_worker_execute_search(
+            &self.pool, &owner, local_req, merge_limit, self.query_timeout, trace_id,
+        ).await
+    }
+
     /// #5.5 Bump the global commit sequence via MetaStore-backed
     /// atomic increment. Returns 0 when no MetaStore is configured
     /// (static deployments have no durable counter). Called at the
@@ -787,12 +833,9 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let on_cols = self.on_columns_for(&req.table_name).await;
-        let result = super::scatter_gather::scatter_gather(
-            &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
-            &on_cols,
-        ).await;
+        let result = self
+            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
+            .await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -832,12 +875,9 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let on_cols = self.on_columns_for(&req.table_name).await;
-        let result = super::scatter_gather::scatter_gather(
-            &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
-            &on_cols,
-        ).await;
+        let result = self
+            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
+            .await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -882,12 +922,9 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let on_cols = self.on_columns_for(&req.table_name).await;
-        let result = super::scatter_gather::scatter_gather(
-            &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
-            &on_cols,
-        ).await;
+        let result = self
+            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
+            .await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -1837,11 +1874,30 @@ impl LanceSchedulerService for CoordinatorService {
         if routing.is_empty() {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
-        // Count per-shard via primary executor. Query by shard name (not table name)
-        // to avoid double-counting when a worker hosts multiple shards or replicas.
+        // v0.3 single-dataset: single worker holds the full table's Lance
+        // dataset; its count is the table count. Legacy multi-shard (>1
+        // routing entries) still fans out and sums — retired in R4/R6.
+        if routing.len() == 1 {
+            let (shard_name, primary, secondary) = &routing[0];
+            let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else {
+                secondary.clone()
+            };
+            if let Some(w) = owner
+                && let Ok(mut client) = self.pool.get_healthy_client(&w).await
+                && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
+                    table_name: shard_name.clone(),
+                })).await {
+                    return Ok(Response::new(pb::CountRowsResponse {
+                        count: resp.into_inner().num_rows,
+                        error: String::new(),
+                    }));
+                }
+        }
+        // Legacy multi-shard fan-out.
         let mut total = 0u64;
         for (shard_name, primary, secondary) in &routing {
-            // Try primary, fall back to secondary
             let worker = if self.pool.get_healthy_client(primary).await.is_ok() {
                 primary
             } else if let Some(sec) = secondary {
@@ -1851,7 +1907,7 @@ impl LanceSchedulerService for CoordinatorService {
             };
             if let Ok(mut client) = self.pool.get_healthy_client(worker).await
                 && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
-                    table_name: shard_name.clone(), // query by shard name for exact count
+                    table_name: shard_name.clone(),
                 })).await {
                     total += resp.into_inner().num_rows;
                 }
