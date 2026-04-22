@@ -131,6 +131,8 @@ async fn test_sustained_load() {
             columns: vec![],
             metric_type: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
             offset: 0,
         }).await;
 
@@ -215,6 +217,8 @@ async fn test_concurrent_load() {
                 dimension: dim as u32,
                 k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
             offset: 0,
             }).await;
 

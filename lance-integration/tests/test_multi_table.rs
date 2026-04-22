@@ -153,6 +153,8 @@ async fn test_multi_table_different_schemas() {
         dimension: product_dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
         offset: 0,
     }).await.unwrap().into_inner();
 
@@ -175,6 +177,8 @@ async fn test_multi_table_different_schemas() {
         dimension: doc_dim as u32,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
         offset: 0,
     }).await.unwrap().into_inner();
 
@@ -196,6 +200,8 @@ async fn test_multi_table_different_schemas() {
         query_vector: vec![0; 32], dimension: 8,
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
         offset: 0,
     }).await;
     assert!(resp3.is_err());

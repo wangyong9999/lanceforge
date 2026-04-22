@@ -521,7 +521,7 @@ async fn cmd_shards_copy(
         }
 
         if dry_run {
-            let bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
+            let bytes: u64 = objects.iter().map(|o| o.size).sum();
             println!("{table}\t{rel}\t{} objects\t{} bytes", objects.len(), bytes);
             total_objects += objects.len() as u64;
             total_bytes += bytes;
@@ -546,7 +546,7 @@ async fn cmd_shards_copy(
                 dst_store.as_ref(),
                 &o.location,
                 &dst_path,
-                o.size as u64,
+                o.size,
                 multipart_threshold,
             ).await;
 
@@ -554,7 +554,7 @@ async fn cmd_shards_copy(
                 Ok(()) => {
                     log::info!("copy {} → {} ({} bytes)", o.location, dst_path, o.size);
                     total_objects += 1;
-                    total_bytes += o.size as u64;
+                    total_bytes += o.size;
                 }
                 Err(e) => {
                     failures.push((o.location.to_string(), e.to_string()));

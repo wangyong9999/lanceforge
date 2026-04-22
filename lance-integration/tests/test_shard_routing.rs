@@ -152,6 +152,8 @@ async fn test_shard_pruning_in_cluster() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
             offset: 0,
     }).await.unwrap().into_inner();
 
@@ -181,6 +183,8 @@ async fn test_shard_pruning_in_cluster() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
             offset: 0,
     }).await.unwrap().into_inner();
 
@@ -264,6 +268,8 @@ async fn test_secondary_failover() {
         columns: vec![],
         metric_type: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
             offset: 0,
     }).await.unwrap().into_inner();
 

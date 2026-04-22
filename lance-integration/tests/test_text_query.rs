@@ -124,6 +124,8 @@ async fn test_text_query_with_mock_embedding() {
         metric_type: 0,
         query_text: Some("find similar documents".into()),
         offset: 0,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp.error.is_empty(), "Text query error: {}", resp.error);
@@ -144,6 +146,8 @@ async fn test_text_query_with_mock_embedding() {
         columns: vec![],
         metric_type: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
         offset: 0,
     }).await.unwrap().into_inner();
 
@@ -164,6 +168,8 @@ async fn test_text_query_with_mock_embedding() {
         metric_type: 0,
         query_text: Some("ignored because vector is provided".into()),
         offset: 0,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await.unwrap().into_inner();
 
     assert!(resp3.error.is_empty());
@@ -181,7 +187,9 @@ async fn test_text_query_with_mock_embedding() {
         filter: None,
         columns: vec![],
         metric_type: 0,
-        query_text: None,  // both empty
+        query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,  // both empty
         offset: 0,
     }).await;
 
@@ -245,6 +253,8 @@ async fn test_text_query_no_embedding_config() {
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
         query_text: Some("hello".into()),
         offset: 0,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await;
 
     assert!(resp.is_err(), "Should fail without embedding config");

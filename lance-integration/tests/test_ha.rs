@@ -118,6 +118,8 @@ async fn test_multi_coordinator_failover() {
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             offset: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await.unwrap().into_inner();
     assert!(resp1.error.is_empty());
     assert!(resp1.num_rows > 0);
@@ -134,6 +136,8 @@ async fn test_multi_coordinator_failover() {
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             offset: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await.unwrap().into_inner();
     assert!(resp2.error.is_empty());
     assert!(resp2.num_rows > 0);
@@ -156,6 +160,8 @@ async fn test_multi_coordinator_failover() {
             k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             offset: 0,
             query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
         }).await.is_err(),
     };
     assert!(c1_dead, "Coordinator 1 should be dead");
@@ -168,6 +174,8 @@ async fn test_multi_coordinator_failover() {
         k: 5, nprobes: 1, filter: None, columns: vec![], metric_type: 0,
             offset: 0,
         query_text: None,
+        min_schema_version: 0,
+        min_commit_seq: 0,
     }).await.unwrap().into_inner();
     assert!(resp3.error.is_empty());
     assert!(resp3.num_rows > 0);
