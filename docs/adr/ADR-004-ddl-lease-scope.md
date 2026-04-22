@@ -1,6 +1,11 @@
 # ADR-004: DDL lease scope in v3 — CreateTable / DropTable only
 
-**Status**: Accepted
+**Status**: **SUPERSEDED by alpha.3**. The rationale that Lance manifest
+CAS makes DDL lease unnecessary for AlterTable assumed single-
+dataset. Under restored multi-shard architecture, cross-shard DDL
+(AlterTable, CreateIndex, CreateTag, RestoreTable) needs the DDL
+lease for atomicity across shards. alpha.3 retains the lease on
+every DDL op that fans out.
 **Phase**: R0.5
 
 ## Decision

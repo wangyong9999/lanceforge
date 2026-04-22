@@ -1,6 +1,10 @@
 # ADR-005: v0.2 → v0.3 migration guarantees
 
-**Status**: Accepted
+**Status**: **SUPERSEDED by alpha.3**. Migration tool
+(`lance-admin migrate`) removed since alpha.3 does not pursue the
+single-dataset target layout. This ADR's contract semantics remain
+a valid reference design should the question be revisited after
+Lance upstream ships distributed search execution.
 **Phase**: R0.5 (binds R4 implementation)
 
 ## Decision

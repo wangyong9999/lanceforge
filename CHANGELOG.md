@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha.3] — 2026-04-22
+
+Distributed vector search restored. alpha.1 had flipped the coord
+from multi-worker scatter-gather to single-worker dispatch under a
+single-dataset assumption; alpha.2 then deleted the scatter-gather
+code outright. That removed the ability for one query to use CPU
+from multiple nodes, which is the core requirement for 100B-row /
+1K-dim scale. alpha.3 reverts those commits and re-applies the
+orthogonal incremental improvements (DDL ops, Tags, Restore, index
+types) on top of the restored multi-shard architecture.
+
+### Restored (via git revert)
+- Coord scatter-gather dispatch on AnnSearch / FtsSearch /
+  HybridSearch / CountRows — one query fans out to every shard's
+  primary worker, coord merges global top-K.
+- Write-path hash partitioning — AddRows / UpsertRows with
+  on_columns route each row to its owning shard.
+- CreateTable auto-sharding — new tables get one shard per healthy
+  worker (data spreads automatically).
+- MoveShard / rebalance path and the connection-pool recovery that
+  LoadShards assigned shards on worker reconnect.
+- scatter_gather.rs, shard_pruning.rs, partition_batch_by_hash,
+  ShardPruner field, on_columns_for helper, add_rows_hash_partitioned.
+
+### Kept from alpha.1/alpha.2 (orthogonal improvements)
+- **AlterTable DROP / RENAME** column (Lance metadata-only,
+  fan-out + DDL lease). `e2e_schema_evolution` 18/18.
+- **Tags CRUD + RestoreTable** — alpha.3 rewrites the coord
+  handlers to fan-out across every shard (alpha.1 only touched
+  routing[0] which was wrong for multi-shard tables).
+  `e2e_tags_test` 22/22.
+- **CreateIndex** full dispatch for IVF_FLAT / IVF_PQ /
+  IVF_HNSW_SQ / IVF_HNSW_PQ / BTREE / BITMAP / LABEL_LIST /
+  FTS (fixes v0.2's silent IVF_FLAT fallthrough bug).
+- Worker `OpenTable` / `CloseTable` RPCs — table-oriented
+  alternatives to LoadShard/UnloadShard, idempotent.
+- `worker_select` module — dormant but available for operations
+  that target a single shard / worker.
+- 5 Architecture Decision Records under `docs/adr/` — ADR-001
+  and ADR-002 remain applicable; ADR-003 / 004 / 005 are
+  superseded notes on the single-dataset path we chose not to
+  take.
+
+### Removed (alpha.3 cleanup)
+- `lance-admin migrate` subcommand — it converted v0.2 shards/*
+  to v0.3 single-dataset table_uris/*; with multi-shard restored,
+  it has no target and would mislead operators.
+- `r4_migrate_*` unit tests.
+
+### Breaking from alpha.2
+- Anyone who ran `lance-admin migrate --commit` on alpha.1/alpha.2
+  has written `table_uris/*` entries the coord no longer reads.
+  Rollback: delete those keys; existing `shards/*` keys still
+  drive routing.
+- `n_shards = 1` from alpha.2 is reversed; CreateTable now spreads
+  across workers again.
+
+### Test evidence
+- Workspace lib tests: 655+ green.
+- E2E 13/13 green (smoke bench inclusive).
+- `e2e_tags_test` 22/22 under multi-shard fan-out.
+- `e2e_schema_evolution_test` 18/18.
+
 ## [0.3.0-alpha.1] — 2026-04-22
 
 Single-dataset realignment, alpha-grade first cut. One logical

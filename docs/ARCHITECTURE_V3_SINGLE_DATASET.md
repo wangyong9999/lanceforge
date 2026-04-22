@@ -1,6 +1,30 @@
 # LanceForge v3 Architecture — Single-Dataset Realignment
 
-**Status**: Design draft, Phase R0. Not yet implemented.
+**Status**: **REVERSED in v0.3.0-alpha.3**. This doc describes the
+single-dataset realignment that was landed in alpha.1 and alpha.2
+and then reverted in alpha.3. Kept as design-record of the path we
+chose not to take.
+
+**Why reversed**: The single-dataset model collapses one query to
+one worker. For LanceForge's target scale (100B rows × 1K dims), a
+single query often needs CPU aggregation across many nodes — the
+"scatter-gather" shape the multi-shard architecture provides. Until
+Lance upstream ships fragment-level scheduling for cross-node
+distributed execution, we keep the multi-shard model alpha.1
+inherited.
+
+**What survived the reversal**: AlterTable DROP / RENAME, Tags,
+RestoreTable, CreateIndex full dispatch (including IVF_HNSW_SQ bug
+fix), worker OpenTable/CloseTable, worker_select utility — all of
+these are orthogonal to the shard count and remained in the tree
+after alpha.3's revert, now working over the restored multi-shard
+architecture.
+
+**Original draft below, for historical reference.**
+
+---
+
+**Original status**: Design draft, Phase R0. Not yet implemented.
 **Target release**: `v0.3.0-alpha.1`
 **Supersedes**: `docs/ARCHITECTURE_V2.md` (multi-shard model)
 

@@ -1,6 +1,10 @@
 # ADR-003: Scalar BTREE index as the replacement for v0.2 hash partitioning
 
-**Status**: Accepted (conservative default; validated in R6)
+**Status**: **SUPERSEDED by alpha.3**. v0.3 alpha.3 restored multi-shard
+architecture for 100B-row scale requirement. Hash partitioning
+routing via `shard_pruning::hash_route_shard` is the live path again;
+scalar indexes remain useful for intra-shard predicate pushdown but
+no longer replace cross-shard routing.
 **Phase**: R0.5
 
 ## Decision
