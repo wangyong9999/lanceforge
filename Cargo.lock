@@ -4356,6 +4356,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rustls",
+ "tempfile",
  "tokio",
  "tonic 0.14.5",
  "tonic-prost",

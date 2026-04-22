@@ -179,6 +179,23 @@ impl LanceExecutorService for MockExecutor {
         Ok(Response::new(pb::UnloadShardResponse { error: String::new() }))
     }
 
+    async fn open_table(
+        &self,
+        _req: Request<pb::OpenTableRequest>,
+    ) -> Result<Response<pb::OpenTableResponse>, Status> {
+        Ok(Response::new(pb::OpenTableResponse {
+            num_rows: 0,
+            error: String::new(),
+        }))
+    }
+
+    async fn close_table(
+        &self,
+        _req: Request<pb::CloseTableRequest>,
+    ) -> Result<Response<pb::CloseTableResponse>, Status> {
+        Ok(Response::new(pb::CloseTableResponse { error: String::new() }))
+    }
+
     async fn execute_create_index(
         &self,
         _req: Request<pb::CreateIndexRequest>,

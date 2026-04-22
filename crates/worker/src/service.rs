@@ -185,6 +185,38 @@ impl LanceExecutorService for WorkerService {
         Ok(Response::new(pb::UnloadShardResponse { error: String::new() }))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(table = %request.get_ref().table_name)
+    )]
+    async fn open_table(
+        &self,
+        request: Request<pb::OpenTableRequest>,
+    ) -> Result<Response<pb::OpenTableResponse>, Status> {
+        let req = request.into_inner();
+        debug!("Worker: open_table {} from {}", req.table_name, req.uri);
+        let storage_opts: std::collections::HashMap<String, String> = req.storage_options;
+        match self.registry.open_table(&req.table_name, &req.uri, &storage_opts).await {
+            Ok(num_rows) => Ok(Response::new(pb::OpenTableResponse {
+                num_rows,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::OpenTableResponse {
+                num_rows: 0,
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn close_table(
+        &self,
+        request: Request<pb::CloseTableRequest>,
+    ) -> Result<Response<pb::CloseTableResponse>, Status> {
+        let req = request.into_inner();
+        self.registry.close_table(&req.table_name).await;
+        Ok(Response::new(pb::CloseTableResponse { error: String::new() }))
+    }
+
     async fn execute_create_index(
         &self,
         request: Request<pb::CreateIndexRequest>,

@@ -47,3 +47,6 @@ otel = [
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
 ]
+
+[dev-dependencies]
+tempfile = "3"

@@ -373,6 +373,48 @@ impl LanceTableRegistry {
         info!("Unloaded shard: {}", shard_name);
     }
 
+    /// v0.3 realignment: open a Lance dataset into the worker's local
+    /// registry, keyed by table_name. Idempotent — re-opening an
+    /// already-open table is a no-op that returns the current row
+    /// count.
+    ///
+    /// `uri` points at the Lance dataset (e.g. `s3://bucket/prefix/
+    /// orders.lance` or `file:///var/lance/orders.lance`). The parent
+    /// directory is inferred via `split_shard_uri` so we can reuse
+    /// connection pooling with `load_shard`.
+    ///
+    /// R1a: this is a parallel surface to `load_shard`. Coord is not
+    /// yet calling this RPC — R1b flips the coord dispatch path.
+    pub async fn open_table(
+        &self,
+        table_name: &str,
+        uri: &str,
+        storage_options: &std::collections::HashMap<String, String>,
+    ) -> Result<u64> {
+        {
+            let tables = self.tables.read().await;
+            if let Some((_, t)) = tables.iter().find(|(n, _)| n == table_name) {
+                let n = t.count_rows(None).await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))? as u64;
+                return Ok(n);
+            }
+        }
+        self.load_shard(table_name, uri, storage_options).await
+    }
+
+    /// v0.3 realignment: close a table handle. Idempotent — closing an
+    /// already-closed table is a no-op.
+    pub async fn close_table(&self, table_name: &str) {
+        self.unload_shard(table_name).await;
+    }
+
+    /// Test/debug helper — table names currently in the registry.
+    /// Used by R1a unit tests and will be the basis for HealthCheck's
+    /// `table_names` field in R1c.
+    pub async fn open_table_names(&self) -> Vec<String> {
+        self.tables.read().await.iter().map(|(n, _)| n.clone()).collect()
+    }
+
     /// Point lookup: get rows by primary key IDs.
     pub async fn get_by_ids(
         &self,
@@ -1118,5 +1160,108 @@ mod tests {
         let (parent, name) = split_shard_uri("/data/shard_01");
         assert_eq!(parent, "/data/");
         assert_eq!(name, "shard_01");
+    }
+
+    // R1a realignment unit tests: exercise the new table-oriented
+    // surface on a real file-backed Lance dataset. End-to-end coverage
+    // happens via the existing E2E suite; these prove the registry
+    // idempotency contract stated in the method docs.
+
+    async fn build_test_dataset(dir: &tempfile::TempDir, name: &str) -> String {
+        use arrow::array::{Int32Array, FixedSizeListArray, Float32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let ids = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let vec_values = Arc::new(Float32Array::from(
+            (0..12).map(|i| i as f32).collect::<Vec<_>>()
+        ));
+        let fsl_field = Arc::new(Field::new("item", DataType::Float32, true));
+        let vectors = Arc::new(FixedSizeListArray::new(
+            fsl_field.clone(),
+            4,
+            vec_values,
+            None,
+        ));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "vector",
+                DataType::FixedSizeList(fsl_field, 4),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![ids, vectors]).unwrap();
+
+        let parent = format!("{}/", dir.path().display());
+        let db = lancedb::connect(&parent).execute().await.unwrap();
+        let _t = db.create_table(name, vec![batch]).execute().await.unwrap();
+        format!("{}{}.lance", parent, name)
+    }
+
+    #[tokio::test]
+    async fn r1a_open_table_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = build_test_dataset(&tmp, "t1").await;
+
+        let registry = LanceTableRegistry::with_full_config(
+            datafusion::prelude::SessionContext::default(),
+            &[],
+            &std::collections::HashMap::new(),
+            &Default::default(),
+        ).await.unwrap();
+
+        let n1 = registry.open_table("t1", &uri, &std::collections::HashMap::new())
+            .await.unwrap();
+        let n2 = registry.open_table("t1", &uri, &std::collections::HashMap::new())
+            .await.unwrap();
+        assert_eq!(n1, 3);
+        assert_eq!(n2, 3);
+
+        let names = registry.open_table_names().await;
+        assert_eq!(names, vec!["t1"], "duplicate open must not add a second entry");
+    }
+
+    #[tokio::test]
+    async fn r1a_close_table_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = build_test_dataset(&tmp, "t2").await;
+
+        let registry = LanceTableRegistry::with_full_config(
+            datafusion::prelude::SessionContext::default(),
+            &[],
+            &std::collections::HashMap::new(),
+            &Default::default(),
+        ).await.unwrap();
+
+        registry.open_table("t2", &uri, &std::collections::HashMap::new())
+            .await.unwrap();
+        assert_eq!(registry.open_table_names().await, vec!["t2"]);
+
+        registry.close_table("t2").await;
+        registry.close_table("t2").await;
+        assert!(registry.open_table_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn r1a_open_table_names_reports_multiple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let u1 = build_test_dataset(&tmp, "alpha").await;
+        let u2 = build_test_dataset(&tmp, "beta").await;
+
+        let registry = LanceTableRegistry::with_full_config(
+            datafusion::prelude::SessionContext::default(),
+            &[],
+            &std::collections::HashMap::new(),
+            &Default::default(),
+        ).await.unwrap();
+
+        registry.open_table("alpha", &u1, &std::collections::HashMap::new())
+            .await.unwrap();
+        registry.open_table("beta", &u2, &std::collections::HashMap::new())
+            .await.unwrap();
+        let mut names = registry.open_table_names().await;
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta"]);
     }
 }

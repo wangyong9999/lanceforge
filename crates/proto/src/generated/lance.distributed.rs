@@ -489,6 +489,38 @@ pub struct UnloadShardResponse {
     #[prost(string, tag = "1")]
     pub error: ::prost::alloc::string::String,
 }
+/// v0.3 realignment. OpenTable makes a worker ready to serve a given
+/// logical table by opening the Lance dataset at `uri` into its local
+/// registry. Idempotent: re-opening the same table is a no-op.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OpenTableRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub uri: ::prost::alloc::string::String,
+    #[prost(map = "string, string", tag = "3")]
+    pub storage_options: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenTableResponse {
+    #[prost(uint64, tag = "1")]
+    pub num_rows: u64,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloseTableRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloseTableResponse {
+    #[prost(string, tag = "1")]
+    pub error: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetTableInfoRequest {
     #[prost(string, tag = "1")]
@@ -2679,6 +2711,68 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// v0.3 realignment: OpenTable/CloseTable are the table-oriented
+        /// equivalents of LoadShard/UnloadShard. Same wire semantics, clearer
+        /// naming. In R1a they are equivalent; R1b/R1c retire the shard-
+        /// named pair.
+        pub async fn open_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::OpenTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OpenTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/OpenTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "OpenTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn close_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CloseTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CloseTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/CloseTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "CloseTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn execute_create_index(
             &mut self,
             request: impl tonic::IntoRequest<super::CreateIndexRequest>,
@@ -2955,6 +3049,24 @@ pub mod lance_executor_service_server {
             request: tonic::Request<super::UnloadShardRequest>,
         ) -> std::result::Result<
             tonic::Response<super::UnloadShardResponse>,
+            tonic::Status,
+        >;
+        /// v0.3 realignment: OpenTable/CloseTable are the table-oriented
+        /// equivalents of LoadShard/UnloadShard. Same wire semantics, clearer
+        /// naming. In R1a they are equivalent; R1b/R1c retire the shard-
+        /// named pair.
+        async fn open_table(
+            &self,
+            request: tonic::Request<super::OpenTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OpenTableResponse>,
+            tonic::Status,
+        >;
+        async fn close_table(
+            &self,
+            request: tonic::Request<super::CloseTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CloseTableResponse>,
             tonic::Status,
         >;
         async fn execute_create_index(
@@ -3267,6 +3379,98 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = UnloadShardSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/OpenTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct OpenTableSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::OpenTableRequest>
+                    for OpenTableSvc<T> {
+                        type Response = super::OpenTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::OpenTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::open_table(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = OpenTableSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/CloseTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct CloseTableSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::CloseTableRequest>
+                    for CloseTableSvc<T> {
+                        type Response = super::CloseTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CloseTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::close_table(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CloseTableSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

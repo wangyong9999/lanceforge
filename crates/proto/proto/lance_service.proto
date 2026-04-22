@@ -71,6 +71,12 @@ service LanceExecutorService {
   rpc ExecuteLocalWrite (LocalWriteRequest) returns (LocalWriteResponse) {}
   rpc LoadShard (LoadShardRequest) returns (LoadShardResponse) {}
   rpc UnloadShard (UnloadShardRequest) returns (UnloadShardResponse) {}
+  // v0.3 realignment: OpenTable/CloseTable are the table-oriented
+  // equivalents of LoadShard/UnloadShard. Same wire semantics, clearer
+  // naming. In R1a they are equivalent; R1b/R1c retire the shard-
+  // named pair.
+  rpc OpenTable (OpenTableRequest) returns (OpenTableResponse) {}
+  rpc CloseTable (CloseTableRequest) returns (CloseTableResponse) {}
   rpc ExecuteCreateIndex (CreateIndexRequest) returns (CreateIndexResponse) {}
   rpc GetTableInfo (GetTableInfoRequest) returns (GetTableInfoResponse) {}
   rpc CompactAll (CompactRequest) returns (CompactResponse) {}
@@ -361,6 +367,28 @@ message UnloadShardRequest {
 }
 
 message UnloadShardResponse {
+  string error = 1;
+}
+
+// v0.3 realignment. OpenTable makes a worker ready to serve a given
+// logical table by opening the Lance dataset at `uri` into its local
+// registry. Idempotent: re-opening the same table is a no-op.
+message OpenTableRequest {
+  string table_name = 1;
+  string uri = 2;
+  map<string, string> storage_options = 3;
+}
+
+message OpenTableResponse {
+  uint64 num_rows = 1;
+  string error = 2;
+}
+
+message CloseTableRequest {
+  string table_name = 1;
+}
+
+message CloseTableResponse {
   string error = 1;
 }
 
