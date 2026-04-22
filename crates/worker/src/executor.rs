@@ -508,12 +508,31 @@ impl LanceTableRegistry {
 
         for (name, table) in &targets {
             let npart = if num_partitions > 0 { num_partitions } else { 32 };
+            // R3: explicit dispatch for every index type that proto
+            // advertises. Unknown types return an error instead of
+            // silently falling through to IVF_FLAT (the v0.2 bug where
+            // `IVF_HNSW_SQ` became IVF_FLAT without anyone noticing).
             let index = match index_type {
                 "BTREE" => lancedb::index::Index::BTree(Default::default()),
-                "INVERTED" => lancedb::index::Index::FTS(Default::default()),
-                _ => lancedb::index::Index::IvfFlat(
+                "BITMAP" => lancedb::index::Index::Bitmap(Default::default()),
+                "LABEL_LIST" => lancedb::index::Index::LabelList(Default::default()),
+                "INVERTED" | "FTS" => lancedb::index::Index::FTS(Default::default()),
+                "IVF_FLAT" | "" => lancedb::index::Index::IvfFlat(
                     lancedb::index::vector::IvfFlatIndexBuilder::default().num_partitions(npart)
                 ),
+                "IVF_PQ" => lancedb::index::Index::IvfPq(
+                    lancedb::index::vector::IvfPqIndexBuilder::default().num_partitions(npart)
+                ),
+                "IVF_HNSW_SQ" => lancedb::index::Index::IvfHnswSq(
+                    lancedb::index::vector::IvfHnswSqIndexBuilder::default().num_partitions(npart)
+                ),
+                "IVF_HNSW_PQ" => lancedb::index::Index::IvfHnswPq(
+                    lancedb::index::vector::IvfHnswPqIndexBuilder::default().num_partitions(npart)
+                ),
+                other => return Err(DataFusionError::Plan(format!(
+                    "unknown index_type '{other}' — supported: BTREE, BITMAP, LABEL_LIST, \
+                     FTS/INVERTED, IVF_FLAT, IVF_PQ, IVF_HNSW_SQ, IVF_HNSW_PQ"
+                ))),
             };
             table.create_index(&[column], index)
                 .execute()
@@ -1241,6 +1260,30 @@ mod tests {
         registry.close_table("t2").await;
         registry.close_table("t2").await;
         assert!(registry.open_table_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn r3_create_index_unknown_type_errors_out() {
+        // R3 fixed the v0.2 silent fallthrough: unknown index_type
+        // now errors with a clear message listing the supported set.
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = build_test_dataset(&tmp, "idx_err").await;
+        let registry = LanceTableRegistry::with_full_config(
+            datafusion::prelude::SessionContext::default(),
+            &[],
+            &std::collections::HashMap::new(),
+            &Default::default(),
+        ).await.unwrap();
+        registry.open_table("idx_err", &uri, &std::collections::HashMap::new())
+            .await.unwrap();
+
+        let err = registry
+            .create_index_on_table("idx_err", "id", "NOT_A_REAL_TYPE", 0)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown index_type"), "got {msg}");
+        assert!(msg.contains("IVF_HNSW_SQ"), "message must enumerate support: {msg}");
     }
 
     #[tokio::test]

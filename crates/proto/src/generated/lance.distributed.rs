@@ -619,7 +619,11 @@ pub struct CreateIndexRequest {
     /// Column to index
     #[prost(string, tag = "2")]
     pub column: ::prost::alloc::string::String,
-    /// "IVF_FLAT", "IVF_HNSW_SQ", "BTREE", "INVERTED"
+    /// Supported types (R3 realignment):
+    /// Vector:  IVF_FLAT (default), IVF_PQ, IVF_HNSW_SQ, IVF_HNSW_PQ
+    /// Scalar:  BTREE, BITMAP, LABEL_LIST
+    /// Text:    FTS (aliased: INVERTED)
+    /// Unknown types return Plan error; no silent fall-through.
     #[prost(string, tag = "3")]
     pub index_type: ::prost::alloc::string::String,
     /// For IVF indexes (default 32)

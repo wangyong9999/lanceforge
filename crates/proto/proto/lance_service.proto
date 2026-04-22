@@ -462,7 +462,12 @@ message DropTableResponse {
 message CreateIndexRequest {
   string table_name = 1;
   string column = 2;             // Column to index
-  string index_type = 3;         // "IVF_FLAT", "IVF_HNSW_SQ", "BTREE", "INVERTED"
+  // Supported types (R3 realignment):
+  //   Vector:  IVF_FLAT (default), IVF_PQ, IVF_HNSW_SQ, IVF_HNSW_PQ
+  //   Scalar:  BTREE, BITMAP, LABEL_LIST
+  //   Text:    FTS (aliased: INVERTED)
+  // Unknown types return Plan error; no silent fall-through.
+  string index_type = 3;
   uint32 num_partitions = 4;     // For IVF indexes (default 32)
 }
 
