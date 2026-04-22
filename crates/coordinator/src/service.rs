@@ -1559,9 +1559,12 @@ impl LanceSchedulerService for CoordinatorService {
         if req.table_name.is_empty() {
             return Err(Status::invalid_argument("table_name required"));
         }
-        if req.add_columns_arrow_ipc.is_empty() {
+        if req.add_columns_arrow_ipc.is_empty()
+            && req.drop_columns.is_empty()
+            && req.rename_columns.is_empty()
+        {
             return Err(Status::invalid_argument(
-                "add_columns_arrow_ipc required (Arrow IPC schema of new columns)",
+                "AlterTable requires at least one of: add_columns_arrow_ipc, drop_columns, rename_columns"
             ));
         }
         let _ddl_guard = self.ddl_lock(&req.table_name).await;
@@ -1610,7 +1613,11 @@ impl LanceSchedulerService for CoordinatorService {
             Ok((*reader.schema()).clone())
         };
         let old_schema = parse_schema(&current_schema_bytes)?;
-        let new_cols_schema = parse_schema(&req.add_columns_arrow_ipc)?;
+        let new_cols_schema = if req.add_columns_arrow_ipc.is_empty() {
+            arrow::datatypes::Schema::empty()
+        } else {
+            parse_schema(&req.add_columns_arrow_ipc)?
+        };
 
         // Fan out LocalAlterTable to every shard (primary only —
         // secondary replicas converge via Lance manifest refresh).
@@ -1624,6 +1631,8 @@ impl LanceSchedulerService for CoordinatorService {
                 .execute_alter_table(Request::new(pb::LocalAlterTableRequest {
                     shard_name: shard_name.clone(),
                     add_columns_arrow_ipc: req.add_columns_arrow_ipc.clone(),
+                    drop_columns: req.drop_columns.clone(),
+                    rename_columns: req.rename_columns.clone(),
                 }))
                 .await
             {
@@ -1643,7 +1652,8 @@ impl LanceSchedulerService for CoordinatorService {
             )));
         }
 
-        // Compute merged schema and persist at version+1.
+        // Compute merged schema and persist at version+1. Apply ops
+        // in the same order the worker does: ADD, DROP, RENAME.
         let mut merged_fields: Vec<arrow::datatypes::Field> =
             old_schema.fields().iter().map(|f| (**f).clone()).collect();
         for f in new_cols_schema.fields() {
@@ -1652,6 +1662,18 @@ impl LanceSchedulerService for CoordinatorService {
             let mut nullable_field = (**f).clone();
             nullable_field = nullable_field.with_nullable(true);
             merged_fields.push(nullable_field);
+        }
+        if !req.drop_columns.is_empty() {
+            let drop_set: std::collections::HashSet<&str> = req.drop_columns.iter()
+                .map(|s| s.as_str()).collect();
+            merged_fields.retain(|f| !drop_set.contains(f.name().as_str()));
+        }
+        if !req.rename_columns.is_empty() {
+            for f in &mut merged_fields {
+                if let Some(new_name) = req.rename_columns.get(f.name()) {
+                    *f = f.clone().with_name(new_name.clone());
+                }
+            }
         }
         let merged_schema = arrow::datatypes::Schema::new(merged_fields);
         let merged_bytes = {
@@ -1666,9 +1688,11 @@ impl LanceSchedulerService for CoordinatorService {
             .map_err(|e| Status::internal(format!("schema_store put v{}: {}", new_version, e)))?;
 
         info!(
-            "AlterTable '{}': ADD COLUMN +{} → schema v={}→{}",
+            "AlterTable '{}': ADD +{} DROP {} RENAME {} → schema v={}→{}",
             req.table_name,
             new_cols_schema.fields().len(),
+            req.drop_columns.len(),
+            req.rename_columns.len(),
             current_version,
             new_version
         );

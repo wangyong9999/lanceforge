@@ -614,6 +614,103 @@ impl LanceTableRegistry {
         Ok(())
     }
 
+    /// R3: DROP columns via Lance's metadata-only drop_columns. Older
+    /// Lance versions retain the column (metadata-only); a subsequent
+    /// compact_files + cleanup_files removes the physical data. We
+    /// don't force that cleanup here — the IDX compaction loop handles
+    /// it on its normal cadence.
+    ///
+    /// Idempotent: columns already absent are skipped silently.
+    pub async fn drop_columns_on_shard(
+        &self,
+        shard_name: &str,
+        columns: &[String],
+    ) -> Result<()> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+        use std::collections::HashSet;
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        for (name, table) in &targets {
+            let current_schema = table.schema().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let existing: HashSet<String> = current_schema.fields().iter()
+                .map(|f| f.name().clone()).collect();
+            let to_drop: Vec<&str> = columns.iter()
+                .filter(|c| existing.contains(c.as_str()))
+                .map(|s| s.as_str()).collect();
+            if to_drop.is_empty() {
+                info!("DROP COLUMN on {}: all {} already absent, no-op", name, columns.len());
+                continue;
+            }
+            let dropped_count = to_drop.len();
+            table.drop_columns(&to_drop).await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            info!(
+                "DROP COLUMN on shard {}: -{} column(s) ({} already absent)",
+                name,
+                dropped_count,
+                columns.len() - dropped_count
+            );
+        }
+        Ok(())
+    }
+
+    /// R3: RENAME columns via Lance's alter_columns. Pairs of
+    /// (old_name, new_name). Rows with a rename in-flight see the
+    /// new name atomically after the Lance manifest commit.
+    ///
+    /// Idempotent: when `old_name` is already absent AND `new_name`
+    /// is already present, the pair is treated as applied and skipped.
+    pub async fn rename_columns_on_shard(
+        &self,
+        shard_name: &str,
+        renames: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        if renames.is_empty() {
+            return Ok(());
+        }
+        use std::collections::HashSet;
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        for (name, table) in &targets {
+            let current_schema = table.schema().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let existing: HashSet<String> = current_schema.fields().iter()
+                .map(|f| f.name().clone()).collect();
+            let mut alterations: Vec<lancedb::table::ColumnAlteration> = Vec::new();
+            let mut skipped = 0usize;
+            for (old, new) in renames {
+                if !existing.contains(old) && existing.contains(new) {
+                    skipped += 1;
+                    continue;
+                }
+                if !existing.contains(old) {
+                    return Err(DataFusionError::Plan(format!(
+                        "RENAME COLUMN on {name}: source '{old}' does not exist"
+                    )));
+                }
+                alterations.push(
+                    lancedb::table::ColumnAlteration::new(old.clone())
+                        .rename(new.clone())
+                );
+            }
+            if alterations.is_empty() {
+                info!("RENAME COLUMN on {}: all {} renames already applied, no-op", name, renames.len());
+                continue;
+            }
+            let applied = alterations.len();
+            table.alter_columns(&alterations).await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            info!(
+                "RENAME COLUMN on shard {}: {} rename(s) applied, {} already done",
+                name, applied, skipped
+            );
+        }
+        Ok(())
+    }
+
     /// Get names of all loaded shards (for health check reporting).
     pub async fn shard_names(&self) -> Vec<String> {
         self.shard_row_counts.read().await.keys().cloned().collect()

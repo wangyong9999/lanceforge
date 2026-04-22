@@ -94,6 +94,10 @@ message LocalAlterTableRequest {
   string shard_name = 1;
   // Arrow IPC carrying the new column schema (NULLABLE all).
   bytes add_columns_arrow_ipc = 2;
+  // R3: DROP column names (Lance metadata-only).
+  repeated string drop_columns = 3;
+  // R3: RENAME pairs {old: new}.
+  map<string, string> rename_columns = 4;
 }
 
 message LocalAlterTableResponse {
@@ -426,10 +430,11 @@ message CreateTableResponse {
   string error = 3;
 }
 
-// #5.3 Schema evolution.
+// #5.3 Schema evolution. R3 realignment extends from ADD-only to
+// full DROP / RENAME as Lance-native metadata operations.
 message AlterTableRequest {
   string table_name = 1;
-  // Arrow IPC stream carrying ONLY the new column schema. All
+  // ADD: Arrow IPC stream carrying ONLY the new column schema. All
   // added columns are treated as NULLABLE and filled with NULL
   // on existing rows (Lance NewColumnTransform::AllNulls).
   bytes add_columns_arrow_ipc = 2;
@@ -437,6 +442,13 @@ message AlterTableRequest {
   // schema_version equals this. Prevents stale client requests
   // from racing with another coord's DDL. 0 = unconditional.
   uint64 expected_schema_version = 3;
+  // DROP: column names to remove. Lance metadata-only, not a rewrite
+  // — older versions retain the columns until compact_files +
+  // cleanup_files. Empty list = no-op for drop.
+  repeated string drop_columns = 4;
+  // RENAME: {old_name: new_name} pairs. Lance alter_columns metadata
+  // update. Empty = no-op for rename.
+  map<string, string> rename_columns = 5;
 }
 
 message AlterTableResponse {

@@ -955,6 +955,16 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.UnloadShardRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.UnloadShardResponse.FromString,
                 _registered_method=True)
+        self.OpenTable = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/OpenTable',
+                request_serializer=lance__service__pb2.OpenTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.OpenTableResponse.FromString,
+                _registered_method=True)
+        self.CloseTable = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/CloseTable',
+                request_serializer=lance__service__pb2.CloseTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CloseTableResponse.FromString,
+                _registered_method=True)
         self.ExecuteCreateIndex = channel.unary_unary(
                 '/lance.distributed.LanceExecutorService/ExecuteCreateIndex',
                 request_serializer=lance__service__pb2.CreateIndexRequest.SerializeToString,
@@ -1020,6 +1030,22 @@ class LanceExecutorServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def UnloadShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def OpenTable(self, request, context):
+        """v0.3 realignment: OpenTable/CloseTable are the table-oriented
+        equivalents of LoadShard/UnloadShard. Same wire semantics, clearer
+        naming. In R1a they are equivalent; R1b/R1c retire the shard-
+        named pair.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CloseTable(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -1098,6 +1124,16 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.UnloadShard,
                     request_deserializer=lance__service__pb2.UnloadShardRequest.FromString,
                     response_serializer=lance__service__pb2.UnloadShardResponse.SerializeToString,
+            ),
+            'OpenTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.OpenTable,
+                    request_deserializer=lance__service__pb2.OpenTableRequest.FromString,
+                    response_serializer=lance__service__pb2.OpenTableResponse.SerializeToString,
+            ),
+            'CloseTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.CloseTable,
+                    request_deserializer=lance__service__pb2.CloseTableRequest.FromString,
+                    response_serializer=lance__service__pb2.CloseTableResponse.SerializeToString,
             ),
             'ExecuteCreateIndex': grpc.unary_unary_rpc_method_handler(
                     servicer.ExecuteCreateIndex,
@@ -1249,6 +1285,60 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/UnloadShard',
             lance__service__pb2.UnloadShardRequest.SerializeToString,
             lance__service__pb2.UnloadShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def OpenTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/OpenTable',
+            lance__service__pb2.OpenTableRequest.SerializeToString,
+            lance__service__pb2.OpenTableResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CloseTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/CloseTable',
+            lance__service__pb2.CloseTableRequest.SerializeToString,
+            lance__service__pb2.CloseTableResponse.FromString,
             options,
             channel_credentials,
             insecure,

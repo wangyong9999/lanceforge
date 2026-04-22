@@ -44,13 +44,22 @@ pub struct RegisterWorkerResponse {
     #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LocalAlterTableRequest {
     #[prost(string, tag = "1")]
     pub shard_name: ::prost::alloc::string::String,
     /// Arrow IPC carrying the new column schema (NULLABLE all).
     #[prost(bytes = "vec", tag = "2")]
     pub add_columns_arrow_ipc: ::prost::alloc::vec::Vec<u8>,
+    /// R3: DROP column names (Lance metadata-only).
+    #[prost(string, repeated, tag = "3")]
+    pub drop_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// R3: RENAME pairs {old: new}.
+    #[prost(map = "string, string", tag = "4")]
+    pub rename_columns: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalAlterTableResponse {
@@ -570,12 +579,13 @@ pub struct CreateTableResponse {
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
 }
-/// \#5.3 Schema evolution.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+/// \#5.3 Schema evolution. R3 realignment extends from ADD-only to
+/// full DROP / RENAME as Lance-native metadata operations.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AlterTableRequest {
     #[prost(string, tag = "1")]
     pub table_name: ::prost::alloc::string::String,
-    /// Arrow IPC stream carrying ONLY the new column schema. All
+    /// ADD: Arrow IPC stream carrying ONLY the new column schema. All
     /// added columns are treated as NULLABLE and filled with NULL
     /// on existing rows (Lance NewColumnTransform::AllNulls).
     #[prost(bytes = "vec", tag = "2")]
@@ -585,6 +595,18 @@ pub struct AlterTableRequest {
     /// from racing with another coord's DDL. 0 = unconditional.
     #[prost(uint64, tag = "3")]
     pub expected_schema_version: u64,
+    /// DROP: column names to remove. Lance metadata-only, not a rewrite
+    /// — older versions retain the columns until compact_files +
+    /// cleanup_files. Empty list = no-op for drop.
+    #[prost(string, repeated, tag = "4")]
+    pub drop_columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// RENAME: {old_name: new_name} pairs. Lance alter_columns metadata
+    /// update. Empty = no-op for rename.
+    #[prost(map = "string, string", tag = "5")]
+    pub rename_columns: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AlterTableResponse {

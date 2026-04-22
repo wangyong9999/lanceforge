@@ -236,14 +236,31 @@ impl LanceExecutorService for WorkerService {
         request: Request<pb::LocalAlterTableRequest>,
     ) -> Result<Response<pb::LocalAlterTableResponse>, Status> {
         let req = request.into_inner();
-        match self
-            .registry
-            .add_columns_on_shard(&req.shard_name, &req.add_columns_arrow_ipc)
-            .await
+        // R3: apply ADD, then DROP, then RENAME in that order. Keeps
+        // the invariant that a dropped-then-renamed column can't
+        // alias a fresh ADD of the same name within one request.
+        if !req.add_columns_arrow_ipc.is_empty()
+            && let Err(e) = self.registry
+                .add_columns_on_shard(&req.shard_name, &req.add_columns_arrow_ipc)
+                .await
         {
-            Ok(()) => Ok(Response::new(pb::LocalAlterTableResponse { error: String::new() })),
-            Err(e) => Ok(Response::new(pb::LocalAlterTableResponse { error: e.to_string() })),
+            return Ok(Response::new(pb::LocalAlterTableResponse { error: e.to_string() }));
         }
+        if !req.drop_columns.is_empty()
+            && let Err(e) = self.registry
+                .drop_columns_on_shard(&req.shard_name, &req.drop_columns)
+                .await
+        {
+            return Ok(Response::new(pb::LocalAlterTableResponse { error: e.to_string() }));
+        }
+        if !req.rename_columns.is_empty()
+            && let Err(e) = self.registry
+                .rename_columns_on_shard(&req.shard_name, &req.rename_columns)
+                .await
+        {
+            return Ok(Response::new(pb::LocalAlterTableResponse { error: e.to_string() }));
+        }
+        Ok(Response::new(pb::LocalAlterTableResponse { error: String::new() }))
     }
 
     async fn get_table_info(
