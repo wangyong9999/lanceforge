@@ -388,6 +388,63 @@ impl LanceExecutorService for WorkerService {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }
+
+    async fn execute_create_tag(
+        &self,
+        request: Request<pb::LocalCreateTagRequest>,
+    ) -> Result<Response<pb::CreateTagResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.create_tag_on_shard(&req.shard_name, &req.tag_name, req.version).await {
+            Ok(v) => Ok(Response::new(pb::CreateTagResponse {
+                tagged_version: v, error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::CreateTagResponse {
+                tagged_version: 0, error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn execute_list_tags(
+        &self,
+        request: Request<pb::LocalListTagsRequest>,
+    ) -> Result<Response<pb::ListTagsResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.list_tags_on_shard(&req.shard_name).await {
+            Ok(pairs) => Ok(Response::new(pb::ListTagsResponse {
+                tags: pairs.into_iter().map(|(name, version)| pb::TagInfo { name, version }).collect(),
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::ListTagsResponse {
+                tags: vec![], error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn execute_delete_tag(
+        &self,
+        request: Request<pb::LocalDeleteTagRequest>,
+    ) -> Result<Response<pb::DeleteTagResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.delete_tag_on_shard(&req.shard_name, &req.tag_name).await {
+            Ok(()) => Ok(Response::new(pb::DeleteTagResponse { error: String::new() })),
+            Err(e) => Ok(Response::new(pb::DeleteTagResponse { error: e.to_string() })),
+        }
+    }
+
+    async fn execute_restore_table(
+        &self,
+        request: Request<pb::LocalRestoreTableRequest>,
+    ) -> Result<Response<pb::RestoreTableResponse>, Status> {
+        let req = request.into_inner();
+        match self.registry.restore_on_shard(&req.shard_name, req.version, &req.tag).await {
+            Ok(v) => Ok(Response::new(pb::RestoreTableResponse {
+                new_version: v, error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(pb::RestoreTableResponse {
+                new_version: 0, error: e.to_string(),
+            })),
+        }
+    }
 }
 
 fn local_request_to_descriptor(req: &LocalSearchRequest) -> LanceQueryDescriptor {

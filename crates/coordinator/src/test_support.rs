@@ -298,6 +298,40 @@ impl LanceExecutorService for MockExecutor {
             }
         }
     }
+
+    async fn execute_create_tag(
+        &self,
+        _req: Request<pb::LocalCreateTagRequest>,
+    ) -> Result<Response<pb::CreateTagResponse>, Status> {
+        Ok(Response::new(pb::CreateTagResponse {
+            tagged_version: 0, error: String::new(),
+        }))
+    }
+
+    async fn execute_list_tags(
+        &self,
+        _req: Request<pb::LocalListTagsRequest>,
+    ) -> Result<Response<pb::ListTagsResponse>, Status> {
+        Ok(Response::new(pb::ListTagsResponse {
+            tags: vec![], error: String::new(),
+        }))
+    }
+
+    async fn execute_delete_tag(
+        &self,
+        _req: Request<pb::LocalDeleteTagRequest>,
+    ) -> Result<Response<pb::DeleteTagResponse>, Status> {
+        Ok(Response::new(pb::DeleteTagResponse { error: String::new() }))
+    }
+
+    async fn execute_restore_table(
+        &self,
+        _req: Request<pb::LocalRestoreTableRequest>,
+    ) -> Result<Response<pb::RestoreTableResponse>, Status> {
+        Ok(Response::new(pb::RestoreTableResponse {
+            new_version: 0, error: String::new(),
+        }))
+    }
 }
 
 pub struct MockWorkerHandle {

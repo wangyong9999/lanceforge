@@ -56,6 +56,40 @@ class RegisterWorkerResponse(_message.Message):
     error: str
     def __init__(self, assigned_shards: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
 
+class LocalCreateTagRequest(_message.Message):
+    __slots__ = ("shard_name", "tag_name", "version")
+    SHARD_NAME_FIELD_NUMBER: _ClassVar[int]
+    TAG_NAME_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    shard_name: str
+    tag_name: str
+    version: int
+    def __init__(self, shard_name: _Optional[str] = ..., tag_name: _Optional[str] = ..., version: _Optional[int] = ...) -> None: ...
+
+class LocalListTagsRequest(_message.Message):
+    __slots__ = ("shard_name",)
+    SHARD_NAME_FIELD_NUMBER: _ClassVar[int]
+    shard_name: str
+    def __init__(self, shard_name: _Optional[str] = ...) -> None: ...
+
+class LocalDeleteTagRequest(_message.Message):
+    __slots__ = ("shard_name", "tag_name")
+    SHARD_NAME_FIELD_NUMBER: _ClassVar[int]
+    TAG_NAME_FIELD_NUMBER: _ClassVar[int]
+    shard_name: str
+    tag_name: str
+    def __init__(self, shard_name: _Optional[str] = ..., tag_name: _Optional[str] = ...) -> None: ...
+
+class LocalRestoreTableRequest(_message.Message):
+    __slots__ = ("shard_name", "version", "tag")
+    SHARD_NAME_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    TAG_FIELD_NUMBER: _ClassVar[int]
+    shard_name: str
+    version: int
+    tag: str
+    def __init__(self, shard_name: _Optional[str] = ..., version: _Optional[int] = ..., tag: _Optional[str] = ...) -> None: ...
+
 class LocalAlterTableRequest(_message.Message):
     __slots__ = ("shard_name", "add_columns_arrow_ipc", "drop_columns", "rename_columns")
     class RenameColumnsEntry(_message.Message):
@@ -574,6 +608,78 @@ class AlterTableRequest(_message.Message):
     drop_columns: _containers.RepeatedScalarFieldContainer[str]
     rename_columns: _containers.ScalarMap[str, str]
     def __init__(self, table_name: _Optional[str] = ..., add_columns_arrow_ipc: _Optional[bytes] = ..., expected_schema_version: _Optional[int] = ..., drop_columns: _Optional[_Iterable[str]] = ..., rename_columns: _Optional[_Mapping[str, str]] = ...) -> None: ...
+
+class CreateTagRequest(_message.Message):
+    __slots__ = ("table_name", "tag_name", "version")
+    TABLE_NAME_FIELD_NUMBER: _ClassVar[int]
+    TAG_NAME_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    table_name: str
+    tag_name: str
+    version: int
+    def __init__(self, table_name: _Optional[str] = ..., tag_name: _Optional[str] = ..., version: _Optional[int] = ...) -> None: ...
+
+class CreateTagResponse(_message.Message):
+    __slots__ = ("tagged_version", "error")
+    TAGGED_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    tagged_version: int
+    error: str
+    def __init__(self, tagged_version: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
+
+class ListTagsRequest(_message.Message):
+    __slots__ = ("table_name",)
+    TABLE_NAME_FIELD_NUMBER: _ClassVar[int]
+    table_name: str
+    def __init__(self, table_name: _Optional[str] = ...) -> None: ...
+
+class TagInfo(_message.Message):
+    __slots__ = ("name", "version")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    version: int
+    def __init__(self, name: _Optional[str] = ..., version: _Optional[int] = ...) -> None: ...
+
+class ListTagsResponse(_message.Message):
+    __slots__ = ("tags", "error")
+    TAGS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    tags: _containers.RepeatedCompositeFieldContainer[TagInfo]
+    error: str
+    def __init__(self, tags: _Optional[_Iterable[_Union[TagInfo, _Mapping]]] = ..., error: _Optional[str] = ...) -> None: ...
+
+class DeleteTagRequest(_message.Message):
+    __slots__ = ("table_name", "tag_name")
+    TABLE_NAME_FIELD_NUMBER: _ClassVar[int]
+    TAG_NAME_FIELD_NUMBER: _ClassVar[int]
+    table_name: str
+    tag_name: str
+    def __init__(self, table_name: _Optional[str] = ..., tag_name: _Optional[str] = ...) -> None: ...
+
+class DeleteTagResponse(_message.Message):
+    __slots__ = ("error",)
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    error: str
+    def __init__(self, error: _Optional[str] = ...) -> None: ...
+
+class RestoreTableRequest(_message.Message):
+    __slots__ = ("table_name", "version", "tag")
+    TABLE_NAME_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    TAG_FIELD_NUMBER: _ClassVar[int]
+    table_name: str
+    version: int
+    tag: str
+    def __init__(self, table_name: _Optional[str] = ..., version: _Optional[int] = ..., tag: _Optional[str] = ...) -> None: ...
+
+class RestoreTableResponse(_message.Message):
+    __slots__ = ("new_version", "error")
+    NEW_VERSION_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    new_version: int
+    error: str
+    def __init__(self, new_version: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
 
 class AlterTableResponse(_message.Message):
     __slots__ = ("new_schema_version", "error")

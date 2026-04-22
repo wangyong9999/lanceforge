@@ -28,6 +28,12 @@ service LanceSchedulerService {
   rpc Rebalance (RebalanceRequest) returns (RebalanceResponse) {}
   rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
   rpc MoveShard (MoveShardRequest) returns (MoveShardResponse) {}
+  // R3 realignment: Tags + Restore. Direct pass-through to Lance
+  // native tag/checkout/restore APIs on the single table's dataset.
+  rpc CreateTag (CreateTagRequest) returns (CreateTagResponse) {}
+  rpc ListTags (ListTagsRequest) returns (ListTagsResponse) {}
+  rpc DeleteTag (DeleteTagRequest) returns (DeleteTagResponse) {}
+  rpc RestoreTable (RestoreTableRequest) returns (RestoreTableResponse) {}
   // Point lookup
   rpc GetByIds (GetByIdsRequest) returns (SearchResponse) {}
   // Expression scan (SQL filter without vector)
@@ -88,6 +94,33 @@ service LanceExecutorService {
   rpc ExecuteAlterTable (LocalAlterTableRequest) returns (LocalAlterTableResponse) {}
   // Health check (Scheduler periodically pings Executors)
   rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse) {}
+  // R3 realignment: tag operations on a local table. shard_name
+  // identifies the Lance dataset on this worker.
+  rpc ExecuteCreateTag (LocalCreateTagRequest) returns (CreateTagResponse) {}
+  rpc ExecuteListTags (LocalListTagsRequest) returns (ListTagsResponse) {}
+  rpc ExecuteDeleteTag (LocalDeleteTagRequest) returns (DeleteTagResponse) {}
+  rpc ExecuteRestoreTable (LocalRestoreTableRequest) returns (RestoreTableResponse) {}
+}
+
+message LocalCreateTagRequest {
+  string shard_name = 1;
+  string tag_name = 2;
+  uint64 version = 3;
+}
+
+message LocalListTagsRequest {
+  string shard_name = 1;
+}
+
+message LocalDeleteTagRequest {
+  string shard_name = 1;
+  string tag_name = 2;
+}
+
+message LocalRestoreTableRequest {
+  string shard_name = 1;
+  uint64 version = 2;
+  string tag = 3;
 }
 
 message LocalAlterTableRequest {
@@ -449,6 +482,58 @@ message AlterTableRequest {
   // RENAME: {old_name: new_name} pairs. Lance alter_columns metadata
   // update. Empty = no-op for rename.
   map<string, string> rename_columns = 5;
+}
+
+// R3: Tag operations on the table's Lance dataset.
+message CreateTagRequest {
+  string table_name = 1;
+  string tag_name = 2;
+  // Lance dataset version to tag. 0 = tag the current latest version.
+  uint64 version = 3;
+}
+
+message CreateTagResponse {
+  uint64 tagged_version = 1;
+  string error = 2;
+}
+
+message ListTagsRequest {
+  string table_name = 1;
+}
+
+message TagInfo {
+  string name = 1;
+  uint64 version = 2;
+}
+
+message ListTagsResponse {
+  repeated TagInfo tags = 1;
+  string error = 2;
+}
+
+message DeleteTagRequest {
+  string table_name = 1;
+  string tag_name = 2;
+}
+
+message DeleteTagResponse {
+  string error = 1;
+}
+
+// R3: Restore the table to a prior version or a named tag. After
+// restore, the tip of the dataset points at the restored version
+// plus one (Lance creates a new manifest recording the restore).
+message RestoreTableRequest {
+  string table_name = 1;
+  // Exactly one of version / tag must be set. version=0 and tag=""
+  // means "restore to latest" which is a no-op; rejected.
+  uint64 version = 2;
+  string tag = 3;
+}
+
+message RestoreTableResponse {
+  uint64 new_version = 1;
+  string error = 2;
 }
 
 message AlterTableResponse {

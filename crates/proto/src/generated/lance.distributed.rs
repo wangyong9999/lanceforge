@@ -44,6 +44,36 @@ pub struct RegisterWorkerResponse {
     #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalCreateTagRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub tag_name: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub version: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalListTagsRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalDeleteTagRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub tag_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalRestoreTableRequest {
+    #[prost(string, tag = "1")]
+    pub shard_name: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub version: u64,
+    #[prost(string, tag = "3")]
+    pub tag: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct LocalAlterTableRequest {
     #[prost(string, tag = "1")]
@@ -607,6 +637,76 @@ pub struct AlterTableRequest {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+}
+/// R3: Tag operations on the table's Lance dataset.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTagRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub tag_name: ::prost::alloc::string::String,
+    /// Lance dataset version to tag. 0 = tag the current latest version.
+    #[prost(uint64, tag = "3")]
+    pub version: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTagResponse {
+    #[prost(uint64, tag = "1")]
+    pub tagged_version: u64,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListTagsRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TagInfo {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub version: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTagsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub tags: ::prost::alloc::vec::Vec<TagInfo>,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteTagRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub tag_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteTagResponse {
+    #[prost(string, tag = "1")]
+    pub error: ::prost::alloc::string::String,
+}
+/// R3: Restore the table to a prior version or a named tag. After
+/// restore, the tip of the dataset points at the restored version
+/// plus one (Lance creates a new manifest recording the restore).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RestoreTableRequest {
+    #[prost(string, tag = "1")]
+    pub table_name: ::prost::alloc::string::String,
+    /// Exactly one of version / tag must be set. version=0 and tag=""
+    /// means "restore to latest" which is a no-op; rejected.
+    #[prost(uint64, tag = "2")]
+    pub version: u64,
+    #[prost(string, tag = "3")]
+    pub tag: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RestoreTableResponse {
+    #[prost(uint64, tag = "1")]
+    pub new_version: u64,
+    #[prost(string, tag = "2")]
+    pub error: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AlterTableResponse {
@@ -1266,6 +1366,124 @@ pub mod lance_scheduler_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// R3 realignment: Tags + Restore. Direct pass-through to Lance
+        /// native tag/checkout/restore APIs on the single table's dataset.
+        pub async fn create_tag(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTagResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/CreateTag",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "CreateTag",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_tags(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListTagsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTagsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/ListTags",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "ListTags",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_tag(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteTagResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/DeleteTag",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "DeleteTag",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn restore_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RestoreTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RestoreTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceSchedulerService/RestoreTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceSchedulerService",
+                        "RestoreTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Point lookup
         pub async fn get_by_ids(
             &mut self,
@@ -1466,6 +1684,36 @@ pub mod lance_scheduler_service_server {
             request: tonic::Request<super::MoveShardRequest>,
         ) -> std::result::Result<
             tonic::Response<super::MoveShardResponse>,
+            tonic::Status,
+        >;
+        /// R3 realignment: Tags + Restore. Direct pass-through to Lance
+        /// native tag/checkout/restore APIs on the single table's dataset.
+        async fn create_tag(
+            &self,
+            request: tonic::Request<super::CreateTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTagResponse>,
+            tonic::Status,
+        >;
+        async fn list_tags(
+            &self,
+            request: tonic::Request<super::ListTagsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTagsResponse>,
+            tonic::Status,
+        >;
+        async fn delete_tag(
+            &self,
+            request: tonic::Request<super::DeleteTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteTagResponse>,
+            tonic::Status,
+        >;
+        async fn restore_table(
+            &self,
+            request: tonic::Request<super::RestoreTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RestoreTableResponse>,
             tonic::Status,
         >;
         /// Point lookup
@@ -2353,6 +2601,190 @@ pub mod lance_scheduler_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/lance.distributed.LanceSchedulerService/CreateTag" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateTagSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::CreateTagRequest>
+                    for CreateTagSvc<T> {
+                        type Response = super::CreateTagResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateTagRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::create_tag(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateTagSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/ListTags" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListTagsSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::ListTagsRequest>
+                    for ListTagsSvc<T> {
+                        type Response = super::ListTagsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListTagsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::list_tags(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListTagsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/DeleteTag" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteTagSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::DeleteTagRequest>
+                    for DeleteTagSvc<T> {
+                        type Response = super::DeleteTagResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteTagRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::delete_tag(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteTagSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceSchedulerService/RestoreTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct RestoreTableSvc<T: LanceSchedulerService>(pub Arc<T>);
+                    impl<
+                        T: LanceSchedulerService,
+                    > tonic::server::UnaryService<super::RestoreTableRequest>
+                    for RestoreTableSvc<T> {
+                        type Response = super::RestoreTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RestoreTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceSchedulerService>::restore_table(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RestoreTableSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/lance.distributed.LanceSchedulerService/GetByIds" => {
                     #[allow(non_camel_case_types)]
                     struct GetByIdsSvc<T: LanceSchedulerService>(pub Arc<T>);
@@ -3034,6 +3466,124 @@ pub mod lance_executor_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// R3 realignment: tag operations on a local table. shard_name
+        /// identifies the Lance dataset on this worker.
+        pub async fn execute_create_tag(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LocalCreateTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTagResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/ExecuteCreateTag",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "ExecuteCreateTag",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn execute_list_tags(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LocalListTagsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTagsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/ExecuteListTags",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "ExecuteListTags",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn execute_delete_tag(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LocalDeleteTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteTagResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/ExecuteDeleteTag",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "ExecuteDeleteTag",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn execute_restore_table(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LocalRestoreTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RestoreTableResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/lance.distributed.LanceExecutorService/ExecuteRestoreTable",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "lance.distributed.LanceExecutorService",
+                        "ExecuteRestoreTable",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -3149,6 +3699,36 @@ pub mod lance_executor_service_server {
             request: tonic::Request<super::HealthCheckRequest>,
         ) -> std::result::Result<
             tonic::Response<super::HealthCheckResponse>,
+            tonic::Status,
+        >;
+        /// R3 realignment: tag operations on a local table. shard_name
+        /// identifies the Lance dataset on this worker.
+        async fn execute_create_tag(
+            &self,
+            request: tonic::Request<super::LocalCreateTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTagResponse>,
+            tonic::Status,
+        >;
+        async fn execute_list_tags(
+            &self,
+            request: tonic::Request<super::LocalListTagsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTagsResponse>,
+            tonic::Status,
+        >;
+        async fn execute_delete_tag(
+            &self,
+            request: tonic::Request<super::LocalDeleteTagRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteTagResponse>,
+            tonic::Status,
+        >;
+        async fn execute_restore_table(
+            &self,
+            request: tonic::Request<super::LocalRestoreTableRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RestoreTableResponse>,
             tonic::Status,
         >;
     }
@@ -3877,6 +4457,202 @@ pub mod lance_executor_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = HealthCheckSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/ExecuteCreateTag" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteCreateTagSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LocalCreateTagRequest>
+                    for ExecuteCreateTagSvc<T> {
+                        type Response = super::CreateTagResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LocalCreateTagRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::execute_create_tag(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteCreateTagSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/ExecuteListTags" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteListTagsSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LocalListTagsRequest>
+                    for ExecuteListTagsSvc<T> {
+                        type Response = super::ListTagsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LocalListTagsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::execute_list_tags(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteListTagsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/ExecuteDeleteTag" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteDeleteTagSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LocalDeleteTagRequest>
+                    for ExecuteDeleteTagSvc<T> {
+                        type Response = super::DeleteTagResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LocalDeleteTagRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::execute_delete_tag(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteDeleteTagSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/lance.distributed.LanceExecutorService/ExecuteRestoreTable" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteRestoreTableSvc<T: LanceExecutorService>(pub Arc<T>);
+                    impl<
+                        T: LanceExecutorService,
+                    > tonic::server::UnaryService<super::LocalRestoreTableRequest>
+                    for ExecuteRestoreTableSvc<T> {
+                        type Response = super::RestoreTableResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LocalRestoreTableRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as LanceExecutorService>::execute_restore_table(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteRestoreTableSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

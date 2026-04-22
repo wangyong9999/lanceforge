@@ -711,6 +711,105 @@ impl LanceTableRegistry {
         Ok(())
     }
 
+    /// R3: Create a tag on the table's Lance dataset. `version=0`
+    /// tags the current latest version. Returns the version that
+    /// was tagged.
+    pub async fn create_tag_on_shard(
+        &self,
+        shard_name: &str,
+        tag_name: &str,
+        version: u64,
+    ) -> Result<u64> {
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        let (_, table) = targets.first()
+            .ok_or_else(|| DataFusionError::Plan(format!("no shard for {shard_name}")))?;
+        let tagged = if version == 0 {
+            table.version().await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+        } else {
+            version
+        };
+        let mut tags = table.tags().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        tags.create(tag_name, tagged).await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        info!("Created tag '{}' → v{} on {}", tag_name, tagged, shard_name);
+        Ok(tagged)
+    }
+
+    /// R3: List all tags on the table. Returns (name, version) pairs.
+    pub async fn list_tags_on_shard(
+        &self,
+        shard_name: &str,
+    ) -> Result<Vec<(String, u64)>> {
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        let (_, table) = targets.first()
+            .ok_or_else(|| DataFusionError::Plan(format!("no shard for {shard_name}")))?;
+        let tags = table.tags().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let map = tags.list().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        Ok(map.into_iter().map(|(name, contents)| (name, contents.version)).collect())
+    }
+
+    /// R3: Delete a tag from the table.
+    pub async fn delete_tag_on_shard(
+        &self,
+        shard_name: &str,
+        tag_name: &str,
+    ) -> Result<()> {
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        let (_, table) = targets.first()
+            .ok_or_else(|| DataFusionError::Plan(format!("no shard for {shard_name}")))?;
+        let mut tags = table.tags().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        tags.delete(tag_name).await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        info!("Deleted tag '{}' on {}", tag_name, shard_name);
+        Ok(())
+    }
+
+    /// R3: Restore a table to a prior version or tag. Lance resolves
+    /// the version (possibly via tag name), calls checkout + restore
+    /// which creates a new manifest pointing at the old data.
+    ///
+    /// Either `version` non-zero OR `tag` non-empty must be provided.
+    pub async fn restore_on_shard(
+        &self,
+        shard_name: &str,
+        version: u64,
+        tag: &str,
+    ) -> Result<u64> {
+        if version == 0 && tag.is_empty() {
+            return Err(DataFusionError::Plan(
+                "RestoreTable requires version > 0 or a tag name".into()
+            ));
+        }
+        let tables = self.tables.read().await;
+        let targets = resolve_tables_inner(&tables, shard_name)?;
+        let (_, table) = targets.first()
+            .ok_or_else(|| DataFusionError::Plan(format!("no shard for {shard_name}")))?;
+        if !tag.is_empty() {
+            table.checkout_tag(tag).await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        } else {
+            table.checkout(version).await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+        table.restore().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let new_v = table.version().await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        info!(
+            "Restored {} (version={}, tag='{}') → new v={}",
+            shard_name, version, tag, new_v
+        );
+        Ok(new_v)
+    }
+
     /// Get names of all loaded shards (for health check reporting).
     pub async fn shard_names(&self) -> Vec<String> {
         self.shard_row_counts.read().await.keys().cloned().collect()

@@ -120,6 +120,26 @@ class LanceSchedulerServiceStub(object):
                 request_serializer=lance__service__pb2.MoveShardRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.MoveShardResponse.FromString,
                 _registered_method=True)
+        self.CreateTag = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/CreateTag',
+                request_serializer=lance__service__pb2.CreateTagRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateTagResponse.FromString,
+                _registered_method=True)
+        self.ListTags = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/ListTags',
+                request_serializer=lance__service__pb2.ListTagsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.ListTagsResponse.FromString,
+                _registered_method=True)
+        self.DeleteTag = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/DeleteTag',
+                request_serializer=lance__service__pb2.DeleteTagRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.DeleteTagResponse.FromString,
+                _registered_method=True)
+        self.RestoreTable = channel.unary_unary(
+                '/lance.distributed.LanceSchedulerService/RestoreTable',
+                request_serializer=lance__service__pb2.RestoreTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.RestoreTableResponse.FromString,
+                _registered_method=True)
         self.GetByIds = channel.unary_unary(
                 '/lance.distributed.LanceSchedulerService/GetByIds',
                 request_serializer=lance__service__pb2.GetByIdsRequest.SerializeToString,
@@ -248,6 +268,32 @@ class LanceSchedulerServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateTag(self, request, context):
+        """R3 realignment: Tags + Restore. Direct pass-through to Lance
+        native tag/checkout/restore APIs on the single table's dataset.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListTags(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteTag(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RestoreTable(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetByIds(self, request, context):
         """Point lookup
         """
@@ -356,6 +402,26 @@ def add_LanceSchedulerServiceServicer_to_server(servicer, server):
                     servicer.MoveShard,
                     request_deserializer=lance__service__pb2.MoveShardRequest.FromString,
                     response_serializer=lance__service__pb2.MoveShardResponse.SerializeToString,
+            ),
+            'CreateTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateTag,
+                    request_deserializer=lance__service__pb2.CreateTagRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateTagResponse.SerializeToString,
+            ),
+            'ListTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListTags,
+                    request_deserializer=lance__service__pb2.ListTagsRequest.FromString,
+                    response_serializer=lance__service__pb2.ListTagsResponse.SerializeToString,
+            ),
+            'DeleteTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteTag,
+                    request_deserializer=lance__service__pb2.DeleteTagRequest.FromString,
+                    response_serializer=lance__service__pb2.DeleteTagResponse.SerializeToString,
+            ),
+            'RestoreTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.RestoreTable,
+                    request_deserializer=lance__service__pb2.RestoreTableRequest.FromString,
+                    response_serializer=lance__service__pb2.RestoreTableResponse.SerializeToString,
             ),
             'GetByIds': grpc.unary_unary_rpc_method_handler(
                     servicer.GetByIds,
@@ -844,6 +910,114 @@ class LanceSchedulerService(object):
             _registered_method=True)
 
     @staticmethod
+    def CreateTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/CreateTag',
+            lance__service__pb2.CreateTagRequest.SerializeToString,
+            lance__service__pb2.CreateTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/ListTags',
+            lance__service__pb2.ListTagsRequest.SerializeToString,
+            lance__service__pb2.ListTagsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/DeleteTag',
+            lance__service__pb2.DeleteTagRequest.SerializeToString,
+            lance__service__pb2.DeleteTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RestoreTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceSchedulerService/RestoreTable',
+            lance__service__pb2.RestoreTableRequest.SerializeToString,
+            lance__service__pb2.RestoreTableResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def GetByIds(request,
             target,
             options=(),
@@ -1005,6 +1179,26 @@ class LanceExecutorServiceStub(object):
                 request_serializer=lance__service__pb2.HealthCheckRequest.SerializeToString,
                 response_deserializer=lance__service__pb2.HealthCheckResponse.FromString,
                 _registered_method=True)
+        self.ExecuteCreateTag = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteCreateTag',
+                request_serializer=lance__service__pb2.LocalCreateTagRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.CreateTagResponse.FromString,
+                _registered_method=True)
+        self.ExecuteListTags = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteListTags',
+                request_serializer=lance__service__pb2.LocalListTagsRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.ListTagsResponse.FromString,
+                _registered_method=True)
+        self.ExecuteDeleteTag = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteDeleteTag',
+                request_serializer=lance__service__pb2.LocalDeleteTagRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.DeleteTagResponse.FromString,
+                _registered_method=True)
+        self.ExecuteRestoreTable = channel.unary_unary(
+                '/lance.distributed.LanceExecutorService/ExecuteRestoreTable',
+                request_serializer=lance__service__pb2.LocalRestoreTableRequest.SerializeToString,
+                response_deserializer=lance__service__pb2.RestoreTableResponse.FromString,
+                _registered_method=True)
 
 
 class LanceExecutorServiceServicer(object):
@@ -1102,6 +1296,32 @@ class LanceExecutorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExecuteCreateTag(self, request, context):
+        """R3 realignment: tag operations on a local table. shard_name
+        identifies the Lance dataset on this worker.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteListTags(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteDeleteTag(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteRestoreTable(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LanceExecutorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -1174,6 +1394,26 @@ def add_LanceExecutorServiceServicer_to_server(servicer, server):
                     servicer.HealthCheck,
                     request_deserializer=lance__service__pb2.HealthCheckRequest.FromString,
                     response_serializer=lance__service__pb2.HealthCheckResponse.SerializeToString,
+            ),
+            'ExecuteCreateTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteCreateTag,
+                    request_deserializer=lance__service__pb2.LocalCreateTagRequest.FromString,
+                    response_serializer=lance__service__pb2.CreateTagResponse.SerializeToString,
+            ),
+            'ExecuteListTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteListTags,
+                    request_deserializer=lance__service__pb2.LocalListTagsRequest.FromString,
+                    response_serializer=lance__service__pb2.ListTagsResponse.SerializeToString,
+            ),
+            'ExecuteDeleteTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteDeleteTag,
+                    request_deserializer=lance__service__pb2.LocalDeleteTagRequest.FromString,
+                    response_serializer=lance__service__pb2.DeleteTagResponse.SerializeToString,
+            ),
+            'ExecuteRestoreTable': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteRestoreTable,
+                    request_deserializer=lance__service__pb2.LocalRestoreTableRequest.FromString,
+                    response_serializer=lance__service__pb2.RestoreTableResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1555,6 +1795,114 @@ class LanceExecutorService(object):
             '/lance.distributed.LanceExecutorService/HealthCheck',
             lance__service__pb2.HealthCheckRequest.SerializeToString,
             lance__service__pb2.HealthCheckResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteCreateTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteCreateTag',
+            lance__service__pb2.LocalCreateTagRequest.SerializeToString,
+            lance__service__pb2.CreateTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteListTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteListTags',
+            lance__service__pb2.LocalListTagsRequest.SerializeToString,
+            lance__service__pb2.ListTagsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteDeleteTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteDeleteTag',
+            lance__service__pb2.LocalDeleteTagRequest.SerializeToString,
+            lance__service__pb2.DeleteTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteRestoreTable(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/lance.distributed.LanceExecutorService/ExecuteRestoreTable',
+            lance__service__pb2.LocalRestoreTableRequest.SerializeToString,
+            lance__service__pb2.RestoreTableResponse.FromString,
             options,
             channel_credentials,
             insecure,

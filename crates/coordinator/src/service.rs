@@ -1705,6 +1705,132 @@ impl LanceSchedulerService for CoordinatorService {
         }))
     }
 
+    /// R3: Create a tag on the table's single Lance dataset. Picks the
+    /// shard's owner worker and forwards ExecuteCreateTag.
+    async fn create_tag(
+        &self,
+        request: Request<pb::CreateTagRequest>,
+    ) -> Result<Response<pb::CreateTagResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        self.audit(
+            &request, "CreateTag",
+            &request.get_ref().table_name,
+            &format!("tag={} v={}", request.get_ref().tag_name, request.get_ref().version),
+        );
+        let req = request.into_inner();
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table '{}'", req.table_name)));
+        }
+        let (shard_name, primary, secondary) = &routing[0];
+        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary.clone()
+        } else if let Some(s) = secondary {
+            s.clone()
+        } else {
+            return Err(Status::unavailable("no healthy worker"));
+        };
+        let mut client = self.pool.get_healthy_client(&owner).await?;
+        let resp = client.execute_create_tag(Request::new(pb::LocalCreateTagRequest {
+            shard_name: shard_name.clone(),
+            tag_name: req.tag_name.clone(),
+            version: req.version,
+        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn list_tags(
+        &self,
+        request: Request<pb::ListTagsRequest>,
+    ) -> Result<Response<pb::ListTagsResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Read)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        let req = request.into_inner();
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table '{}'", req.table_name)));
+        }
+        let (shard_name, primary, secondary) = &routing[0];
+        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary.clone()
+        } else if let Some(s) = secondary {
+            s.clone()
+        } else {
+            return Err(Status::unavailable("no healthy worker"));
+        };
+        let mut client = self.pool.get_healthy_client(&owner).await?;
+        let resp = client.execute_list_tags(Request::new(pb::LocalListTagsRequest {
+            shard_name: shard_name.clone(),
+        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn delete_tag(
+        &self,
+        request: Request<pb::DeleteTagRequest>,
+    ) -> Result<Response<pb::DeleteTagResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        self.audit(
+            &request, "DeleteTag",
+            &request.get_ref().table_name,
+            &request.get_ref().tag_name.clone(),
+        );
+        let req = request.into_inner();
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table '{}'", req.table_name)));
+        }
+        let (shard_name, primary, secondary) = &routing[0];
+        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary.clone()
+        } else if let Some(s) = secondary {
+            s.clone()
+        } else {
+            return Err(Status::unavailable("no healthy worker"));
+        };
+        let mut client = self.pool.get_healthy_client(&owner).await?;
+        let resp = client.execute_delete_tag(Request::new(pb::LocalDeleteTagRequest {
+            shard_name: shard_name.clone(),
+            tag_name: req.tag_name,
+        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn restore_table(
+        &self,
+        request: Request<pb::RestoreTableRequest>,
+    ) -> Result<Response<pb::RestoreTableResponse>, Status> {
+        self.check_perm(&request, super::auth::Permission::Admin)?;
+        self.check_ns(&request, &request.get_ref().table_name)?;
+        self.audit(
+            &request, "RestoreTable",
+            &request.get_ref().table_name,
+            &format!("version={} tag={}", request.get_ref().version, request.get_ref().tag),
+        );
+        let req = request.into_inner();
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        if routing.is_empty() {
+            return Err(Status::not_found(format!("table '{}'", req.table_name)));
+        }
+        let (shard_name, primary, secondary) = &routing[0];
+        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
+            primary.clone()
+        } else if let Some(s) = secondary {
+            s.clone()
+        } else {
+            return Err(Status::unavailable("no healthy worker"));
+        };
+        let mut client = self.pool.get_healthy_client(&owner).await?;
+        let resp = client.execute_restore_table(Request::new(pb::LocalRestoreTableRequest {
+            shard_name: shard_name.clone(),
+            version: req.version,
+            tag: req.tag,
+        })).await.map_err(|e| Status::internal(format!("worker: {e}")))?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
     async fn list_tables(
         &self,
         request: Request<pb::ListTablesRequest>,
