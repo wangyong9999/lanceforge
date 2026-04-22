@@ -19,27 +19,8 @@
 // dependency and lets R1c rename/repoint without disturbing callers.
 
 use std::sync::Arc;
-use std::time::Duration;
-
-use lance_distributed_proto::generated::lance_distributed as pb;
-use tonic::Request;
 
 use crate::connection_pool::ConnectionPool;
-
-/// Attach a `traceparent` metadata header to an outbound Request.
-/// Mints a fresh 16-hex span_id per outbound RPC so Jaeger/Tempo can
-/// thread spans. Previously lived in scatter_gather (deleted in R6);
-/// now colocated with the single-worker dispatch.
-pub(crate) fn inject_traceparent<T>(mut req: Request<T>, trace_id: &str) -> Request<T> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-    let span_id = format!("{:016x}", nanos);
-    let tp = format!("00-{trace_id}-{span_id}-01");
-    if let Ok(val) = tonic::metadata::MetadataValue::try_from(tp) {
-        req.metadata_mut().insert("traceparent", val);
-    }
-    req
-}
 
 /// Outcome of a worker selection attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,51 +100,6 @@ async fn healthy_worker_ids(pool: &Arc<ConnectionPool>) -> Vec<String> {
         .collect();
     ids.sort();
     ids
-}
-
-/// Execute a single LocalSearchRequest on `worker_id`. Wraps the
-/// timeout, trace injection, and LocalSearchResponse → SearchResponse
-/// conversion. The "merge" that scatter_gather did across N workers
-/// is trivial here — top-K sort lives inside the one worker's Lance
-/// query already.
-pub async fn single_worker_execute_search(
-    pool: &Arc<ConnectionPool>,
-    worker_id: &str,
-    local_req: pb::LocalSearchRequest,
-    k: u32,
-    query_timeout: Duration,
-    trace_id: Option<String>,
-) -> Result<pb::SearchResponse, tonic::Status> {
-    let mut client = pool.get_healthy_client(worker_id).await.map_err(|e| {
-        tonic::Status::unavailable(format!("worker {worker_id} unhealthy: {e}"))
-    })?;
-    let mut req = Request::new(local_req);
-    if let Some(tid) = trace_id.as_deref() {
-        req = inject_traceparent(req, tid);
-    }
-    req.set_timeout(query_timeout);
-    let resp = tokio::time::timeout(query_timeout, client.execute_local_search(req))
-        .await
-        .map_err(|_| tonic::Status::deadline_exceeded(
-            format!("single_worker search timed out after {}s", query_timeout.as_secs())
-        ))?
-        .map_err(|e| tonic::Status::from(e))?
-        .into_inner();
-    if !resp.error.is_empty() {
-        return Err(tonic::Status::internal(resp.error));
-    }
-    let mut rows = resp.num_rows;
-    if rows > k {
-        rows = k;
-    }
-    Ok(pb::SearchResponse {
-        num_rows: rows,
-        arrow_ipc_data: resp.arrow_ipc_data,
-        error: String::new(),
-        latency_ms: 0,
-        truncated: false,
-        next_offset: 0,
-    })
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 pub use lance_distributed_common::config;
 pub use lance_distributed_common::ipc;
 pub use lance_distributed_common::metrics;
+pub use lance_distributed_common::shard_pruning;
 pub use lance_distributed_common::shard_state;
 
 // ── Coordinator ──

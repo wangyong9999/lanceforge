@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod ha;
 pub mod merge;
 pub mod rest;
+pub mod scatter_gather;
 pub mod service;
 pub mod worker_select;
 

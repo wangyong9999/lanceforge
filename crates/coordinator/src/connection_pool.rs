@@ -403,18 +403,14 @@ impl ConnectionPool {
                                 for (shard, primary, secondary) in &routing {
                                     let assigned = primary == &wid
                                         || secondary.as_ref().is_some_and(|s| s == &wid);
-                                    // R2 fungible: every healthy worker needs every
-                                    // table open, not just its primary/secondary
-                                    // assignments. Drop the `assigned` gate — open
-                                    // on every healthy worker missing the table.
-                                    let _ = assigned; // retained for log below if needed
-                                    if !actual.contains(shard) {
+                                    if assigned && !actual.contains(shard) {
+                                        // Shard missing — attempt recovery via LoadShard
                                         if let Ok(mut client) = self.get_healthy_client(&wid).await {
                                             let uri = self.get_shard_uri(shard).await;
                                             if let Some(uri) = uri {
-                                                info!("Table recovery: opening {} on {} (missing after reconnect)", shard, wid);
-                                                let _ = client.open_table(Request::new(pb::OpenTableRequest {
-                                                    table_name: shard.clone(),
+                                                info!("Shard recovery: loading {} on {} (missing after restart)", shard, wid);
+                                                let _ = client.load_shard(Request::new(pb::LoadShardRequest {
+                                                    shard_name: shard.clone(),
                                                     uri,
                                                     storage_options: std::collections::HashMap::new(),
                                                 })).await;
@@ -976,10 +972,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_shard_recovery_triggers_load_shard_on_missing() {
-        // R2: Worker reports empty shard_names during health_check; pool's
-        // recovery branch now calls OpenTable (was LoadShard in v0.2)
-        // for any table not present on the reconnected worker. Counter
-        // `open_table_calls` replaces the v0.2 `load_shard_calls`.
+        // Worker reports empty shard_names during health_check; pool's
+        // recovery branch should call LoadShard for any assigned shard
+        // not listed. This requires wiring a shard_state + shard_uri
+        // registry into the pool.
         use lance_distributed_common::config::{
             ClusterConfig, ExecutorConfig, ShardConfig, TableConfig,
         };
@@ -1026,13 +1022,13 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut saw_load = false;
         while Instant::now() < deadline {
-            if state.open_table_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+            if state.load_shard_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
                 saw_load = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(saw_load, "expected at least one OpenTable to be issued");
+        assert!(saw_load, "expected at least one LoadShard to be issued");
     }
 
     #[tokio::test]

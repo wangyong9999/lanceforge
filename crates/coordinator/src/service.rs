@@ -14,6 +14,7 @@ use pb::{
     AnnSearchRequest, FtsSearchRequest, HybridSearchRequest, SearchResponse,
 };
 use lance_distributed_common::shard_state::{ShardState, StaticShardState, reconciliation_loop};
+use lance_distributed_common::shard_pruning::ShardPruner;
 use lance_distributed_proto::descriptor::LanceQueryType;
 
 use super::connection_pool::ConnectionPool;
@@ -26,6 +27,7 @@ const _DEFAULT_MAX_CONCURRENT_QUERIES: usize = 200;
 pub struct CoordinatorService {
     pool: Arc<ConnectionPool>,
     shard_state: Arc<dyn ShardState>,
+    pruner: Arc<ShardPruner>,
     oversample_factor: u32,
     query_timeout: Duration,
     embedding_config: Option<lance_distributed_common::config::EmbeddingConfig>,
@@ -92,8 +94,7 @@ const WRITE_DEDUP_REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 impl CoordinatorService {
     pub fn new(config: &ClusterConfig, query_timeout: Duration) -> Self {
-        Self::with_shard_state_inner(config, query_timeout,
-            Arc::new(StaticShardState::from_config(config)))
+        Self::with_pruner(config, query_timeout, ShardPruner::empty())
     }
 
     /// Get metrics handle for the metrics HTTP server.
@@ -202,11 +203,16 @@ impl CoordinatorService {
         Ok(svc)
     }
 
-    fn with_shard_state(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>) -> Self {
-        Self::with_shard_state_inner(config, query_timeout, shard_state)
+    pub fn with_pruner(config: &ClusterConfig, query_timeout: Duration, pruner: ShardPruner) -> Self {
+        let shard_state: Arc<dyn ShardState> = Arc::new(StaticShardState::from_config(config));
+        Self::with_shard_state_and_pruner(config, query_timeout, shard_state, pruner)
     }
 
-    fn with_shard_state_inner(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>) -> Self {
+    fn with_shard_state(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>) -> Self {
+        Self::with_shard_state_and_pruner(config, query_timeout, shard_state, ShardPruner::empty())
+    }
+
+    fn with_shard_state_and_pruner(config: &ClusterConfig, query_timeout: Duration, shard_state: Arc<dyn ShardState>, pruner: ShardPruner) -> Self {
 
         let mut endpoints = std::collections::HashMap::new();
         for e in &config.executors {
@@ -258,6 +264,7 @@ impl CoordinatorService {
         Self {
             pool,
             shard_state,
+            pruner: Arc::new(pruner),
             oversample_factor: config.server.oversample_factor,
             query_timeout,
             embedding_config: config.embedding.clone(),
@@ -306,58 +313,16 @@ impl CoordinatorService {
         self
     }
 
-
-    /// v0.3 single-dataset dispatch for read-type queries. When the
-    /// table maps to exactly one shard (the common case post-R4 and
-    /// the only case in fresh v0.3 deployments), issues a single
-    /// RPC to the shard's current owner. Legacy multi-shard routing
-    /// still fans out — retired in R4/R6.
-    ///
-    /// Note: R1b preserves ownership (primary/secondary worker per
-    /// shard) because shard data still physically lives on the
-    /// worker. Full fungible routing lands in R2, after R1c removes
-    /// the shard → worker mapping.
-    async fn dispatch_read(
-        &self,
-        table_name: &str,
-        local_req: pb::LocalSearchRequest,
-        merge_limit: u32,
-        trace_id: Option<String>,
-    ) -> Result<pb::SearchResponse, Status> {
-        let routing = self.shard_state.get_shard_routing(table_name).await;
-        if routing.is_empty() {
-            return Err(Status::not_found(format!("table '{table_name}' not found")));
-        }
-        if routing.len() > 1 {
-            return Err(Status::failed_precondition(format!(
-                "table '{table_name}' has {} shards; v0.3 is single-dataset. \
-                 Run `lance-admin migrate` to convert. Multi-shard query path \
-                 was removed in alpha.2.", routing.len()
-            )));
-        }
-        let (shard_name, _primary, _secondary) = &routing[0];
-        // R2 fungible routing: any healthy worker can serve this query
-        // because CreateTable broadcast OpenTable to all of them. Pick
-        // via consistent-hash(table + request_salt) so cache locality
-        // is preserved without forcing ownership.
-        let salt = format!("{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().as_nanos());
-        let owner = match super::worker_select::pick_worker_for_read(
-            &self.pool, table_name, &salt,
-        ).await {
-            super::worker_select::WorkerPick::Worker(w) => w,
-            super::worker_select::WorkerPick::NoneHealthy => {
-                return Err(Status::unavailable(format!(
-                    "no healthy worker to serve table '{table_name}'"
-                )));
-            }
-        };
-        let mut local_req = local_req;
-        local_req.table_name = shard_name.clone();
-        super::worker_select::single_worker_execute_search(
-            &self.pool, &owner, local_req, merge_limit, self.query_timeout, trace_id,
-        ).await
+    /// #5.1 Look up the declared hash-partition columns for a table.
+    /// Empty = no pruning. Populated at CreateTable + restored from
+    /// MetaStore on startup (see `with_meta_state`).
+    async fn on_columns_for(&self, table: &str) -> Vec<String> {
+        self.table_on_columns
+            .read()
+            .await
+            .get(table)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// #5.5 Bump the global commit sequence via MetaStore-backed
@@ -673,6 +638,93 @@ impl CoordinatorService {
         }
     }
 
+    /// Hash-partition AddRows path: mirrors upsert_rows so that mixed
+    /// Add+Upsert workloads with the same key always target the same shard.
+    /// LocalWriteRequest.on_columns stays empty — on_columns here only drives
+    /// partitioning, not Lance's merge semantics (which only Upsert uses).
+    async fn add_rows_hash_partitioned(
+        &self,
+        req: pb::AddRowsRequest,
+        routing: Vec<(String, String, Option<String>)>,
+    ) -> Result<Response<pb::WriteResponse>, Status> {
+        let input_batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::invalid_argument(format!("IPC decode: {e}")))?;
+        let partitions = partition_batch_by_hash(&input_batch, &req.on_columns, routing.len())
+            .map_err(|e| Status::invalid_argument(format!("partition: {e}")))?;
+
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+        let mut errors = Vec::new();
+
+        for (shard_idx, partition_batch) in partitions.iter().enumerate() {
+            if partition_batch.num_rows() == 0 { continue; }
+            let (shard_name, primary, secondary) = &routing[shard_idx];
+            let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { Some(s.clone()) } else { None }
+            } else { None };
+
+            let worker_id = match chosen {
+                Some(w) => w,
+                None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
+            };
+            let partition_ipc = lance_distributed_common::ipc::record_batch_to_ipc(partition_batch)
+                .map_err(|e| Status::internal(format!("IPC encode: {e}")))?;
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
+                let local_req = pb::LocalWriteRequest {
+                    write_type: 0, // Add — Lance does a plain append, ignoring on_columns
+                    table_name: req.table_name.clone(),
+                    arrow_ipc_data: partition_ipc,
+                    filter: String::new(),
+                    on_columns: vec![],
+                    target_shard: shard_name.clone(),
+                };
+                // D8: per-shard write latency, mirrors H13 on the read
+                // path. Lets operators see which shard is the outlier
+                // when a write spikes — the usual culprit is the shard
+                // holding the largest manifest.
+                let w_start = std::time::Instant::now();
+                let result = tokio::time::timeout(
+                    self.query_timeout,
+                    client.execute_local_write(Request::new(local_req)),
+                ).await;
+                let w_ms = w_start.elapsed().as_millis() as u64;
+                if self.slow_query_ms > 0 && w_ms >= self.slow_query_ms {
+                    warn!("slow_write shard={} worker={} elapsed_ms={}",
+                          shard_name, worker_id, w_ms);
+                }
+                match result {
+                    Ok(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.error.is_empty() {
+                            total_affected += r.affected_rows;
+                            max_version = max_version.max(r.new_version);
+                        } else {
+                            errors.push(format!("{}: {}", shard_name, r.error));
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
+                    Err(_) => errors.push(format!("{}: timeout ({}ms)", shard_name, w_ms)),
+                }
+            }
+        }
+
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        // #5.5 Bump global commit_seq on successful write + surface
+        // to client. No MetaStore → seq stays 0.
+        let commit_seq = if error.is_empty() {
+            self.bump_commit_seq().await
+        } else {
+            0
+        };
+        Ok(Response::new(pb::WriteResponse {
+            affected_rows: total_affected,
+            new_version: max_version,
+            error,
+            commit_seq,
+        }))
+    }
 }
 
 #[tonic::async_trait]
@@ -735,9 +787,12 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let result = self
-            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
-            .await;
+        let on_cols = self.on_columns_for(&req.table_name).await;
+        let result = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
+            &on_cols,
+        ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -777,9 +832,12 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let result = self
-            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
-            .await;
+        let on_cols = self.on_columns_for(&req.table_name).await;
+        let result = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
+            &on_cols,
+        ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -824,9 +882,12 @@ impl LanceSchedulerService for CoordinatorService {
         };
 
         let t0 = std::time::Instant::now();
-        let result = self
-            .dispatch_read(&req.table_name, local_req, merge_limit, trace_id.clone())
-            .await;
+        let on_cols = self.on_columns_for(&req.table_name).await;
+        let result = super::scatter_gather::scatter_gather(
+            &self.pool, &self.shard_state, &self.pruner,
+            &req.table_name, local_req, merge_limit, false, self.query_timeout, trace_id,
+            &on_cols,
+        ).await;
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;
@@ -902,14 +963,17 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
-        // v0.3 alpha.2: single-dataset only. Multi-shard legacy tables
-        // are rejected; operators run `lance-admin migrate` to convert.
-        // on_columns becomes a merge_insert hint only (ADR-003).
-        if routing.len() > 1 {
-            return Err(Status::failed_precondition(format!(
-                "table '{}' has {} shards; v0.3 single-dataset only. \
-                 Run `lance-admin migrate`.", req.table_name, routing.len()
-            )));
+        // Two routing modes:
+        //   on_columns set  → hash-partition by key, fan out to matching shards.
+        //                     Same hash UpsertRows uses, so mixed Add/Upsert with
+        //                     the same key land on the same shard (no
+        //                     duplication). See LIMITATIONS.md §1.
+        //   on_columns empty → historical round-robin over shards (one call,
+        //                      one shard). Kept for backward compat.
+        if !req.on_columns.is_empty() {
+            let resp = self.add_rows_hash_partitioned(req, routing).await?;
+            self.record_dedup(&request_id, resp.get_ref()).await;
+            return Ok(resp);
         }
 
         let idx = self.write_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % routing.len();
@@ -1102,47 +1166,68 @@ impl LanceSchedulerService for CoordinatorService {
         if routing.is_empty() {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
-        if routing.len() > 1 {
-            return Err(Status::failed_precondition(format!(
-                "table '{}' has {} shards; v0.3 single-dataset only. \
-                 Run `lance-admin migrate`.", req.table_name, routing.len()
-            )));
+        let input_batch = lance_distributed_common::ipc::ipc_to_record_batch(&req.arrow_ipc_data)
+            .map_err(|e| Status::invalid_argument(format!("IPC decode: {e}")))?;
+        let partitions = partition_batch_by_hash(&input_batch, &req.on_columns, routing.len())
+            .map_err(|e| Status::invalid_argument(format!("partition: {e}")))?;
+
+        let mut total_affected = 0u64;
+        let mut max_version = 0u64;
+        let mut errors = Vec::new();
+
+        for (shard_idx, partition_batch) in partitions.iter().enumerate() {
+            if partition_batch.num_rows() == 0 { continue; }
+            let (shard_name, primary, secondary) = &routing[shard_idx];
+            let chosen = if self.pool.get_healthy_client(primary).await.is_ok() {
+                Some(primary.clone())
+            } else if let Some(s) = secondary {
+                if self.pool.get_healthy_client(s).await.is_ok() { Some(s.clone()) } else { None }
+            } else { None };
+
+            let worker_id = match chosen {
+                Some(w) => w,
+                None => { errors.push(format!("{}: no healthy worker", shard_name)); continue; }
+            };
+            let partition_ipc = lance_distributed_common::ipc::record_batch_to_ipc(partition_batch)
+                .map_err(|e| Status::internal(format!("IPC encode: {e}")))?;
+            if let Ok(mut client) = self.pool.get_healthy_client(&worker_id).await {
+                let local_req = pb::LocalWriteRequest {
+                    write_type: 2, // Upsert
+                    table_name: req.table_name.clone(),
+                    arrow_ipc_data: partition_ipc,
+                    filter: String::new(),
+                    on_columns: req.on_columns.clone(),
+                    target_shard: shard_name.clone(),
+                };
+                match tokio::time::timeout(
+                    self.query_timeout,
+                    client.execute_local_write(Request::new(local_req)),
+                ).await {
+                    Ok(Ok(resp)) => {
+                        let r = resp.into_inner();
+                        if r.error.is_empty() {
+                            total_affected += r.affected_rows;
+                            max_version = max_version.max(r.new_version);
+                        } else {
+                            errors.push(format!("{}: {}", shard_name, r.error));
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("{}: {}", shard_name, e)),
+                    Err(_) => errors.push(format!("{}: timeout", shard_name)),
+                }
+            }
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let worker_id = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(s) = secondary {
-            s.clone()
-        } else {
-            return Err(Status::unavailable(format!(
-                "no healthy worker for table {}", req.table_name
-            )));
-        };
-        let mut client = self.pool.get_healthy_client(&worker_id).await?;
-        let local_req = pb::LocalWriteRequest {
-            write_type: 2, // Upsert
-            table_name: req.table_name.clone(),
-            arrow_ipc_data: req.arrow_ipc_data,
-            filter: String::new(),
-            on_columns: req.on_columns.clone(),
-            target_shard: shard_name.clone(),
-        };
-        let resp = tokio::time::timeout(
-            self.query_timeout,
-            client.execute_local_write(Request::new(local_req)),
-        ).await
-            .map_err(|_| Status::deadline_exceeded("Upsert timed out"))?
-            .map_err(|e| Status::internal(format!("worker: {e}")))?
-            .into_inner();
-        let commit_seq = if resp.error.is_empty() {
+
+        let error = if errors.is_empty() { String::new() } else { errors.join("; ") };
+        let commit_seq = if error.is_empty() {
             self.bump_commit_seq().await
         } else {
             0
         };
         let write_resp = pb::WriteResponse {
-            affected_rows: resp.affected_rows,
-            new_version: resp.new_version,
-            error: resp.error,
+            affected_rows: total_affected,
+            new_version: max_version,
+            error,
             commit_seq,
         };
         self.record_dedup(&request_id, &write_resp).await;
@@ -1198,14 +1283,7 @@ impl LanceSchedulerService for CoordinatorService {
         }
 
         // Determine shard count: min(healthy workers, data size threshold)
-        // R6 / v0.3 alpha.2: always one shard per table. Lance's
-        // internal fragments give us fragment-level task parallelism
-        // (~256 concurrent scans by default) plus SIMD vectorisation
-        // inside each fragment. Splitting into multiple Lance datasets
-        // at CreateTable time is the anti-pattern we retired — it
-        // reinvents what the format already does at a coarser grain.
-        let n_shards = 1;
-        let _ = num_rows;
+        let n_shards = if num_rows < 1000 { 1 } else { healthy.len() };
 
         // Split batch into N partitions
         let partitions = split_batch(&batch, n_shards);
@@ -1335,42 +1413,6 @@ impl LanceSchedulerService for CoordinatorService {
             let uri_map: std::collections::HashMap<String, String> =
                 shard_uris_new.iter().cloned().collect();
             ms.put_shard_uris(&uri_map).await;
-        }
-
-        // R2 fungible routing: broadcast OpenTable to every healthy
-        // worker so any of them can serve subsequent queries. Without
-        // this broadcast, workers that didn't CreateLocalShard for this
-        // table return "No Lance shard found" when routing picks them.
-        // Failures are logged but non-fatal — the creator worker
-        // already has the data and is a valid read/write target; the
-        // health-check reconnect path will re-broadcast on recovery.
-        let healthy_ids: Vec<String> = self
-            .pool
-            .worker_statuses()
-            .await
-            .into_iter()
-            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
-            .map(|(id, _, _, _, _, _, _)| id)
-            .collect();
-        let storage_opts: std::collections::HashMap<String, String> =
-            self.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (shard_name, uri) in &shard_uris_new {
-            for worker_id in &healthy_ids {
-                let Ok(mut client) = self.pool.get_healthy_client(worker_id).await else {
-                    continue;
-                };
-                let req = Request::new(pb::OpenTableRequest {
-                    table_name: shard_name.clone(),
-                    uri: uri.clone(),
-                    storage_options: storage_opts.clone(),
-                });
-                if let Err(e) = client.open_table(req).await {
-                    log::debug!(
-                        "broadcast OpenTable({}) to {}: {} (non-fatal)",
-                        shard_name, worker_id, e
-                    );
-                }
-            }
         }
 
         // #5.1 Partition pruning: stash on_columns for read-side routing.
@@ -1812,28 +1854,6 @@ impl LanceSchedulerService for CoordinatorService {
                 .filter_map(|(sn, _, _)| uris.get(sn).map(|u| (sn.clone(), u.clone())))
                 .collect()
         };
-        // R2: broadcast CloseTable before deleting storage so fungible
-        // workers release their handles cleanly (otherwise they keep a
-        // handle to a deleted dataset until LRU evicts).
-        let healthy_ids: Vec<String> = self
-            .pool
-            .worker_statuses()
-            .await
-            .into_iter()
-            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
-            .map(|(id, _, _, _, _, _, _)| id)
-            .collect();
-        for (shard_name, _) in &shard_uris {
-            for worker_id in &healthy_ids {
-                let Ok(mut client) = self.pool.get_healthy_client(worker_id).await else {
-                    continue;
-                };
-                let _ = client.close_table(Request::new(pb::CloseTableRequest {
-                    table_name: shard_name.clone(),
-                })).await;
-            }
-        }
-
         for (shard_name, uri) in &shard_uris {
             match delete_lance_dataset(uri, &self.storage_options).await {
                 Ok(()) => info!("Deleted shard storage: {} ({})", shard_name, uri),
@@ -1967,33 +1987,29 @@ impl LanceSchedulerService for CoordinatorService {
         if routing.is_empty() {
             return Err(Status::not_found(format!("Table not found: {}", req.table_name)));
         }
-        // v0.3 single-dataset: single worker holds the full table's Lance
-        // dataset; its count is the table count. Legacy multi-shard (>1
-        // routing entries) still fans out and sums — retired in R4/R6.
-        if routing.len() == 1 {
-            let (shard_name, primary, secondary) = &routing[0];
-            let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-                Some(primary.clone())
+        // Count per-shard via primary executor. Query by shard name (not table name)
+        // to avoid double-counting when a worker hosts multiple shards or replicas.
+        let mut total = 0u64;
+        for (shard_name, primary, secondary) in &routing {
+            // Try primary, fall back to secondary
+            let worker = if self.pool.get_healthy_client(primary).await.is_ok() {
+                primary
+            } else if let Some(sec) = secondary {
+                sec
             } else {
-                secondary.clone()
+                continue;
             };
-            if let Some(w) = owner
-                && let Ok(mut client) = self.pool.get_healthy_client(&w).await
+            if let Ok(mut client) = self.pool.get_healthy_client(worker).await
                 && let Ok(resp) = client.get_table_info(Request::new(pb::GetTableInfoRequest {
-                    table_name: shard_name.clone(),
+                    table_name: shard_name.clone(), // query by shard name for exact count
                 })).await {
-                    return Ok(Response::new(pb::CountRowsResponse {
-                        count: resp.into_inner().num_rows,
-                        error: String::new(),
-                    }));
+                    total += resp.into_inner().num_rows;
                 }
         }
-        // v0.3 alpha.2: multi-shard legacy tables are rejected. Run
-        // `lance-admin migrate` to convert.
-        Err(Status::failed_precondition(format!(
-            "table '{}' has {} shards; v0.3 single-dataset only. \
-             Run `lance-admin migrate`.", req.table_name, routing.len()
-        )))
+        Ok(Response::new(pb::CountRowsResponse {
+            count: total,
+            error: String::new(),
+        }))
     }
 
     async fn rebalance(
@@ -2511,41 +2527,19 @@ impl LanceSchedulerService for CoordinatorService {
 
             let pool = self.pool.clone();
             let shard_state = self.shard_state.clone();
+            let pruner = self.pruner.clone();
             let table = req.table_name.clone();
             let timeout = self.query_timeout;
             let merge_k = k;
+
             let tid = trace_id.clone();
+            // #5.1 batch_search: capture on_columns once up-front, reuse
+            // across every sub-query task spawned for this batch.
+            let on_cols = self.on_columns_for(&table).await;
             tasks.spawn(async move {
-                // Resolve the table's single shard and dispatch to one
-                // worker. Reject multi-shard legacy tables the same
-                // way dispatch_read does.
-                let routing = shard_state.get_shard_routing(&table).await;
-                if routing.is_empty() {
-                    return Err(tonic::Status::not_found(format!("table '{table}' not found")));
-                }
-                if routing.len() > 1 {
-                    return Err(tonic::Status::failed_precondition(format!(
-                        "table '{}' has {} shards; v0.3 single-dataset only. \
-                         Run `lance-admin migrate`.", table, routing.len()
-                    )));
-                }
-                let (shard_name, _p, _s) = routing[0].clone();
-                let salt = format!("{}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
-                let owner = match super::worker_select::pick_worker_for_read(
-                    &pool, &table, &salt,
-                ).await {
-                    super::worker_select::WorkerPick::Worker(w) => w,
-                    super::worker_select::WorkerPick::NoneHealthy => {
-                        return Err(tonic::Status::unavailable(format!(
-                            "no healthy worker for table '{table}'"
-                        )));
-                    }
-                };
-                let mut lr = local_req;
-                lr.table_name = shard_name;
-                super::worker_select::single_worker_execute_search(
-                    &pool, &owner, lr, merge_k, timeout, tid,
+                super::scatter_gather::scatter_gather(
+                    &pool, &shard_state, &pruner, &table, local_req, merge_k, true, timeout, tid,
+                    &on_cols,
                 ).await
             });
         }
@@ -2689,6 +2683,61 @@ async fn delete_lance_dataset(
     Ok(())
 }
 
+/// Hash-partition a RecordBatch into N sub-batches by the values of `on_columns`.
+/// Returns a Vec of length N (may contain empty batches for shards with no rows).
+/// Used by upsert_rows so each row is sent to exactly one shard.
+fn partition_batch_by_hash(
+    batch: &arrow::array::RecordBatch,
+    on_columns: &[String],
+    num_shards: usize,
+) -> Result<Vec<arrow::array::RecordBatch>, String> {
+    use arrow::array::{Array, UInt64Array};
+    use arrow::compute::take;
+    use std::hash::{Hash, Hasher};
+
+    if num_shards == 0 { return Err("num_shards=0".into()); }
+    if num_shards == 1 { return Ok(vec![batch.clone()]); }
+
+    // Resolve key column indices
+    let schema = batch.schema();
+    let key_indices: Vec<usize> = on_columns.iter()
+        .map(|c| schema.index_of(c).map_err(|e| format!("column '{c}': {e}")))
+        .collect::<Result<_, _>>()?;
+
+    // Compute shard index for each row via a stable hash of the key values.
+    let nrows = batch.num_rows();
+    let mut buckets: Vec<Vec<u64>> = (0..num_shards).map(|_| Vec::new()).collect();
+    for row in 0..nrows {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &ci in &key_indices {
+            let col = batch.column(ci);
+            // Hash via string representation of scalar for type-agnostic stability.
+            // (Not the fastest path, but correct for any primitive/string/binary.)
+            let formatted = arrow::util::display::array_value_to_string(col, row)
+                .map_err(|e| format!("hash row {row}: {e}"))?;
+            formatted.hash(&mut hasher);
+        }
+        let shard = (hasher.finish() % num_shards as u64) as usize;
+        buckets[shard].push(row as u64);
+    }
+
+    // Materialize each bucket as a RecordBatch via `take`.
+    let mut out = Vec::with_capacity(num_shards);
+    for indices in buckets {
+        if indices.is_empty() {
+            out.push(batch.slice(0, 0));
+            continue;
+        }
+        let idx_arr = UInt64Array::from(indices);
+        let cols: Vec<std::sync::Arc<dyn Array>> = batch.columns().iter()
+            .map(|c| take(c.as_ref(), &idx_arr, None).map_err(|e| format!("take: {e}")))
+            .collect::<Result<_, _>>()?;
+        let rb = arrow::array::RecordBatch::try_new(schema.clone(), cols)
+            .map_err(|e| format!("RecordBatch::try_new: {e}"))?;
+        out.push(rb);
+    }
+    Ok(out)
+}
 
 /// Split a RecordBatch into N roughly-equal partitions for auto-sharding.
 fn split_batch(batch: &arrow::array::RecordBatch, n: usize) -> Vec<arrow::array::RecordBatch> {
@@ -3121,10 +3170,16 @@ mod tests {
         assert_eq!(parts[0].num_rows(), 1);
     }
 
-    // R6: partition_batch_by_hash removed alongside scatter_gather.
-    // The tests that exercised it are deleted here — v0.3 single-
-    // dataset routes whole batches to one worker and Lance's native
-    // IVF partitioning handles the per-row distribution internally.
+    #[tokio::test]
+    async fn test_partition_batch_by_hash_zero_rows() {
+        // Hash-partition of an empty batch with n=3 should return an empty
+        // Vec (callers rely on this to short-circuit AddRows on 0 rows
+        // without creating empty shards).
+        let batch = make_i32_batch(vec![]);
+        let out = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        assert!(out.iter().all(|b| b.num_rows() == 0),
+                "each partition is empty or dropped");
+    }
 
     #[test]
     fn test_split_batch_exactly_1000_rows_boundary() {
@@ -3147,6 +3202,14 @@ mod tests {
         let parts = split_batch(&batch, 0);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_single_shard() {
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let out = partition_batch_by_hash(&batch, &["id".into()], 1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].num_rows(), 3);
     }
 
     // ── H3: write-idempotency dedup cache ──
@@ -3232,6 +3295,70 @@ mod tests {
         svc.record_dedup("failed-req", &failed).await;
         let got = svc.check_dedup("failed-req").await.unwrap();
         assert_eq!(got.error, "table not found");
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_zero_is_error() {
+        let batch = make_i32_batch(vec![1]);
+        assert!(partition_batch_by_hash(&batch, &["id".into()], 0).is_err());
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_unknown_column_errors() {
+        let batch = make_i32_batch(vec![1, 2, 3]);
+        let err = partition_batch_by_hash(&batch, &["nope".into()], 4).unwrap_err();
+        assert!(err.contains("column 'nope'"), "error should name the bad column");
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_partitions_all_rows() {
+        // All rows must end up in some partition — no drops.
+        let batch = make_i32_batch((0..100).collect());
+        let out = partition_batch_by_hash(&batch, &["id".into()], 4).unwrap();
+        assert_eq!(out.len(), 4);
+        let total: usize = out.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_partition_batch_by_hash_deterministic() {
+        // Same input must land in the same partition layout every call —
+        // otherwise upsert would silently send the same row to two shards.
+        let batch = make_i32_batch((0..50).collect());
+        let a = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        let b = partition_batch_by_hash(&batch, &["id".into()], 3).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.num_rows(), y.num_rows(),
+                "hash partitioning must be stable across calls");
+        }
+    }
+
+    /// Core invariant that makes the Add/Upsert unification safe: for a given
+    /// (id, on_columns, num_shards), the row always lands in the same bucket
+    /// index regardless of what OTHER rows are in the batch. Without this,
+    /// an initial Add of 1000 rows and a later Upsert of 1 row for the same
+    /// id could still disagree on which shard owns that id.
+    #[test]
+    fn test_partition_batch_by_hash_single_key_stable_across_batch_sizes() {
+        // Bucket index for id=42 in the isolation batch.
+        let solo = make_i32_batch(vec![42]);
+        let solo_parts = partition_batch_by_hash(&solo, &["id".into()], 4).unwrap();
+        let id_42_shard = solo_parts.iter().position(|b| b.num_rows() == 1).unwrap();
+
+        // Now id=42 embedded in a larger batch — the shard index of id=42
+        // must match what we computed in isolation.
+        let mixed_ids: Vec<i32> = (0..200).map(|i| if i == 137 { 42 } else { i }).collect();
+        let mixed = make_i32_batch(mixed_ids);
+        let mixed_parts = partition_batch_by_hash(&mixed, &["id".into()], 4).unwrap();
+
+        use arrow::array::Int32Array;
+        let found_in = mixed_parts.iter().position(|p| {
+            let col = p.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+            (0..col.len()).any(|i| col.value(i) == 42)
+        }).unwrap();
+        assert_eq!(found_in, id_42_shard,
+            "id=42 must land in the same shard whether batch has 1 row or 200");
     }
 
     #[test]
