@@ -47,6 +47,23 @@ enum Cmd {
         #[command(subcommand)]
         action: ShardsCmd,
     },
+    /// v0.3 realignment: migrate a v0.2 multi-shard MetaStore layout to
+    /// the v0.3 single-dataset layout. The common case (one shard per
+    /// table) is a metadata-only rename from `shard_uris` to
+    /// `table_uris`. Tables with > 1 shard are skipped with a warning
+    /// — true multi-shard merge is tracked for a future release.
+    ///
+    /// Safety: never deletes source keys. `--commit` applies the
+    /// changes; the default is dry-run.
+    Migrate {
+        /// MetaStore location (same string as `config.yaml::metadata_path`).
+        #[arg(long)]
+        meta: String,
+        /// Apply the changes. Without this flag the tool prints the
+        /// planned operations and exits with no writes.
+        #[arg(long, default_value_t = false)]
+        commit: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -628,6 +645,98 @@ async fn copy_one_object(
     Ok(())
 }
 
+/// R4: v0.2 → v0.3 migration. Examines `shards/*` in MetaStore and
+/// emits a migration plan. For each unique table name derived from
+/// `{name}_shard_NN`, if it has exactly one shard, add
+/// `table_uris[{name}] = {uri}`. Otherwise warn and skip (multi-shard
+/// merge is a future enhancement; see ADR-005).
+///
+/// Output (default / dry-run):
+///   Plan:
+///     orders                  <- orders_shard_00   [single-shard rename]
+///     products                <- products_shard_00 [single-shard rename]
+///     bigtable                (skip, 4 shards present)
+///
+/// With `--commit`, writes `table_uris/{name}` and leaves source
+/// `shards/*` untouched so rollback is a matter of removing the new
+/// keys.
+async fn cmd_migrate(meta: &str, commit: bool) -> anyhow::Result<()> {
+    let store = open_store(meta).await?;
+    let shards = store.get_prefix("shards/").await?;
+    if shards.is_empty() {
+        println!("No 'shards/*' keys present — nothing to migrate.");
+        return Ok(());
+    }
+    // Group shards by stripped-suffix table name.
+    let mut by_table: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (full_key, versioned) in &shards {
+        let shard_name = full_key.strip_prefix("shards/").unwrap_or(full_key).to_string();
+        // Strip `_shard_NN` suffix if present; else use the full name.
+        let table_name = match shard_name.rsplit_once("_shard_") {
+            Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head.to_string(),
+            _ => shard_name.clone(),
+        };
+        by_table.entry(table_name).or_default().push((shard_name, versioned.value.clone()));
+    }
+
+    let existing_table_uris = store.get_prefix("table_uris/").await?;
+    let mut plan_single: Vec<(String, String, String)> = Vec::new();  // (table, shard, uri)
+    let mut plan_skip: Vec<(String, usize)> = Vec::new();
+    let mut plan_already: Vec<String> = Vec::new();
+    for (table, members) in &by_table {
+        if existing_table_uris.contains_key(&format!("table_uris/{table}")) {
+            plan_already.push(table.clone());
+            continue;
+        }
+        if members.len() == 1 {
+            let (shard, uri) = &members[0];
+            plan_single.push((table.clone(), shard.clone(), uri.clone()));
+        } else {
+            plan_skip.push((table.clone(), members.len()));
+        }
+    }
+
+    println!("v0.2 → v0.3 migration plan for {meta}:");
+    println!("  {} single-shard table(s) to rename", plan_single.len());
+    for (t, s, _) in &plan_single {
+        println!("    {t:<30} <- {s}");
+    }
+    if !plan_skip.is_empty() {
+        println!("  {} multi-shard table(s) SKIPPED (manual merge required):",
+            plan_skip.len());
+        for (t, n) in &plan_skip {
+            println!("    {t:<30} ({n} shards)");
+        }
+    }
+    if !plan_already.is_empty() {
+        println!("  {} table(s) already in v0.3 layout (no change):",
+            plan_already.len());
+        for t in &plan_already {
+            println!("    {t}");
+        }
+    }
+
+    if !commit {
+        println!("\nDry-run only. Re-run with --commit to apply.");
+        return Ok(());
+    }
+
+    let mut applied = 0usize;
+    for (table, _shard, uri) in &plan_single {
+        let key = format!("table_uris/{table}");
+        store.put(&key, uri, 0).await?;
+        applied += 1;
+        println!("  wrote {key} = {uri}");
+    }
+    println!("\nApplied {applied} rename(s). Source 'shards/*' keys left intact.");
+    if !plan_skip.is_empty() {
+        println!("WARNING: {} multi-shard table(s) still require manual intervention.",
+            plan_skip.len());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -645,6 +754,7 @@ async fn main() -> anyhow::Result<()> {
                 cmd_shards_copy(&meta, &src, &dst, table.as_deref(),
                                 dry_run, continue_on_error, multipart_threshold).await,
         },
+        Cmd::Migrate { meta, commit } => cmd_migrate(&meta, commit).await,
     }
 }
 
@@ -995,5 +1105,80 @@ mod tests {
         // "empty source directory" and no spurious failure is reported.
         assert!(result.is_ok(),
                 "missing src shard dir should list-empty (no error); got {:?}", result);
+    }
+
+    /// R4 migration: single-shard table becomes a plain rename.
+    #[tokio::test]
+    async fn r4_migrate_single_shard_tables_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.json").to_string_lossy().to_string();
+        {
+            let s = FileMetaStore::new(&path).await.unwrap();
+            s.put("shards/orders_shard_00", "file:///data/orders.lance", 0).await.unwrap();
+            s.put("shards/products_shard_00", "file:///data/products.lance", 0).await.unwrap();
+        }
+        cmd_migrate(&path, true).await.unwrap();
+        let s = FileMetaStore::new(&path).await.unwrap();
+        let table_uris = s.get_prefix("table_uris/").await.unwrap();
+        assert_eq!(table_uris.len(), 2);
+        assert_eq!(
+            table_uris.get("table_uris/orders").unwrap().value,
+            "file:///data/orders.lance"
+        );
+        // Sources must not be touched.
+        let shards = s.get_prefix("shards/").await.unwrap();
+        assert_eq!(shards.len(), 2, "source shards/* keys must be preserved");
+    }
+
+    /// R4 migration: multi-shard table is skipped with a warning.
+    #[tokio::test]
+    async fn r4_migrate_multi_shard_table_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.json").to_string_lossy().to_string();
+        {
+            let s = FileMetaStore::new(&path).await.unwrap();
+            s.put("shards/big_shard_00", "file:///a.lance", 0).await.unwrap();
+            s.put("shards/big_shard_01", "file:///b.lance", 0).await.unwrap();
+            s.put("shards/small_shard_00", "file:///c.lance", 0).await.unwrap();
+        }
+        cmd_migrate(&path, true).await.unwrap();
+        let s = FileMetaStore::new(&path).await.unwrap();
+        let table_uris = s.get_prefix("table_uris/").await.unwrap();
+        assert_eq!(table_uris.len(), 1, "only single-shard tables migrated");
+        assert!(table_uris.contains_key("table_uris/small"));
+        assert!(!table_uris.contains_key("table_uris/big"),
+            "big's 2 shards should be skipped");
+    }
+
+    /// R4 migration: dry-run must not write anything.
+    #[tokio::test]
+    async fn r4_migrate_dry_run_is_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.json").to_string_lossy().to_string();
+        {
+            let s = FileMetaStore::new(&path).await.unwrap();
+            s.put("shards/t_shard_00", "file:///t.lance", 0).await.unwrap();
+        }
+        cmd_migrate(&path, false).await.unwrap();
+        let s = FileMetaStore::new(&path).await.unwrap();
+        let table_uris = s.get_prefix("table_uris/").await.unwrap();
+        assert!(table_uris.is_empty(), "dry-run must not write table_uris");
+    }
+
+    /// R4 migration: already-migrated tables reported as "no change".
+    #[tokio::test]
+    async fn r4_migrate_already_present_is_no_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("meta.json").to_string_lossy().to_string();
+        {
+            let s = FileMetaStore::new(&path).await.unwrap();
+            s.put("shards/orders_shard_00", "file:///orders.lance", 0).await.unwrap();
+            s.put("table_uris/orders", "file:///orders.lance", 0).await.unwrap();
+        }
+        // Should succeed without error and not double-write.
+        cmd_migrate(&path, true).await.unwrap();
+        let s = FileMetaStore::new(&path).await.unwrap();
+        let table_uris = s.get_prefix("table_uris/").await.unwrap();
+        assert_eq!(table_uris.len(), 1);
     }
 }
