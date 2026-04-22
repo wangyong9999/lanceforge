@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.3.0-alpha.1 (in progress)
+
+Single-dataset realignment. **Breaking change.** One logical table
+is now one Lance dataset; the multi-shard-per-table model used in
+v0.2 is retired. See `docs/ARCHITECTURE_V3_SINGLE_DATASET.md` for
+design rationale, `docs/REALIGNMENT_PARITY_CHECKLIST.md` for the
+item-by-item v0.2 → v0.3 mapping, and `docs/MIGRATION_V2_TO_V3.md`
+(added in Phase R5) for the upgrade path.
+
+### Breaking
+- Proto: `CreateLocalShardRequest`, `LoadShardRequest`,
+  `UnloadShardRequest`, `MoveShardRequest` removed.
+- Proto: `target_shard` / `shard_name` fields removed from write,
+  alter, and health-check messages.
+- MetaStore: `shard_uris`, `shard_mapping`, `target_state` keys
+  retired. Existing multi-shard deployments require offline
+  migration via `lance-admin migrate` (Phase R4).
+- Config: `replica_factor`, per-shard executor pinning, and the
+  `shards` key under `tables` are ignored.
+
+### Added (scheduled per phase)
+- AlterTable DROP / RENAME / ALTER COLUMN (R3).
+- Tags: create / list / get / delete + `checkout_tag` on reads (R3).
+- Time travel: `version` and `tag` query fields on AnnSearch /
+  CountRows (R3).
+- `RestoreTable(version or tag)` (R3).
+- Scalar indexes BITMAP and LABEL_LIST; vector IVF_PQ and
+  IVF_HNSW_SQ wired through (previously proto-advertised but
+  silently fell through to IVF_FLAT) (R3).
+- OTEL `trace_id` propagation coord → worker (R5).
+- `lance-admin migrate` for v0.2 data conversion (R4).
+
+### Removed
+- `scatter_gather.rs`, `shard_pruning.rs`, `shard_state.rs`,
+  `shard_manager.rs`, and `partition_batch_by_hash` — the multi-
+  shard coordination layer, net ~1,080 LOC (R6).
+
+### Changed
+- Workers are fungible: any healthy worker can serve any table.
+  Routing is consistent-hash on (table_name, request_id).
+- Writes no longer fan out. Each write goes to one worker; Lance's
+  manifest CAS handles atomicity.
+- DDL lease retained for CreateTable / DropTable only. AlterTable
+  and CreateIndex rely on Lance's native manifest CAS.
+- `commit_seq` is now equal to the per-table `table.version()`
+  rather than a cross-shard counter. RYOW semantics unchanged from
+  the client's perspective.
+
+## [0.2.0-beta.5] — 2026-04-21
+
+See the release notes in the tag message — v2 architecture (4-role
+composition), distributed primitives #5.1–#5.5 + #3, and the
+hardening pass (idempotent AlterTable + coverage extensions). This
+is the final release of the multi-shard architecture; v0.3 begins
+the single-dataset realignment.
+
 ## [0.2.0-beta.4] - 2026-04-20
 
 Coverage-first hardening pass + honest fix for an overstated SSE
