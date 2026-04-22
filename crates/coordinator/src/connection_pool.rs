@@ -403,14 +403,18 @@ impl ConnectionPool {
                                 for (shard, primary, secondary) in &routing {
                                     let assigned = primary == &wid
                                         || secondary.as_ref().is_some_and(|s| s == &wid);
-                                    if assigned && !actual.contains(shard) {
-                                        // Shard missing — attempt recovery via LoadShard
+                                    // R2 fungible: every healthy worker needs every
+                                    // table open, not just its primary/secondary
+                                    // assignments. Drop the `assigned` gate — open
+                                    // on every healthy worker missing the table.
+                                    let _ = assigned; // retained for log below if needed
+                                    if !actual.contains(shard) {
                                         if let Ok(mut client) = self.get_healthy_client(&wid).await {
                                             let uri = self.get_shard_uri(shard).await;
                                             if let Some(uri) = uri {
-                                                info!("Shard recovery: loading {} on {} (missing after restart)", shard, wid);
-                                                let _ = client.load_shard(Request::new(pb::LoadShardRequest {
-                                                    shard_name: shard.clone(),
+                                                info!("Table recovery: opening {} on {} (missing after reconnect)", shard, wid);
+                                                let _ = client.open_table(Request::new(pb::OpenTableRequest {
+                                                    table_name: shard.clone(),
                                                     uri,
                                                     storage_options: std::collections::HashMap::new(),
                                                 })).await;

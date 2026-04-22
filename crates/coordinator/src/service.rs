@@ -354,15 +354,23 @@ impl CoordinatorService {
         if routing.is_empty() {
             return Err(Status::not_found(format!("table '{table_name}' has no shards")));
         }
-        let (shard_name, primary, secondary) = &routing[0];
-        let owner = if self.pool.get_healthy_client(primary).await.is_ok() {
-            primary.clone()
-        } else if let Some(sec) = secondary.as_ref() {
-            sec.clone()
-        } else {
-            return Err(Status::unavailable(format!(
-                "primary worker '{primary}' for table '{table_name}' is unhealthy and no secondary available"
-            )));
+        let (shard_name, _primary, _secondary) = &routing[0];
+        // R2 fungible routing: any healthy worker can serve this query
+        // because CreateTable broadcast OpenTable to all of them. Pick
+        // via consistent-hash(table + request_salt) so cache locality
+        // is preserved without forcing ownership.
+        let salt = format!("{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos());
+        let owner = match super::worker_select::pick_worker_for_read(
+            &self.pool, table_name, &salt,
+        ).await {
+            super::worker_select::WorkerPick::Worker(w) => w,
+            super::worker_select::WorkerPick::NoneHealthy => {
+                return Err(Status::unavailable(format!(
+                    "no healthy worker to serve table '{table_name}'"
+                )));
+            }
         };
         let mut local_req = local_req;
         local_req.table_name = shard_name.clone();
@@ -1454,6 +1462,42 @@ impl LanceSchedulerService for CoordinatorService {
             ms.put_shard_uris(&uri_map).await;
         }
 
+        // R2 fungible routing: broadcast OpenTable to every healthy
+        // worker so any of them can serve subsequent queries. Without
+        // this broadcast, workers that didn't CreateLocalShard for this
+        // table return "No Lance shard found" when routing picks them.
+        // Failures are logged but non-fatal — the creator worker
+        // already has the data and is a valid read/write target; the
+        // health-check reconnect path will re-broadcast on recovery.
+        let healthy_ids: Vec<String> = self
+            .pool
+            .worker_statuses()
+            .await
+            .into_iter()
+            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
+            .map(|(id, _, _, _, _, _, _)| id)
+            .collect();
+        let storage_opts: std::collections::HashMap<String, String> =
+            self.storage_options.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (shard_name, uri) in &shard_uris_new {
+            for worker_id in &healthy_ids {
+                let Ok(mut client) = self.pool.get_healthy_client(worker_id).await else {
+                    continue;
+                };
+                let req = Request::new(pb::OpenTableRequest {
+                    table_name: shard_name.clone(),
+                    uri: uri.clone(),
+                    storage_options: storage_opts.clone(),
+                });
+                if let Err(e) = client.open_table(req).await {
+                    log::debug!(
+                        "broadcast OpenTable({}) to {}: {} (non-fatal)",
+                        shard_name, worker_id, e
+                    );
+                }
+            }
+        }
+
         // #5.1 Partition pruning: stash on_columns for read-side routing.
         // No-op when caller didn't declare hash keys. Written to both the
         // in-memory cache (hot read path) and MetaStore (survives restart
@@ -1893,6 +1937,28 @@ impl LanceSchedulerService for CoordinatorService {
                 .filter_map(|(sn, _, _)| uris.get(sn).map(|u| (sn.clone(), u.clone())))
                 .collect()
         };
+        // R2: broadcast CloseTable before deleting storage so fungible
+        // workers release their handles cleanly (otherwise they keep a
+        // handle to a deleted dataset until LRU evicts).
+        let healthy_ids: Vec<String> = self
+            .pool
+            .worker_statuses()
+            .await
+            .into_iter()
+            .filter(|(_, _, _, healthy, _, _, _)| *healthy)
+            .map(|(id, _, _, _, _, _, _)| id)
+            .collect();
+        for (shard_name, _) in &shard_uris {
+            for worker_id in &healthy_ids {
+                let Ok(mut client) = self.pool.get_healthy_client(worker_id).await else {
+                    continue;
+                };
+                let _ = client.close_table(Request::new(pb::CloseTableRequest {
+                    table_name: shard_name.clone(),
+                })).await;
+            }
+        }
+
         for (shard_name, uri) in &shard_uris {
             match delete_lance_dataset(uri, &self.storage_options).await {
                 Ok(()) => info!("Deleted shard storage: {} ({})", shard_name, uri),
