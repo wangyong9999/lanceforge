@@ -5,53 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.3.0-alpha.1 (in progress)
+## [0.3.0-alpha.1] — 2026-04-22
 
-Single-dataset realignment. **Breaking change.** One logical table
-is now one Lance dataset; the multi-shard-per-table model used in
-v0.2 is retired. See `docs/ARCHITECTURE_V3_SINGLE_DATASET.md` for
-design rationale, `docs/REALIGNMENT_PARITY_CHECKLIST.md` for the
-item-by-item v0.2 → v0.3 mapping, and `docs/MIGRATION_V2_TO_V3.md`
-(added in Phase R5) for the upgrade path.
+Single-dataset realignment, alpha-grade first cut. One logical
+table now maps to one Lance dataset in object storage; the multi-
+shard-per-table model from v0.2 is retained as a compatibility
+path pending R6 removal. See:
+- `docs/ARCHITECTURE_V3_SINGLE_DATASET.md` — design rationale.
+- `docs/REALIGNMENT_PARITY_CHECKLIST.md` — v0.2→v0.3 mapping.
+- `docs/REALIGNMENT_PARITY_REPORT.md` — actual landing state.
+- `docs/REALIGNMENT_PLAN.md` — phase sequence R0..R6.
+- `docs/adr/ADR-00{1..5}*.md` — architectural decisions.
 
-### Breaking
-- Proto: `CreateLocalShardRequest`, `LoadShardRequest`,
-  `UnloadShardRequest`, `MoveShardRequest` removed.
-- Proto: `target_shard` / `shard_name` fields removed from write,
-  alter, and health-check messages.
-- MetaStore: `shard_uris`, `shard_mapping`, `target_state` keys
-  retired. Existing multi-shard deployments require offline
-  migration via `lance-admin migrate` (Phase R4).
-- Config: `replica_factor`, per-shard executor pinning, and the
-  `shards` key under `tables` are ignored.
-
-### Added (scheduled per phase)
-- AlterTable DROP / RENAME / ALTER COLUMN (R3).
-- Tags: create / list / get / delete + `checkout_tag` on reads (R3).
-- Time travel: `version` and `tag` query fields on AnnSearch /
-  CountRows (R3).
-- `RestoreTable(version or tag)` (R3).
-- Scalar indexes BITMAP and LABEL_LIST; vector IVF_PQ and
-  IVF_HNSW_SQ wired through (previously proto-advertised but
-  silently fell through to IVF_FLAT) (R3).
-- OTEL `trace_id` propagation coord → worker (R5).
-- `lance-admin migrate` for v0.2 data conversion (R4).
-
-### Removed
-- `scatter_gather.rs`, `shard_pruning.rs`, `shard_state.rs`,
-  `shard_manager.rs`, and `partition_batch_by_hash` — the multi-
-  shard coordination layer, net ~1,080 LOC (R6).
+### Added
+- **AlterTable DROP / RENAME** (Lance metadata-only): worker calls
+  `drop_columns` / `alter_columns` through a schema_store-backed
+  coord handler. `e2e_schema_evolution_test.py` 18/18.
+- **Tags**: `CreateTag` / `ListTags` / `DeleteTag` RPCs on the
+  scheduler service; pass-through to Lance native `tags()` API.
+  `e2e_tags_test.py` 22/22.
+- **RestoreTable(version | tag)**: rolls back the Lance dataset to
+  a prior version or tag; a new manifest records the restore.
+- **CreateIndex** full dispatch: IVF_FLAT, IVF_PQ, IVF_HNSW_SQ,
+  IVF_HNSW_PQ, BTREE, BITMAP, LABEL_LIST, FTS/INVERTED. v0.2
+  silently fell through IVF_HNSW_SQ and IVF_PQ to IVF_FLAT — that
+  bug is fixed; unknown types now return `Plan` error with the
+  supported list.
+- Worker `OpenTable` / `CloseTable` RPCs as the table-oriented
+  handle surface alongside the legacy shard-oriented pair.
+- Coord `dispatch_read` helper with single-worker dispatch via
+  `worker_select::pick_worker_for_read`.
+- 5 Architecture Decision Records under `docs/adr/`.
 
 ### Changed
-- Workers are fungible: any healthy worker can serve any table.
-  Routing is consistent-hash on (table_name, request_id).
-- Writes no longer fan out. Each write goes to one worker; Lance's
-  manifest CAS handles atomicity.
-- DDL lease retained for CreateTable / DropTable only. AlterTable
-  and CreateIndex rely on Lance's native manifest CAS.
-- `commit_seq` is now equal to the per-table `table.version()`
-  rather than a cross-shard counter. RYOW semantics unchanged from
-  the client's perspective.
+- Coord read handlers (AnnSearch / FtsSearch / HybridSearch /
+  CountRows) take the single-worker path when the table maps to
+  exactly one shard — the default and only case for tables created
+  under v0.3. Legacy multi-shard tables still scatter-gather.
+- Write handlers (AddRows / UpsertRows / DeleteRows) skip hash-
+  partition fan-out when the table has one shard.
+- DDL lease retained for CreateTable / DropTable; AlterTable and
+  CreateIndex rely on Lance's manifest CAS for atomicity
+  (ADR-004).
+
+### Deferred to later alphas
+- Time travel reads (`version` / `tag` on AnnSearch / CountRows) —
+  needs per-query version-scoped handles.
+- Fully fungible worker routing (R2).
+- `lance-admin migrate` for v0.2 multi-shard data conversion (R4).
+- OTEL trace context propagation (R5).
+- Dead-code purge: `scatter_gather.rs`, `shard_pruning.rs`,
+  `shard_state.rs`, `shard_manager.rs`, `partition_batch_by_hash`,
+  and the deprecated proto messages/fields (R6, together).
+
+### Not-broken from v0.2
+- RPC API surface: all v0.2 RPCs remain. New RPCs added; fields on
+  existing messages only appended (wire-compat).
+- Data layout: v0.2 multi-shard tables are still readable via the
+  retained scatter-gather path.
+- E2E parity: 13/13 (with occasional port-contention flakes that
+  clear in isolation).
 
 ## [0.2.0-beta.5] — 2026-04-21
 
