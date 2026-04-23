@@ -109,7 +109,8 @@ async fn test_distributed_speedup() {
             dimension: dim as u32, nprobes: 1, metric_type: 0, oversample_factor: 1,
         }),
         fts_query: None, filter: None, k: k as u32, columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let single_start = Instant::now();
     for _ in 0..num_queries {

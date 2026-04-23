@@ -98,6 +98,7 @@ impl LanceSchedulerExtension {
             filter,
             k: k * self.default_oversample_factor, // oversample for recall
             columns,
+            fragment_ids: vec![],
         };
 
         let results = self.scatter_gather(&descriptor).await?;
@@ -125,6 +126,7 @@ impl LanceSchedulerExtension {
             filter,
             k: k * self.default_oversample_factor,
             columns,
+            fragment_ids: vec![],
         };
 
         let results = self.scatter_gather(&descriptor).await?;
@@ -162,6 +164,7 @@ impl LanceSchedulerExtension {
             filter,
             k: k * self.default_oversample_factor,
             columns,
+            fragment_ids: vec![],
         };
 
         let results = self.scatter_gather(&descriptor).await?;
@@ -269,6 +272,7 @@ impl InProcessScatterGather {
             filter,
             k: k * 2, // oversample
             columns,
+            fragment_ids: vec![],
         };
 
         let target_ids = self.scheduler.resolve_targets(table_name)?;

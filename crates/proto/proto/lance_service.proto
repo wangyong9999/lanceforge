@@ -308,6 +308,12 @@ message LocalSearchRequest {
   uint32 k = 10;
   optional string filter = 11;
   repeated string columns = 12;
+  // PoC: single-dataset + fragment-fanout path. When non-empty, worker
+  // treats `table_name` as an opaque handle (URI or registered name)
+  // and scans only the listed fragments via
+  // `scan().with_fragments(…).prefilter(true).nearest(…)`.
+  // Empty (default) = legacy shard-scan path.
+  repeated uint32 fragment_ids = 13;
 }
 
 message LocalSearchResponse {

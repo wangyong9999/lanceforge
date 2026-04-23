@@ -1047,6 +1047,14 @@ async fn execute_on_table(
                 DataFusionError::Plan("ANN query missing vector_query params".to_string()))?;
             let vector = decode_vector(vq)?;
 
+            // PoC fragment-fanout branch. When coord asks for a specific
+            // fragment subset, bypass the lancedb::Table query API and go
+            // straight to lance::Dataset::scan() — that's the only layer
+            // exposing with_fragments + prefilter + nearest.
+            if !descriptor.fragment_ids.is_empty() {
+                return execute_fragment_ann(table, vq, &vector, k, &descriptor.fragment_ids).await;
+            }
+
             let mut builder = table.vector_search(vector.as_slice())
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
                 .limit(k)
@@ -1113,6 +1121,71 @@ async fn execute_on_table(
             collect_stream(stream).await
         }
     }
+}
+
+/// PoC Gate 2 — fragment-scoped ANN on a lancedb Table.
+///
+/// Drops into the underlying `lance::Dataset` to call `with_fragments`,
+/// which is not exposed on the `lancedb::Table` query builder. Requires
+/// `prefilter(true)` — see `scanner.rs:1370`, which routes fragment
+/// restriction through the prefilter row-mask path.
+async fn execute_fragment_ann(
+    table: &lancedb::Table,
+    vq: &VectorQueryParams,
+    vector: &[f32],
+    k: usize,
+    fragment_ids: &[u32],
+) -> Result<RecordBatch> {
+    use arrow::array::Float32Array;
+    use futures::TryStreamExt;
+
+    let wrapper = table.dataset().ok_or_else(|| {
+        DataFusionError::Plan(
+            "fragment scan requires a native Lance table (remote tables unsupported)".into(),
+        )
+    })?;
+    let dataset = wrapper
+        .get()
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+    let frag_meta: Vec<lance::table::format::Fragment> = fragment_ids
+        .iter()
+        .map(|&id| {
+            dataset
+                .get_fragment(id as usize)
+                .map(|f| f.metadata().clone())
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "fragment id {id} not present in dataset at version {}",
+                        dataset.version().version
+                    ))
+                })
+        })
+        .collect::<Result<_>>()?;
+
+    let q = Float32Array::from(vector.to_vec());
+    let mut scan = dataset.scan();
+    scan.with_fragments(frag_meta);
+    scan.prefilter(true);
+    scan.nearest(&vq.column, &q, k)
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    scan.nprobes(vq.nprobes as usize);
+    let stream = scan
+        .try_into_stream()
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let batches: Vec<RecordBatch> = stream
+        .try_collect()
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    if batches.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(
+            arrow::datatypes::Schema::empty(),
+        )));
+    }
+    arrow::compute::concat_batches(&batches[0].schema(), &batches)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Collect a lancedb result stream into a single RecordBatch.
@@ -1215,6 +1288,7 @@ mod tests {
             fts_query: None,
             filter: None,
             columns: vec![],
+            fragment_ids: vec![],
         }
     }
 

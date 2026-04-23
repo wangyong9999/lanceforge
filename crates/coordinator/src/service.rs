@@ -784,6 +784,7 @@ impl LanceSchedulerService for CoordinatorService {
             metric_type: Some(req.metric_type),
             text_column: None, query_text: None,
             k: oversample_k, filter: req.filter, columns: req.columns,
+            fragment_ids: vec![],
         };
 
         let t0 = std::time::Instant::now();
@@ -829,6 +830,7 @@ impl LanceSchedulerService for CoordinatorService {
             nprobes: None, metric_type: None,
             text_column: Some(req.text_column), query_text: Some(req.query_text),
             k: oversample_k, filter: req.filter, columns: req.columns,
+            fragment_ids: vec![],
         };
 
         let t0 = std::time::Instant::now();
@@ -879,6 +881,7 @@ impl LanceSchedulerService for CoordinatorService {
             text_column: Some(req.text_column),
             query_text: Some(req.query_text),
             k: oversample_k, filter: req.filter, columns: req.columns,
+            fragment_ids: vec![],
         };
 
         let t0 = std::time::Instant::now();
@@ -2618,6 +2621,7 @@ impl LanceSchedulerService for CoordinatorService {
                 metric_type: Some(req.metric_type),
                 text_column: None, query_text: None,
                 k: oversample_k, filter: req.filter.clone(), columns: req.columns.clone(),
+                fragment_ids: vec![],
             };
 
             let pool = self.pool.clone();

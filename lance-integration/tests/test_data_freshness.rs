@@ -100,7 +100,8 @@ async fn test_data_freshness_after_append() {
         filter: None,
         k: 100,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result1 = reg.execute_query(&descriptor).await.unwrap();
     let count1 = result1.num_rows();

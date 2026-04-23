@@ -389,6 +389,13 @@ pub struct LocalSearchRequest {
     pub filter: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, repeated, tag = "12")]
     pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// PoC: single-dataset + fragment-fanout path. When non-empty, worker
+    /// treats `table_name` as an opaque handle (URI or registered name)
+    /// and scans only the listed fragments via
+    /// `scan().with_fragments(…).prefilter(true).nearest(…)`.
+    /// Empty (default) = legacy shard-scan path.
+    #[prost(uint32, repeated, tag = "13")]
+    pub fragment_ids: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalSearchResponse {

@@ -52,6 +52,13 @@ pub struct LanceQueryDescriptor {
     /// Columns to return
     #[prost(string, repeated, tag = "7")]
     pub columns: Vec<String>,
+
+    /// PoC — fragment-fanout path. When non-empty, executor opens
+    /// `table_name` and restricts the scan to these fragments via
+    /// Lance's `scan().with_fragments(...).prefilter(true)`.
+    /// Empty = legacy full-scan path.
+    #[prost(uint32, repeated, tag = "8")]
+    pub fragment_ids: Vec<u32>,
 }
 
 #[derive(Clone, PartialEq, Message)]

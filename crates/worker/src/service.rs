@@ -472,6 +472,7 @@ fn local_request_to_descriptor(req: &LocalSearchRequest) -> LanceQueryDescriptor
         filter: req.filter.clone(),
         k: req.k,
         columns: req.columns.clone(),
+        fragment_ids: req.fragment_ids.clone(),
     }
 }
 
@@ -493,6 +494,7 @@ mod tests {
             k: 10,
             filter: Some("category = 'cat_0'".to_string()),
             columns: vec!["id".to_string(), "category".to_string()],
+            fragment_ids: vec![],
         }
     }
 
@@ -528,6 +530,7 @@ mod tests {
             k: 5,
             filter: None,
             columns: vec![],
+            fragment_ids: vec![],
         };
         let desc = local_request_to_descriptor(&req);
         assert_eq!(desc.table_name, "docs");
@@ -553,6 +556,7 @@ mod tests {
             k: 20,
             filter: None,
             columns: vec![],
+            fragment_ids: vec![],
         };
         let desc = local_request_to_descriptor(&req);
         assert_eq!(desc.query_type, 2);
@@ -575,6 +579,7 @@ mod tests {
             k: 1,
             filter: None,
             columns: vec![],
+            fragment_ids: vec![],
         };
         let desc = local_request_to_descriptor(&req);
         let vq = desc.vector_query.unwrap();

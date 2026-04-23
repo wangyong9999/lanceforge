@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod connection_pool;
 pub mod embedding;
+pub mod fragment_router;
 pub mod ha;
 pub mod merge;
 pub mod rest;

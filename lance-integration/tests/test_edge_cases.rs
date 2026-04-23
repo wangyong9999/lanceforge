@@ -85,7 +85,8 @@ async fn test_executor_k_zero_rejected() {
         filter: None,
         k: 0, // Invalid!
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await;
     assert!(result.is_err(), "k=0 should be rejected");
@@ -111,7 +112,8 @@ async fn test_executor_ann_without_vector_query_rejected() {
         filter: None,
         k: 5,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await;
     assert!(result.is_err(), "ANN without vector_query should be rejected");
@@ -144,7 +146,8 @@ async fn test_executor_empty_vector_rejected() {
         filter: None,
         k: 5,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await;
     assert!(result.is_err(), "Empty vector should be rejected");
@@ -176,7 +179,8 @@ async fn test_executor_dimension_mismatch_rejected() {
         filter: None,
         k: 5,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await;
     assert!(result.is_err(), "Dimension mismatch should be rejected");
@@ -209,7 +213,8 @@ async fn test_executor_unknown_table_rejected() {
         filter: None,
         k: 5,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await;
     assert!(result.is_err(), "Unknown table should be rejected");
@@ -248,7 +253,8 @@ async fn test_executor_table_name_prefix_safety() {
         filter: None,
         k: 50,
         columns: vec![],
-    };
+            fragment_ids: vec![],
+        };
 
     let result = reg.execute_query(&descriptor).await.unwrap();
     // Should match "prod" and "prod_shard_00" but NOT "production"
@@ -295,7 +301,8 @@ async fn test_executor_concurrent_queries() {
                 filter: None,
                 k: 5,
                 columns: vec![],
-            };
+            fragment_ids: vec![],
+        };
             reg.execute_query(&descriptor).await
         }));
     }
