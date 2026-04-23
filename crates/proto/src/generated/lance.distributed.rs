@@ -503,6 +503,13 @@ pub struct LocalWriteRequest {
     /// For Add: specific shard to write to (prevents duplication)
     #[prost(string, tag = "6")]
     pub target_shard: ::prost::alloc::string::String,
+    /// Phase 3: fungible-worker write path. Same semantics as
+    /// LocalSearchRequest.shard_uri (field 14): when set and the table
+    /// isn't already in the worker's registry, lazy open_table before
+    /// serving the write. Lets coord route writes to the HRW-chosen
+    /// primary worker even if that worker wasn't preloaded with the shard.
+    #[prost(string, optional, tag = "7")]
+    pub shard_uri: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalWriteResponse {

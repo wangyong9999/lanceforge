@@ -152,6 +152,23 @@ impl LanceExecutorService for WorkerService {
         let req = request.into_inner();
         debug!("Worker write: table={}, type={}", req.table_name, req.write_type);
 
+        // Phase 3: lazy-open before write (mirrors phase 1 read path).
+        // Coord routes single-shard writes to the HRW-picked primary,
+        // which may not have the shard preloaded.
+        if let Some(ref uri) = req.shard_uri
+            && let Err(e) = self
+                .registry
+                .open_table(&req.table_name, uri, &std::collections::HashMap::new())
+                .await
+        {
+            warn!("lazy open_table({}) for write failed: {}", req.table_name, e);
+            return Ok(Response::new(pb::LocalWriteResponse {
+                affected_rows: 0,
+                new_version: 0,
+                error: format!("lazy open failed: {e}"),
+            }));
+        }
+
         match self.registry.execute_write(&req).await {
             Ok((affected_rows, new_version)) => {
                 Ok(Response::new(pb::LocalWriteResponse {

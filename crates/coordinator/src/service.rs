@@ -685,7 +685,8 @@ impl CoordinatorService {
                     filter: String::new(),
                     on_columns: vec![],
                     target_shard: shard_name.clone(),
-                };
+            shard_uri: None,
+        };
                 // D8: per-shard write latency, mirrors H13 on the read
                 // path. Lets operators see which shard is the outlier
                 // when a write spikes — the usual culprit is the shard
@@ -1004,6 +1005,64 @@ impl LanceSchedulerService for CoordinatorService {
             return Err(Status::not_found(format!("No shards for table: {}", req.table_name)));
         }
 
+        // Phase 3: single-shard tables route writes to a deterministic
+        // HRW primary (pick_worker_for_write) with shard_uri so the
+        // worker lazy-opens. Same primary across coord processes under
+        // identical healthy pools → Lance OCC never contends on one
+        // manifest across writers.
+        if routing.len() == 1 && req.on_columns.is_empty() {
+            let shard_name = routing[0].0.clone();
+            let shard_uri = self.shard_uris.read().await.get(&shard_name).cloned();
+            let pick = super::worker_select::pick_worker_for_write(
+                &self.pool,
+                &req.table_name,
+            )
+            .await;
+            let worker_id = match pick {
+                super::worker_select::WorkerPick::Worker(w) => w,
+                super::worker_select::WorkerPick::NoneHealthy => {
+                    return Err(Status::unavailable(format!(
+                        "no healthy worker for {}",
+                        req.table_name
+                    )));
+                }
+            };
+            let mut client = self.pool.get_healthy_client(&worker_id).await?;
+            // Worker's execute_write keys on target_shard for the table
+            // lookup. Register the lazy-open handle under shard_name so
+            // target_shard resolves.
+            let local_req = pb::LocalWriteRequest {
+                write_type: 0,
+                table_name: shard_name.clone(),
+                arrow_ipc_data: req.arrow_ipc_data,
+                filter: String::new(),
+                on_columns: vec![],
+                target_shard: shard_name,
+                shard_uri,
+            };
+            let result = tokio::time::timeout(
+                self.query_timeout,
+                client.execute_local_write(Request::new(local_req)),
+            )
+            .await
+            .map_err(|_| Status::deadline_exceeded("Write timed out"))?
+            .map_err(|e| Status::internal(format!("Worker error: {}", e)))?;
+            let resp = result.into_inner();
+            let commit_seq = if resp.error.is_empty() {
+                self.bump_commit_seq().await
+            } else {
+                0
+            };
+            let write_resp = pb::WriteResponse {
+                affected_rows: resp.affected_rows,
+                new_version: resp.new_version,
+                error: resp.error,
+                commit_seq,
+            };
+            self.record_dedup(&request_id, &write_resp).await;
+            return Ok(Response::new(write_resp));
+        }
+
         // Two routing modes:
         //   on_columns set  → hash-partition by key, fan out to matching shards.
         //                     Same hash UpsertRows uses, so mixed Add/Upsert with
@@ -1050,6 +1109,7 @@ impl LanceSchedulerService for CoordinatorService {
             filter: String::new(),
             on_columns: vec![],
             target_shard: shard_name.clone(),
+            shard_uri: None,
         };
 
         let result = tokio::time::timeout(
@@ -1124,7 +1184,8 @@ impl LanceSchedulerService for CoordinatorService {
                     filter: req.filter.clone(),
                     on_columns: vec![],
                     target_shard: shard_name.clone(),
-                };
+            shard_uri: None,
+        };
                 match tokio::time::timeout(
                     self.query_timeout,
                     client.execute_local_write(Request::new(local_req)),
@@ -1239,7 +1300,8 @@ impl LanceSchedulerService for CoordinatorService {
                     filter: String::new(),
                     on_columns: req.on_columns.clone(),
                     target_shard: shard_name.clone(),
-                };
+            shard_uri: None,
+        };
                 match tokio::time::timeout(
                     self.query_timeout,
                     client.execute_local_write(Request::new(local_req)),

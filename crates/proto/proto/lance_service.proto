@@ -391,6 +391,12 @@ message LocalWriteRequest {
   string filter = 4;              // For Delete: SQL WHERE predicate
   repeated string on_columns = 5; // For Upsert: join key columns
   string target_shard = 6;        // For Add: specific shard to write to (prevents duplication)
+  // Phase 3: fungible-worker write path. Same semantics as
+  // LocalSearchRequest.shard_uri (field 14): when set and the table
+  // isn't already in the worker's registry, lazy open_table before
+  // serving the write. Lets coord route writes to the HRW-chosen
+  // primary worker even if that worker wasn't preloaded with the shard.
+  optional string shard_uri = 7;
 }
 
 message LocalWriteResponse {
