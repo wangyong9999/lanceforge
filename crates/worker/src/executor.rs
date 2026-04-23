@@ -1058,7 +1058,19 @@ async fn execute_on_table(
             let mut builder = table.vector_search(vector.as_slice())
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
                 .limit(k)
-                .nprobes(vq.nprobes as usize);
+                .nprobes(vq.nprobes as usize)
+                // Phase 0: refine_factor reads original vectors for the
+                // shortlisted candidates and recomputes exact L2, so the
+                // `_distance` column coord merges on is the true distance
+                // (not a PQ-codebook-local approximation). Without this,
+                // global top-K merge across shards with independent PQ
+                // codebooks is lossy.
+                //
+                // Factor 10 (not 3) because PQ 16-subvec × 8-bit is
+                // coarse: true top-K rows can rank >#40 by PQ. We need
+                // the shortlist wide enough that the true set survives
+                // to the refine step.
+                .refine_factor(10);
 
             if let Some(ref filter) = descriptor.filter {
                 builder = builder.only_if(filter.clone());
