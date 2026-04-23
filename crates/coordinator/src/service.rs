@@ -80,6 +80,11 @@ pub struct CoordinatorService {
     /// the owning pod cleanly. Used as the lease `holder` field in
     /// `ddl_lease/{table}`.
     instance_id: String,
+    /// Phase 2 single-dataset path: cached Lance Dataset handles for
+    /// manifest reads during fragment-fanout dispatch. Opened lazily
+    /// on first query per table; not refreshed for MVP (users restart
+    /// coord after writes if they need the new fragment set).
+    dataset_cache: Arc<super::fragment_dispatch::DatasetCache>,
 }
 
 /// How long a completed write's request_id stays deduplicatable.
@@ -287,6 +292,7 @@ impl CoordinatorService {
             write_dedup: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             audit_sink: None,
             instance_id: format!("coord-{}", std::process::id()),
+            dataset_cache: Arc::new(super::fragment_dispatch::DatasetCache::default()),
         }
     }
 
@@ -790,11 +796,40 @@ impl LanceSchedulerService for CoordinatorService {
 
         let t0 = std::time::Instant::now();
         let on_cols = self.on_columns_for(&req.table_name).await;
-        let result = super::scatter_gather::scatter_gather(
-            &self.pool, &self.shard_state, &self.pruner,
-            &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
-            &on_cols,
-        ).await;
+
+        // Phase 2: single-dataset tables (one ShardConfig entry) take
+        // the fragment-fanout path — coord enumerates Lance fragments,
+        // HRW-routes subsets to healthy workers, each worker lazy-opens
+        // via the phase-1 shard_uri protocol. Multi-shard tables keep
+        // scatter_gather. The routing lookup is identical to what
+        // scatter_gather does first thing, so the branch cost is a
+        // single HashMap read.
+        let routing = self.shard_state.get_shard_routing(&req.table_name).await;
+        let single_shard_uri: Option<String> = if routing.len() == 1 {
+            self.shard_uris.read().await.get(&routing[0].0).cloned()
+        } else {
+            None
+        };
+
+        let result = if let Some(uri) = single_shard_uri {
+            super::fragment_dispatch::dispatch_fragment_fanout(
+                &self.pool,
+                &self.dataset_cache,
+                &uri,
+                &req.table_name,
+                local_req,
+                merge_limit,
+                self.query_timeout,
+                trace_id,
+            )
+            .await
+        } else {
+            super::scatter_gather::scatter_gather(
+                &self.pool, &self.shard_state, &self.pruner,
+                &req.table_name, local_req, merge_limit, true, self.query_timeout, trace_id,
+                &on_cols,
+            ).await
+        };
         let latency_us = t0.elapsed().as_micros() as u64;
         self.metrics.record_query(latency_us, result.is_ok());
         let resp = result?;

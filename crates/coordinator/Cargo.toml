@@ -13,7 +13,9 @@ lance-distributed-proto = { path = "../proto" }
 lance-distributed-common = { path = "../common" }
 lance-distributed-meta = { path = "../meta" }
 
+# Lance (dataset fragment enumeration for single-dataset fanout) +
 # LanceDB (embedding, reranker)
+lance = { version = "4.0.0", default-features = false, features = ["aws"] }
 lancedb = { version = "0.27", default-features = false }
 
 # DataFusion + Arrow
