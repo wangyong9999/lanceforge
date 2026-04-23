@@ -4751,6 +4751,7 @@ dependencies = [
  "lance-distributed-proto",
  "lance-distributed-worker",
  "lance-index",
+ "lance-table",
  "lancedb",
  "log",
  "serde",
