@@ -396,6 +396,14 @@ pub struct LocalSearchRequest {
     /// Empty (default) = legacy shard-scan path.
     #[prost(uint32, repeated, tag = "13")]
     pub fragment_ids: ::prost::alloc::vec::Vec<u32>,
+    /// Phase 1: fungible worker path. When set and the worker does not
+    /// already have `table_name` registered, the worker calls
+    /// open_table(table_name, shard_uri) before serving the request. Lets
+    /// coord dispatch to any healthy worker without requiring the worker
+    /// to be pre-configured with this table's ShardConfig entry.
+    /// Unset (default) = legacy path that requires pre-registered shards.
+    #[prost(string, optional, tag = "14")]
+    pub shard_uri: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalSearchResponse {

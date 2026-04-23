@@ -785,6 +785,7 @@ impl LanceSchedulerService for CoordinatorService {
             text_column: None, query_text: None,
             k: oversample_k, filter: req.filter, columns: req.columns,
             fragment_ids: vec![],
+            shard_uri: None,
         };
 
         let t0 = std::time::Instant::now();
@@ -831,6 +832,7 @@ impl LanceSchedulerService for CoordinatorService {
             text_column: Some(req.text_column), query_text: Some(req.query_text),
             k: oversample_k, filter: req.filter, columns: req.columns,
             fragment_ids: vec![],
+            shard_uri: None,
         };
 
         let t0 = std::time::Instant::now();
@@ -882,6 +884,7 @@ impl LanceSchedulerService for CoordinatorService {
             query_text: Some(req.query_text),
             k: oversample_k, filter: req.filter, columns: req.columns,
             fragment_ids: vec![],
+            shard_uri: None,
         };
 
         let t0 = std::time::Instant::now();
@@ -2622,7 +2625,8 @@ impl LanceSchedulerService for CoordinatorService {
                 text_column: None, query_text: None,
                 k: oversample_k, filter: req.filter.clone(), columns: req.columns.clone(),
                 fragment_ids: vec![],
-            };
+            shard_uri: None,
+        };
 
             let pool = self.pool.clone();
             let shard_state = self.shard_state.clone();

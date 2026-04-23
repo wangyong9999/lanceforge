@@ -314,6 +314,13 @@ message LocalSearchRequest {
   // `scan().with_fragments(…).prefilter(true).nearest(…)`.
   // Empty (default) = legacy shard-scan path.
   repeated uint32 fragment_ids = 13;
+  // Phase 1: fungible worker path. When set and the worker does not
+  // already have `table_name` registered, the worker calls
+  // open_table(table_name, shard_uri) before serving the request. Lets
+  // coord dispatch to any healthy worker without requiring the worker
+  // to be pre-configured with this table's ShardConfig entry.
+  // Unset (default) = legacy path that requires pre-registered shards.
+  optional string shard_uri = 14;
 }
 
 message LocalSearchResponse {

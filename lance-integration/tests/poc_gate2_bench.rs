@@ -358,7 +358,8 @@ async fn gate2_bench_a_vs_b() {
         filter: None,
         columns: vec!["id".into()],
         fragment_ids: vec![],
-    };
+            shard_uri: None,
+        };
 
     // === Variant A run ===
     println!("\n[A] warming up {WARMUP} queries");

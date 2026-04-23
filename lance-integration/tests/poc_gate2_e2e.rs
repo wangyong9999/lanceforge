@@ -246,7 +246,8 @@ async fn gate2_single_dataset_fragment_fanout_e2e() {
         filter: None,
         columns: vec!["id".into()],
         fragment_ids: frag_ids,
-    };
+            shard_uri: None,
+        };
 
     let w0_req = build_req(assignment.get("w0").cloned().unwrap_or_default());
     let w1_req = build_req(assignment.get("w1").cloned().unwrap_or_default());

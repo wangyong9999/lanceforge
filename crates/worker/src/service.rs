@@ -76,6 +76,25 @@ impl LanceExecutorService for WorkerService {
         let req = request.into_inner();
         debug!("Worker: table={}, type={}", req.table_name, req.query_type);
 
+        // Phase 1: fungible worker path — when coord ships a URI, ensure
+        // the table is loaded. open_table is idempotent (fast-path when
+        // already registered), so no pre-check needed. Lets coord
+        // dispatch to any healthy worker without requiring ShardConfig
+        // preload.
+        if let Some(ref uri) = req.shard_uri
+            && let Err(e) = self
+                .registry
+                .open_table(&req.table_name, uri, &std::collections::HashMap::new())
+                .await
+        {
+            warn!("lazy open_table({}) failed: {}", req.table_name, e);
+            return Ok(Response::new(LocalSearchResponse {
+                arrow_ipc_data: vec![],
+                num_rows: 0,
+                error: format!("lazy open failed: {e}"),
+            }));
+        }
+
         let descriptor = local_request_to_descriptor(&req);
 
         match self.registry.execute_query(&descriptor).await {
@@ -495,6 +514,7 @@ mod tests {
             filter: Some("category = 'cat_0'".to_string()),
             columns: vec!["id".to_string(), "category".to_string()],
             fragment_ids: vec![],
+            shard_uri: None,
         }
     }
 
@@ -531,6 +551,7 @@ mod tests {
             filter: None,
             columns: vec![],
             fragment_ids: vec![],
+            shard_uri: None,
         };
         let desc = local_request_to_descriptor(&req);
         assert_eq!(desc.table_name, "docs");
@@ -557,6 +578,7 @@ mod tests {
             filter: None,
             columns: vec![],
             fragment_ids: vec![],
+            shard_uri: None,
         };
         let desc = local_request_to_descriptor(&req);
         assert_eq!(desc.query_type, 2);
@@ -580,6 +602,7 @@ mod tests {
             filter: None,
             columns: vec![],
             fragment_ids: vec![],
+            shard_uri: None,
         };
         let desc = local_request_to_descriptor(&req);
         let vq = desc.vector_query.unwrap();
