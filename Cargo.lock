@@ -3153,6 +3153,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8fa43de52e33bb8fc545448eb07d6e6248971c5d6b4947937e9395f6ff339d"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4286,7 +4296,7 @@ version = "0.2.0-beta.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "fs4",
+ "fs4 1.0.2",
  "lance-distributed-common",
  "lance-distributed-proto",
  "log",
@@ -7503,7 +7513,7 @@ dependencies = [
  "downcast-rs",
  "fastdivide",
  "fnv",
- "fs4",
+ "fs4 0.8.4",
  "htmlescape",
  "hyperloglogplus",
  "itertools 0.14.0",
