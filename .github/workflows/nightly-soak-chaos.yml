@@ -84,7 +84,7 @@ jobs:
 
       - name: Upload soak result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: soak-${{ github.run_id }}
           path: soak/results/*.json
@@ -140,7 +140,7 @@ jobs:
 
       - name: Upload chaos result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chaos-${{ github.run_id }}
           path: chaos/results/*.json
