@@ -39,7 +39,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 # B3: optional OpenTelemetry OTLP exporter. Feature-gated to keep the
 # default build light; enable with `cargo build --features otel`.
-opentelemetry = { version = "0.27", optional = true }
+opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "tonic", "trace"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
