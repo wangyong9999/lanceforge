@@ -58,6 +58,13 @@ impl DatasetCache {
         self.inner.write().await.insert(uri.to_string(), ds.clone());
         Ok(ds)
     }
+
+    /// Drop the cached handle for `uri`. Next `get_or_open` will re-read
+    /// the current manifest. Called by the write path after a successful
+    /// commit so subsequent reads see the new fragment set.
+    pub async fn invalidate(&self, uri: &str) {
+        self.inner.write().await.remove(uri);
+    }
 }
 
 /// Dispatch a fragment fanout over `uri`. Returns the merged

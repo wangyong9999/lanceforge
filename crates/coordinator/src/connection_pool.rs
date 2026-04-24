@@ -449,6 +449,34 @@ impl ConnectionPool {
         }
     }
 
+    /// Poll until `expected` workers report healthy=true, or until
+    /// `timeout` elapses. Returns true on success.
+    ///
+    /// Exists to eliminate the `sleep(2_000ms)` pattern in integration
+    /// tests: those sleeps coped with ConnectionPool's 10 s health-check
+    /// cadence by waiting a worst-case window, which flakes under CI
+    /// load and wastes real time. This helper polls at 50 ms so tests
+    /// resume as soon as connect_all completes.
+    pub async fn wait_until_healthy(&self, expected: usize, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let poll = Duration::from_millis(50);
+        loop {
+            let healthy = self
+                .worker_statuses()
+                .await
+                .into_iter()
+                .filter(|(_, _, _, h, _, _, _)| *h)
+                .count();
+            if healthy >= expected {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(poll).await;
+        }
+    }
+
     /// Get health status for all workers (for cluster status API).
     pub async fn worker_statuses(&self) -> Vec<(String, String, u16, bool, Instant, u32, u64)> {
         let workers = self.workers.read().await;

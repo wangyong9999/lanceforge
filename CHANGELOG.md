@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-alpha.1] — 2026-04-24
+
+Single logical dataset on S3 with fragment-level distributed
+execution, delivered on top of the alpha.3 multi-shard baseline
+(still the default for legacy tables).  Built as the MVP for
+"logical single dataset + distributed execution + fully stateless
+workers + affinity routing" — a user requirement alpha.1/alpha.2
+got wrong by conflating the two axes.
+
+Branches off `v0.3.0-alpha.3`; the multi-shard path is untouched
+for every table not explicitly created as single-dataset.
+
+### Added
+
+- **Phase 0 — worker `refine_factor`** on ANN search
+  (`execute_on_table` and fragment-scan path). lancedb's built-in
+  re-rank reads original vectors for the PQ shortlist and returns
+  true L2 in `_distance`, so the coord's cross-worker top-K merge
+  is correct even when each shard has its own PQ codebook.
+  Isolated bench on 500k × 128d × 2 shards with in-memory brute-
+  force ground truth: **recall 0.522 → 0.973** (`phase0_rerank.rs`,
+  requires `--release --ignored`).
+
+- **Phase 1 — fungible worker primitive**. `LocalSearchRequest`
+  and `LocalWriteRequest` gain an optional `shard_uri` field.
+  When set and the table is not in the worker's registry, the
+  worker idempotently calls `open_table(name, uri)` before
+  serving. Workers boot with zero preloaded shards and pick up
+  work as dispatched. (`phase1_fungible.rs`)
+
+- **Phase 2 — coord fragment fanout for single-shard tables**.
+  `fragment_dispatch::dispatch_fragment_fanout` enumerates Lance
+  fragments via a cached `DatasetCache`, HRW-routes subsets to
+  healthy workers via `fragment_router::assign_fragments`, and
+  merges with the existing `global_top_k_by_distance` (correct
+  across workers thanks to Phase 0). `ann_search` auto-selects
+  this path when routing returns exactly one ShardConfig entry.
+  (`phase2_single_dataset.rs`)
+
+- **Phase 3 — single-primary writer via HRW**. AddRows for
+  single-shard tables routes through `worker_select::
+  pick_worker_for_write` (FNV hash of `table_name`). Multi-coord
+  deployments converge on the same primary without lease /
+  election. Write throughput is bounded by Lance OCC (~100-500
+  commits/s on S3), consistent with ADR-001. Writes ship
+  `shard_uri` so the primary lazy-opens if it wasn't preloaded.
+  (`phase3_single_writer.rs`)
+
+- **DatasetCache invalidation on commit** — after a successful
+  single-shard AddRows, coord drops its cached Lance handle for
+  the URI. The next read reopens and enumerates the current
+  fragment set. Without this, read-after-write would return
+  stale results. Regression test:
+  `phase3_read_after_write_sees_new_rows`.
+
+- **`ConnectionPool::wait_until_healthy(expected, timeout)`** —
+  polls worker_statuses at 50 ms cadence until the healthy worker
+  count reaches `expected`. Replaces the `sleep(2_000ms)` pattern
+  in phase-2 and phase-3 tests; cuts test runtime from ~2.5 s to
+  ~0.6 s each and removes a source of CI flakes.
+
+- **`crates/coordinator/src/fragment_router.rs`** (already landed
+  in alpha.3's verification commit as a PoC artifact) is now
+  production-used by the phase-2 dispatcher.
+
+### Protocol
+
+- `LocalSearchRequest.fragment_ids` (`repeated uint32`, tag 13) —
+  when non-empty, worker scans only the listed fragments via
+  `Scanner::with_fragments + prefilter + nearest`.
+- `LocalSearchRequest.shard_uri` (`optional string`, tag 14) —
+  lazy-open directive for fungible workers.
+- `LocalWriteRequest.shard_uri` (`optional string`, tag 7) —
+  same for writes.
+
+### Changed
+
+- `crates/coordinator/Cargo.toml`: added `lance = "4.0"`
+  (needed for `Dataset::open` at the coord during fragment
+  enumeration). No runtime cost on the legacy multi-shard path.
+
+### Test evidence
+
+- Workspace lib tests: 546 green.
+- `phase1_fungible` 2/2, `phase2_single_dataset` 1/1,
+  `phase3_single_writer` 2/2 (includes the read-after-write
+  regression guard).
+- `phase0_rerank --ignored --release`: mean recall 0.973, min
+  0.900 (40 queries, 500k × 128d × 2 shards).
+
+### Not yet in this alpha
+
+Intentional deferrals — tracked for 0.4.0-alpha.2+:
+
+- NVMe fragment-byte cache. PoC Gate 2 bench put the no-cache
+  delta at ~2.5× p99 vs the multi-shard baseline; this is the
+  gap Enterprise's consistent-hash PE cache closes.
+- Asynchronous/event-driven index build. Current IDX is still
+  polling-driven.
+- Tunable consistency beyond strong + `min_commit_seq` (no
+  bounded-staleness / session handles yet).
+- `lance-admin migrate` for converting alpha.3 multi-shard data
+  into a single dataset. Early adopters recreate the table.
+
 ## [0.3.0-alpha.3] — 2026-04-22
 
 Distributed vector search restored. alpha.1 had flipped the coord

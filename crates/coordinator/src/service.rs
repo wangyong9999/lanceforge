@@ -1038,7 +1038,7 @@ impl LanceSchedulerService for CoordinatorService {
                 filter: String::new(),
                 on_columns: vec![],
                 target_shard: shard_name,
-                shard_uri,
+                shard_uri: shard_uri.clone(),
             };
             let result = tokio::time::timeout(
                 self.query_timeout,
@@ -1049,6 +1049,13 @@ impl LanceSchedulerService for CoordinatorService {
             .map_err(|e| Status::internal(format!("Worker error: {}", e)))?;
             let resp = result.into_inner();
             let commit_seq = if resp.error.is_empty() {
+                // Invalidate our cached Dataset handle so the next
+                // ann_search re-reads the manifest and sees the new
+                // fragment set. Without this, the fragment-fanout
+                // read path would miss rows committed by this write.
+                if let Some(ref uri) = shard_uri {
+                    self.dataset_cache.invalidate(uri).await;
+                }
                 self.bump_commit_seq().await
             } else {
                 0

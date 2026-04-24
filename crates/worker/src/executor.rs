@@ -1183,6 +1183,12 @@ async fn execute_fragment_ann(
     scan.nearest(&vq.column, &q, k)
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     scan.nprobes(vq.nprobes as usize);
+    // Phase 0 parity: ask Lance to re-rank PQ candidates against true
+    // vectors so `_distance` returned to the coord is exact. Factor 10
+    // matches the lancedb path in `execute_on_table` — coarse PQ codes
+    // can push true top-K rows beyond the first 40 candidates, so the
+    // shortlist must be wide.
+    scan.refine(10);
     let stream = scan
         .try_into_stream()
         .await

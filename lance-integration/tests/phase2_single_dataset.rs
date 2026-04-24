@@ -146,6 +146,7 @@ async fn phase2_single_dataset_ann_search_through_coord() {
     sleep(Duration::from_millis(500)).await;
 
     let sched = CoordinatorService::new(&config, Duration::from_secs(30));
+    let pool = sched.pool_shutdown_handle();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(LanceSchedulerServiceServer::new(sched))
@@ -153,7 +154,10 @@ async fn phase2_single_dataset_ann_search_through_coord() {
             .await
             .unwrap();
     });
-    sleep(Duration::from_millis(2000)).await;
+    assert!(
+        pool.wait_until_healthy(2, Duration::from_secs(5)).await,
+        "both workers should become healthy within 5s"
+    );
 
     let mut client = LanceSchedulerServiceClient::connect(format!("http://127.0.0.1:{sp}"))
         .await

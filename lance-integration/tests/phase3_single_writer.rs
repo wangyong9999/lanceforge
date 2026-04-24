@@ -21,7 +21,7 @@ use lanceforge::generated::lance_distributed::{
     lance_executor_service_server::LanceExecutorServiceServer,
     lance_scheduler_service_client::LanceSchedulerServiceClient,
     lance_scheduler_service_server::LanceSchedulerServiceServer,
-    AddRowsRequest,
+    AddRowsRequest, AnnSearchRequest,
 };
 use lanceforge::worker::WorkerService;
 
@@ -144,6 +144,7 @@ async fn phase3_single_shard_add_rows_via_primary() {
     sleep(Duration::from_millis(500)).await;
 
     let sched = CoordinatorService::new(&config, Duration::from_secs(30));
+    let pool = sched.pool_shutdown_handle();
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(LanceSchedulerServiceServer::new(sched))
@@ -151,7 +152,10 @@ async fn phase3_single_shard_add_rows_via_primary() {
             .await
             .unwrap();
     });
-    sleep(Duration::from_millis(2000)).await;
+    assert!(
+        pool.wait_until_healthy(2, Duration::from_secs(5)).await,
+        "both workers should become healthy within 5s"
+    );
 
     let mut client = LanceSchedulerServiceClient::connect(format!("http://127.0.0.1:{sp}"))
         .await
@@ -203,4 +207,144 @@ async fn phase3_single_shard_add_rows_via_primary() {
     assert_eq!(total2, INITIAL_ROWS + 2 * ADDED_ROWS);
 
     println!("phase3: 2 writes × {ADDED_ROWS} rows → {total2} rows on disk");
+}
+
+/// Regression guard: cache staleness bug. If the coord's DatasetCache
+/// holds a stale handle after a write, the next ann_search would
+/// enumerate the OLD fragment list and miss the newly committed rows.
+/// With the invalidation hook wired into the write path, this test
+/// should surface the added rows via the fragment-fanout path.
+#[tokio::test]
+async fn phase3_read_after_write_sees_new_rows() {
+    let _ = env_logger::try_init();
+    let tmp = TempDir::new().unwrap();
+    let uri = tmp.path().join("raw.lance");
+    let uri_s = uri.to_str().unwrap().to_string();
+    create_seed_dataset(&uri_s).await;
+
+    let ep0 = 57030u16;
+    let ep1 = 57031u16;
+    let sp = 57032u16;
+    let config = ClusterConfig {
+        tables: vec![TableConfig {
+            name: "t".into(),
+            shards: vec![ShardConfig {
+                name: "t_shard_00".into(),
+                uri: uri_s.clone(),
+                executors: vec!["w0".into(), "w1".into()],
+            }],
+        }],
+        executors: vec![
+            ExecutorConfig { id: "w0".into(), host: "127.0.0.1".into(), port: ep0, role: Default::default() },
+            ExecutorConfig { id: "w1".into(), host: "127.0.0.1".into(), port: ep1, role: Default::default() },
+        ],
+        ..Default::default()
+    };
+    for p in [ep0, ep1] {
+        let reg = Arc::new(
+            LanceTableRegistry::new(SessionContext::default(), &[])
+                .await
+                .unwrap(),
+        );
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(LanceExecutorServiceServer::new(WorkerService::new(reg)))
+                .serve(format!("0.0.0.0:{p}").parse().unwrap())
+                .await
+                .unwrap();
+        });
+    }
+    sleep(Duration::from_millis(500)).await;
+    let sched = CoordinatorService::new(&config, Duration::from_secs(30));
+    let pool = sched.pool_shutdown_handle();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(LanceSchedulerServiceServer::new(sched))
+            .serve(format!("0.0.0.0:{sp}").parse().unwrap())
+            .await
+            .unwrap();
+    });
+    assert!(
+        pool.wait_until_healthy(2, Duration::from_secs(5)).await,
+        "both workers should become healthy within 5s"
+    );
+    let mut client = LanceSchedulerServiceClient::connect(format!("http://127.0.0.1:{sp}"))
+        .await
+        .unwrap();
+
+    // Prime the coord's DatasetCache by doing one read first.
+    let q0_bytes: Vec<u8> = vec![0f32; DIM].into_iter().flat_map(|f| f.to_le_bytes()).collect();
+    let _warm = client
+        .ann_search(AnnSearchRequest {
+            table_name: "t".into(),
+            vector_column: "vector".into(),
+            query_vector: q0_bytes.clone(),
+            dimension: DIM as u32,
+            k: 5,
+            nprobes: 1,
+            filter: None,
+            columns: vec!["id".into()],
+            metric_type: 0,
+            query_text: None,
+            offset: 0,
+            min_schema_version: 0,
+            min_commit_seq: 0,
+        })
+        .await
+        .unwrap();
+
+    // Write NEW rows that don't exist yet. If cache isn't invalidated
+    // these ids will be invisible to the next search.
+    let added = make_batch(INITIAL_ROWS as i32, ADDED_ROWS, 99);
+    let _ = client
+        .add_rows(AddRowsRequest {
+            table_name: "t".into(),
+            arrow_ipc_data: batch_to_ipc(&added),
+            on_columns: vec![],
+            request_id: "raw".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Query targeting a vector from the new batch — top hit should be
+    // id = INITIAL_ROWS (first added row, seed=99 row 0).
+    let probe = rand_vecs(99, ADDED_ROWS, DIM);
+    let q_bytes: Vec<u8> = probe[0..DIM].iter().flat_map(|f| f.to_le_bytes()).collect();
+    let resp = client
+        .ann_search(AnnSearchRequest {
+            table_name: "t".into(),
+            vector_column: "vector".into(),
+            query_vector: q_bytes,
+            dimension: DIM as u32,
+            k: 3,
+            nprobes: 1,
+            filter: None,
+            columns: vec!["id".into()],
+            metric_type: 0,
+            query_text: None,
+            offset: 0,
+            min_schema_version: 0,
+            min_commit_seq: 0,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.error.is_empty(), "search error: {}", resp.error);
+
+    use arrow::ipc::reader::StreamReader;
+    let reader = StreamReader::try_new(&resp.arrow_ipc_data[..], None).unwrap();
+    let mut got = Vec::new();
+    for b in reader {
+        let b = b.unwrap();
+        let ids = b.column_by_name("id").unwrap().as_any().downcast_ref::<Int32Array>().unwrap();
+        for i in 0..ids.len() {
+            got.push(ids.value(i));
+        }
+    }
+    assert!(
+        got.iter().any(|id| *id >= INITIAL_ROWS as i32),
+        "read-after-write should return at least one newly added id; got {got:?}"
+    );
+    println!("phase3: read-after-write saw ids {got:?}");
 }
