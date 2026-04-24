@@ -20,7 +20,7 @@ url = "2"
 
 # Cross-process advisory file lock for FileMetaStore to prevent multi-coordinator
 # split-brain when the same metadata file is shared via NFS/shared volume.
-fs4 = "0.8"
+fs4 = "1.0"
 
 # Phase C.2 schema_store: Arrow IPC bytes go through MetaStore's &str
 # put/get via base64. Already in the lockfile via transitive deps so
