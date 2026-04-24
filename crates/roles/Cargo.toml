@@ -69,7 +69,7 @@ tokio-stream = { workspace = true }
 # Match coordinator's optional OTLP support. With feature parity the
 # monolith binary (Phase B) can enable otel via the same cargo flag.
 opentelemetry = { version = "0.27", optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "tonic", "trace"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 
