@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [lance-main, lanceforge-clean]
+    branches: [main]
   pull_request:
-    branches: [lance-main, lanceforge-clean]
+    branches: [main]
   # H20: nightly-tier jobs run on schedule. Covers the full Python E2E
   # matrix + extended bench regression; these are too expensive for
   # every PR but catch slow drifts between releases.

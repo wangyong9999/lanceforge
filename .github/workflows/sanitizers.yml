@@ -2,9 +2,9 @@ name: Sanitizers
 
 on:
   push:
-    branches: [lance-main, lanceforge-clean]
+    branches: [main]
   pull_request:
-    branches: [lance-main, lanceforge-clean]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
